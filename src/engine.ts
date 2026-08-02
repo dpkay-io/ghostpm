@@ -30,15 +30,16 @@ export class Engine {
         }
     }
 
+    private static readonly ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
     private async pollDeltas() {
         const lastSync = this.db.getMetadata('last_sync');
         let filter = '';
 
-        if (lastSync) {
+        if (lastSync && Engine.ISO_TIMESTAMP_RE.test(lastSync)) {
             if (this.config.vendor === 'github') {
                 filter = `updated:>=${lastSync}`;
             } else if (this.config.vendor === 'azure_devops') {
-                // Approximate wiql filter addition
                 filter = `SELECT [System.Id], [System.State], [System.Title], [System.AssignedTo], [System.ChangedDate] FROM workitems WHERE [System.ChangedDate] >= '${lastSync}'`;
             }
         }
@@ -47,12 +48,12 @@ export class Engine {
         const syncTime = new Date().toISOString();
 
         for (const task of tasks) {
-            // Optional: fetch full task details to get body and comments if needed,
-            // but usually list gives basic fields. For PM MCP, it's good to have it in cache.
-            // For now, just upsert what we got from getTasks. 
-            // In a real scenario we might call getTask(task.id) for full data if modified.
-            const fullTask = await this.adapter.getTask(task.id);
-            this.db.upsertTask(fullTask);
+            const cached = this.db.getTask(task.id);
+            if (cached) {
+                task.body = task.body ?? cached.body;
+                task.comments = task.comments ?? cached.comments;
+            }
+            this.db.upsertTask(task);
         }
 
         this.db.setMetadata('last_sync', syncTime);
@@ -120,8 +121,8 @@ export class Engine {
         if (strategy === 'drop') {
             this.db.deleteOutboxItem(outboxId);
         } else {
+            this.db.clearOutboxItemBaseTime(outboxId);
             this.db.updateOutboxItemStatus(outboxId, 'pending');
-            // Re-run sync to attempt push again
             this.sync().catch(e => console.error('Background sync failed', e));
         }
     }

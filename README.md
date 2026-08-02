@@ -38,7 +38,7 @@ GhostPM uses a highly resilient Outbox Sync pattern:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/ghostpm.git
+git clone https://github.com/dpkay-io/ghostpm.git
 cd ghostpm
 
 # Install dependencies
@@ -53,7 +53,7 @@ npm run build
 Navigate to any local Git repository where you want to enable GhostPM and run the initialization script.
 
 ```bash
-npx ghostpm init
+npx ghostpm-init
 ```
 *Note: You can run `node /path/to/ghostpm/dist/init.js` if not installed globally.*
 
@@ -83,7 +83,7 @@ Add GhostPM to your MCP client configuration (e.g., `mcp.json` or `claude_deskto
 
 Once connected, your AI Agent will have access to the following tools:
 
-- `query_tasks`: Fetches a tabular list of tasks based on a filter string.
+- `query_tasks`: Fetches a tabular list of all cached tasks.
 - `get_task`: Fetches the full JSON details of a specific task.
 - `start_task`: Transitions a task to "In Progress" and automatically checks out a new git branch (e.g., `task/<id>`).
 - `update_task`: Updates a task's state or adds a comment.
@@ -94,7 +94,7 @@ Once connected, your AI Agent will have access to the following tools:
 
 ## Testing
 
-GhostPM includes a comprehensive test suite (powered by Jest) with near 100% code coverage.
+GhostPM includes a test suite powered by Jest.
 
 ```bash
 npm run test

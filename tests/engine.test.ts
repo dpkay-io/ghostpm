@@ -69,18 +69,17 @@ describe('engine', () => {
         it('should poll deltas and process outbox', async () => {
             mockDb.getMetadata.mockReturnValue(undefined); // no last sync
             mockGitHubAdapter.getTasks.mockResolvedValue([{ id: '1', title: 'Task 1', state: 'open' }]);
-            mockGitHubAdapter.getTask.mockResolvedValue({ id: '1', title: 'Task 1', state: 'open' });
-            
+            mockDb.getTask.mockReturnValue(undefined); // no cached version
+
             mockDb.getPendingOutboxItems.mockReturnValue([
                 { id: 1, taskId: '2', action: 'updateTask', payload: JSON.stringify({ state: 'closed', baseUpdatedAt: '2023-01-01T00:00:00Z' }), status: 'pending' }
             ]);
-            mockGitHubAdapter.getTask.mockResolvedValueOnce({ id: '1', title: 'Task 1', state: 'open' }); // for pollDeltas
             mockGitHubAdapter.getTask.mockResolvedValueOnce({ id: '2', title: 'Task 2', state: 'open', updatedAt: '2023-01-01T00:00:00Z' }); // for conflict check
             mockGitHubAdapter.getTask.mockResolvedValueOnce({ id: '2', title: 'Task 2', state: 'closed' }); // for updating cache after mutate
 
             await engine.sync();
 
-            // verify poll deltas
+            // verify poll deltas — no individual getTask calls, upserts directly from getTasks
             expect(mockGitHubAdapter.getTasks).toHaveBeenCalledWith('');
             expect(mockDb.upsertTask).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
             expect(mockDb.setMetadata).toHaveBeenCalledWith('last_sync', expect.any(String));

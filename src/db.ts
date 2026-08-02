@@ -109,7 +109,7 @@ export class Db {
             INSERT INTO outbox (taskId, action, payload, status)
             VALUES (@taskId, @action, @payload, @status)
         `);
-        stmt.run({ ...item, status: item.status || 'pending' });
+        stmt.run({ ...item, status: item.status ?? 'pending' });
     }
 
     public getPendingOutboxItems(): OutboxItem[] {
@@ -127,9 +127,19 @@ export class Db {
         return stmt.get(taskId) as OutboxItem | undefined;
     }
 
-    public updateOutboxItemStatus(id: number, status: string, errorMsg?: string) {
+    public updateOutboxItemStatus(id: number, status: OutboxItem['status'], errorMsg?: string) {
         const stmt = this.db.prepare('UPDATE outbox SET status = @status, errorMsg = @errorMsg WHERE id = @id');
         stmt.run({ id, status, errorMsg: errorMsg || null });
+    }
+
+    public clearOutboxItemBaseTime(id: number) {
+        const stmt = this.db.prepare('SELECT payload FROM outbox WHERE id = ?');
+        const row = stmt.get(id) as { payload: string } | undefined;
+        if (!row) return;
+        const payload = JSON.parse(row.payload);
+        delete payload.baseUpdatedAt;
+        const update = this.db.prepare('UPDATE outbox SET payload = @payload WHERE id = @id');
+        update.run({ id, payload: JSON.stringify(payload) });
     }
 
     public deleteOutboxItem(id: number) {

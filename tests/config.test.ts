@@ -24,6 +24,19 @@ describe('config', () => {
             expect(() => loadConfig('/git/root')).toThrow(`.mcp-pm.yml not found at ${expectedPath}. Please run init first.`);
         });
 
+        it('should throw on invalid configuration', () => {
+            const invalidConfig = `
+vendor: invalid_vendor
+workflow:
+  states: [open]
+`;
+            (init.findGitRoot as jest.Mock).mockReturnValue('/git/root');
+            (fs.existsSync as jest.Mock).mockReturnValue(true);
+            (fs.readFileSync as jest.Mock).mockReturnValue(invalidConfig);
+
+            expect(() => loadConfig('/git/root')).toThrow('.mcp-pm.yml is invalid');
+        });
+
         it('should load and parse the configuration file', () => {
             const mockConfig = `
 vendor: github

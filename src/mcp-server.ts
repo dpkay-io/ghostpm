@@ -1,9 +1,12 @@
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Engine } from "./engine";
-import { exec } from "child_process";
-import * as os from "os";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 export class PmServer {
     private server: McpServer;
@@ -19,9 +22,7 @@ export class PmServer {
     }
 
     private registerTools() {
-        this.server.tool("query_tasks", {
-            filter_string: z.string().optional().describe("Filter string for querying tasks (currently unused, uses local cache)")
-        }, async ({ filter_string }) => {
+        this.server.tool("query_tasks", {}, async () => {
             const db = this.engine.getDb();
             const config = this.engine.getConfig();
             const tasks = db.getTasks();
@@ -72,21 +73,11 @@ export class PmServer {
             const startState = config.workflow?.transitions?.start_task || "in_progress";
             await this.engine.queueUpdateTask(task_id, startState);
             
-            // Side-effect: trigger local git branch creation
             let branchOutput = "";
             try {
                 const branchName = `task/${task_id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-                await new Promise((resolve, reject) => {
-                    exec(`git checkout -b ${branchName}`, (error, stdout, stderr) => {
-                        if (error) {
-                            console.error(`Git checkout failed: ${error.message}`);
-                            reject(error);
-                        } else {
-                            branchOutput = `\nChecked out new branch: ${branchName}`;
-                            resolve(stdout);
-                        }
-                    });
-                });
+                await execFileAsync('git', ['checkout', '-b', branchName]);
+                branchOutput = `\nChecked out new branch: ${branchName}`;
             } catch (err: any) {
                 branchOutput = `\n(Note: Failed to checkout git branch: ${err.message})`;
             }
@@ -107,27 +98,26 @@ export class PmServer {
         });
 
         this.server.tool("open_attachment", {
-            url: z.string().describe("URL of the attachment to open")
+            url: z.string().url().describe("URL of the attachment to open")
         }, async ({ url }) => {
-            const platform = os.platform();
-            let cmd = "";
-            if (platform === "win32") {
-                cmd = `start "" "${url}"`;
-            } else if (platform === "darwin") {
-                cmd = `open "${url}"`;
-            } else {
-                cmd = `xdg-open "${url}"`;
+            try {
+                let cmd: string;
+                let args: string[];
+                if (process.platform === "win32") {
+                    cmd = "cmd";
+                    args = ["/c", "start", "", url];
+                } else if (process.platform === "darwin") {
+                    cmd = "open";
+                    args = [url];
+                } else {
+                    cmd = "xdg-open";
+                    args = [url];
+                }
+                await execFileAsync(cmd, args);
+                return { content: [{ type: "text", text: `Attachment opened successfully in local browser.` }] };
+            } catch (error: any) {
+                return { content: [{ type: "text", text: `Failed to open attachment: ${error.message}` }] };
             }
-
-            return new Promise((resolve) => {
-                exec(cmd, (error) => {
-                    if (error) {
-                        resolve({ content: [{ type: "text", text: `Failed to open attachment: ${error.message}` }] });
-                    } else {
-                        resolve({ content: [{ type: "text", text: `Attachment opened successfully in local browser.` }] });
-                    }
-                });
-            });
         });
 
         this.server.tool("resolve_conflict", {
@@ -153,13 +143,12 @@ export class PmServer {
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
         console.error("Unified PM MCP Server running on stdio");
-        
-        // Also start the sync daemon
-        setInterval(() => {
+
+        const syncInterval = setInterval(() => {
             this.engine.sync().catch(e => console.error("Sync daemon error:", e));
         }, 5 * 60 * 1000);
-        
-        // Initial sync
+        syncInterval.unref();
+
         this.engine.sync().catch(e => console.error("Initial sync error:", e));
     }
 }

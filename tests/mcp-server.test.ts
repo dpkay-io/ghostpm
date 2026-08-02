@@ -2,11 +2,9 @@ import { PmServer } from '../src/mcp-server';
 import { Engine } from '../src/engine';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as child_process from 'child_process';
-import * as os from 'os';
 
 jest.mock('../src/engine');
 jest.mock('child_process');
-jest.mock('os');
 
 describe('mcp-server', () => {
     let pmServer: PmServer;
@@ -21,7 +19,7 @@ describe('mcp-server', () => {
         mockConnect = jest.spyOn(McpServer.prototype, 'connect').mockResolvedValue(undefined as any);
 
         mockEngine = new Engine() as jest.Mocked<Engine>;
-        (Engine as jest.Mock).mockImplementation(() => mockEngine);
+        (Engine as unknown as jest.Mock).mockImplementation(() => mockEngine);
 
         pmServer = new PmServer();
     });
@@ -60,7 +58,7 @@ describe('mcp-server', () => {
             mockEngine.getDb.mockReturnValue(mockDb as any);
             mockEngine.getConfig.mockReturnValue(mockConfig as any);
 
-            const result = await toolHandler({ filter_string: '' });
+            const result = await toolHandler({});
             
             expect(result.content[0].type).toBe('text');
             expect(result.content[0].text).toContain('| id | state | title | assignee |');
@@ -106,24 +104,26 @@ describe('mcp-server', () => {
         it('should queue update task and trigger git branch', async () => {
             mockEngine.getConfig.mockReturnValue({ workflow: { transitions: { start_task: 'in_progress' } } } as any);
             mockEngine.queueUpdateTask.mockResolvedValue(undefined);
-            
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => {
-                cb(null, 'checked out');
+
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(null, 'checked out', '');
             });
 
             const result = await toolHandler({ task_id: 'abc-123' });
-            
+
             expect(mockEngine.queueUpdateTask).toHaveBeenCalledWith('abc-123', 'in_progress');
-            expect(child_process.exec).toHaveBeenCalledWith('git checkout -b task/abc-123', expect.any(Function));
+            expect(child_process.execFile).toHaveBeenCalledWith('git', ['checkout', '-b', 'task/abc-123'], expect.any(Function));
             expect(result.content[0].text).toContain('Checked out new branch: task/abc-123');
         });
-        
+
         it('should handle git error gracefully', async () => {
             mockEngine.getConfig.mockReturnValue({ workflow: { transitions: { start_task: 'in_progress' } } } as any);
             mockEngine.queueUpdateTask.mockResolvedValue(undefined);
-            
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => {
-                cb(new Error('git error'), '');
+
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(new Error('git error'), '', '');
             });
 
             const result = await toolHandler({ task_id: '1' });
@@ -154,42 +154,59 @@ describe('mcp-server', () => {
 
     describe('open_attachment tool', () => {
         let toolHandler: Function;
+        const originalPlatform = process.platform;
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'open_attachment');
             toolHandler = call[2];
         });
 
+        afterEach(() => {
+            Object.defineProperty(process, 'platform', { value: originalPlatform });
+        });
+
         it('should open url on windows', async () => {
-            (os.platform as jest.Mock).mockReturnValue('win32');
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => cb(null));
-            
+            Object.defineProperty(process, 'platform', { value: 'win32' });
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(null, '', '');
+            });
+
             const result = await toolHandler({ url: 'http://example.com' });
-            
-            expect(child_process.exec).toHaveBeenCalledWith('start "" "http://example.com"', expect.any(Function));
+
+            expect(child_process.execFile).toHaveBeenCalledWith('cmd', ['/c', 'start', '', 'http://example.com'], expect.any(Function));
             expect(result.content[0].text).toBe('Attachment opened successfully in local browser.');
         });
 
         it('should open url on mac', async () => {
-            (os.platform as jest.Mock).mockReturnValue('darwin');
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => cb(null));
-            
+            Object.defineProperty(process, 'platform', { value: 'darwin' });
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(null, '', '');
+            });
+
             await toolHandler({ url: 'http://example.com' });
-            expect(child_process.exec).toHaveBeenCalledWith('open "http://example.com"', expect.any(Function));
+            expect(child_process.execFile).toHaveBeenCalledWith('open', ['http://example.com'], expect.any(Function));
         });
 
         it('should open url on linux', async () => {
-            (os.platform as jest.Mock).mockReturnValue('linux');
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => cb(null));
-            
+            Object.defineProperty(process, 'platform', { value: 'linux' });
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(null, '', '');
+            });
+
             await toolHandler({ url: 'http://example.com' });
-            expect(child_process.exec).toHaveBeenCalledWith('xdg-open "http://example.com"', expect.any(Function));
+            expect(child_process.execFile).toHaveBeenCalledWith('xdg-open', ['http://example.com'], expect.any(Function));
         });
 
         it('should handle error', async () => {
-            (os.platform as jest.Mock).mockReturnValue('linux');
-            (child_process.exec as unknown as jest.Mock).mockImplementation((cmd, cb) => cb(new Error('xdg-open failed')));
-            
+            Object.defineProperty(process, 'platform', { value: 'linux' });
+            (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: any[]) => {
+                const cb = args[args.length - 1];
+                if (typeof cb === 'function') cb(new Error('xdg-open failed'), '', '');
+            });
+
             const result = await toolHandler({ url: 'http://example.com' });
             expect(result.content[0].text).toBe('Failed to open attachment: xdg-open failed');
         });

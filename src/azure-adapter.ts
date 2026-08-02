@@ -34,6 +34,7 @@ export class AzureAdapter implements PmAdapter {
     async getTask(taskId: string): Promise<Task> {
         const args = ['boards', 'work-item', 'show', '--id', taskId];
         const output = await runCli('az', args);
+        if (!output) throw new Error(`No data returned for work item ${taskId}`);
         const item = JSON.parse(output);
         const fields = item.fields;
         

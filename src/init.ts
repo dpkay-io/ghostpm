@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import * as fs from 'fs';
 import * as path from 'path';
 import { runCli } from './cli';
@@ -140,4 +141,11 @@ notifications:
 
     fs.writeFileSync(configPath, yamlConfig, 'utf8');
     console.log(`Created .mcp-pm.yml at ${configPath}`);
+}
+
+if (require.main === module) {
+    initMcpPm().catch(e => {
+        console.error(e.message);
+        process.exit(1);
+    });
 }

@@ -15,6 +15,7 @@ export class GitHubAdapter implements PmAdapter {
     async getTask(taskId: string): Promise<Task> {
         const args = ['issue', 'view', taskId, '--json', 'number,state,title,assignees,body,comments,updatedAt'];
         const output = await runCli('gh', args);
+        if (!output) throw new Error(`No data returned for issue ${taskId}`);
         const issue = JSON.parse(output);
         return this.mapToTask(issue);
     }
