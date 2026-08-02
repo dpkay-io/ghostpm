@@ -9,6 +9,8 @@ export class Engine {
     private adapter: PmAdapter;
     private config: McpPmConfig;
     private isSyncing: boolean = false;
+    private syncRequested: boolean = false;
+    private activeSyncPromise: Promise<void> = Promise.resolve();
 
     public getDb(): Db { return this.db; }
     public getConfig(): McpPmConfig { return this.config; }
@@ -19,12 +21,23 @@ export class Engine {
         this.adapter = this.config.vendor === 'azure_devops' ? new AzureAdapter() : new GitHubAdapter();
     }
 
-    public async sync() {
-        if (this.isSyncing) return;
+    public sync(): Promise<void> {
+        if (this.isSyncing) {
+            this.syncRequested = true;
+            return this.activeSyncPromise;
+        }
+        this.activeSyncPromise = this.runSyncLoop();
+        return this.activeSyncPromise;
+    }
+
+    private async runSyncLoop() {
         this.isSyncing = true;
         try {
-            await this.pollDeltas();
-            await this.processOutbox();
+            do {
+                this.syncRequested = false;
+                await this.pollDeltas();
+                await this.processOutbox();
+            } while (this.syncRequested);
         } finally {
             this.isSyncing = false;
         }
@@ -40,7 +53,8 @@ export class Engine {
             if (this.config.vendor === 'github') {
                 filter = `updated:>=${lastSync}`;
             } else if (this.config.vendor === 'azure_devops') {
-                filter = `SELECT [System.Id], [System.State], [System.Title], [System.AssignedTo], [System.ChangedDate] FROM workitems WHERE [System.ChangedDate] >= '${lastSync}'`;
+                const dateOnly = lastSync.slice(0, 10);
+                filter = `SELECT [System.Id], [System.State], [System.Title], [System.AssignedTo], [System.ChangedDate] FROM workitems WHERE [System.ChangedDate] >= '${dateOnly}'`;
             }
         }
 

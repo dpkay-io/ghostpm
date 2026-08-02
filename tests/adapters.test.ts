@@ -110,8 +110,7 @@ describe('Adapters', () => {
 
         it('should update task', async () => {
             await adapter.updateTask('1', 'Closed', 'closing note');
-            expect(runCli).toHaveBeenCalledWith('az', ['boards', 'work-item', 'discussion', 'add', '--id', '1', '--content', 'closing note']);
-            expect(runCli).toHaveBeenCalledWith('az', ['boards', 'work-item', 'update', '--id', '1', '--state', 'Closed']);
+            expect(runCli).toHaveBeenCalledWith('az', ['boards', 'work-item', 'update', '--id', '1', '--state', 'Closed', '--fields', 'System.History=closing note']);
         });
 
         it('should update task state only', async () => {
@@ -121,7 +120,7 @@ describe('Adapters', () => {
 
         it('should update task comment only', async () => {
             await adapter.updateTask('1', undefined, 'closing note');
-            expect(runCli).toHaveBeenCalledWith('az', ['boards', 'work-item', 'discussion', 'add', '--id', '1', '--content', 'closing note']);
+            expect(runCli).toHaveBeenCalledWith('az', ['boards', 'work-item', 'update', '--id', '1', '--fields', 'System.History=closing note']);
         });
     });
 });

@@ -150,4 +150,8 @@ export class Db {
     public clearCache() {
         this.db.exec('DELETE FROM tasks');
     }
+
+    public close() {
+        this.db.close();
+    }
 }

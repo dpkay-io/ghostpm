@@ -1,18 +1,21 @@
 {
   "name": "ghostpm",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "The invisible, zero-latency PM interface for AI Agents. Connects to GitHub Issues and Azure DevOps via MCP.",
   "main": "dist/mcp-server.js",
   "bin": {
-    "ghostpm": "./dist/mcp-server.js",
-    "ghostpm-init": "./dist/init.js"
+    "ghostpm": "./dist/cli-main.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "start": "node dist/mcp-server.js",
-    "init": "node dist/init.js"
+    "start": "node dist/cli-main.js serve",
+    "init": "node dist/cli-main.js init"
   },
   "keywords": ["mcp", "project-management", "github-issues", "azure-devops", "agentic-coding"],
   "author": "dpkay",

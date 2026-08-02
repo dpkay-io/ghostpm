@@ -31,8 +31,9 @@ export class GitHubAdapter implements PmAdapter {
             } else if (state === 'open') {
                 await runCli('gh', ['issue', 'reopen', taskId]);
             } else {
-                // If the state is a label (like in_progress), we would add the label.
-                // Assuming state mapping is done via labels for now if not closed/open.
+                try {
+                    await runCli('gh', ['label', 'create', state, '--force']);
+                } catch { /* label may already exist */ }
                 await runCli('gh', ['issue', 'edit', taskId, '--add-label', state]);
             }
         }

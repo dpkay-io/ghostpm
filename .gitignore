@@ -4,3 +4,4 @@ coverage/
 .mcp-pm.db
 .mcp-pm.yml
 mcp.json
+.claude/settings.local.json

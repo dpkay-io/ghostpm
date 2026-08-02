@@ -52,11 +52,22 @@ export class AzureAdapter implements PmAdapter {
     }
 
     async updateTask(taskId: string, state?: string, comment?: string): Promise<void> {
+        const args = ['boards', 'work-item', 'update', '--id', taskId];
+        const fields: string[] = [];
+
         if (comment) {
-            await runCli('az', ['boards', 'work-item', 'discussion', 'add', '--id', taskId, '--content', comment]);
+            fields.push(`System.History=${comment}`);
         }
         if (state) {
-            await runCli('az', ['boards', 'work-item', 'update', '--id', taskId, '--state', state]);
+            args.push('--state', state);
+        }
+
+        if (fields.length > 0) {
+            args.push('--fields', ...fields);
+        }
+
+        if (state || comment) {
+            await runCli('az', args);
         }
     }
 }
