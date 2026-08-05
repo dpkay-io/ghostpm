@@ -30,12 +30,12 @@ describe('mcp-server', () => {
     });
 
     it('should register tools', () => {
-        expect(mockTool).toHaveBeenCalledWith('query_tasks', expect.any(Object), expect.any(Function));
-        expect(mockTool).toHaveBeenCalledWith('get_task', expect.any(Object), expect.any(Function));
-        expect(mockTool).toHaveBeenCalledWith('start_task', expect.any(Object), expect.any(Function));
-        expect(mockTool).toHaveBeenCalledWith('update_task', expect.any(Object), expect.any(Function));
-        expect(mockTool).toHaveBeenCalledWith('open_attachment', expect.any(Object), expect.any(Function));
-        expect(mockTool).toHaveBeenCalledWith('resolve_conflict', expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('query_tasks', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('get_task', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('start_task', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('update_task', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('open_attachment', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('resolve_conflict', expect.any(String), expect.any(Object), expect.any(Function));
     });
 
     describe('query_tasks tool', () => {
@@ -43,7 +43,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'query_tasks');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         it('should format tasks as markdown table', async () => {
@@ -71,7 +71,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'get_task');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         it('should return task not found', async () => {
@@ -98,7 +98,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'start_task');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         it('should queue update task and trigger git branch', async () => {
@@ -136,7 +136,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'update_task');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         it('should return error if no state and comment', async () => {
@@ -158,7 +158,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'open_attachment');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         afterEach(() => {
@@ -217,7 +217,7 @@ describe('mcp-server', () => {
 
         beforeEach(() => {
             const call = mockTool.mock.calls.find((c: any) => c[0] === 'resolve_conflict');
-            toolHandler = call[2];
+            toolHandler = call[3];
         });
 
         it('should return error if no conflict found', async () => {
