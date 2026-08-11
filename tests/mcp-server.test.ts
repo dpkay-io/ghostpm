@@ -30,6 +30,8 @@ describe('mcp-server', () => {
     });
 
     it('should register tools', () => {
+        expect(mockTool).toHaveBeenCalledWith('get_project_state', expect.any(String), expect.any(Object), expect.any(Function));
+        expect(mockTool).toHaveBeenCalledWith('set_sprint', expect.any(String), expect.any(Object), expect.any(Function));
         expect(mockTool).toHaveBeenCalledWith('query_tasks', expect.any(String), expect.any(Object), expect.any(Function));
         expect(mockTool).toHaveBeenCalledWith('get_task', expect.any(String), expect.any(Object), expect.any(Function));
         expect(mockTool).toHaveBeenCalledWith('start_task', expect.any(String), expect.any(Object), expect.any(Function));
@@ -57,12 +59,47 @@ describe('mcp-server', () => {
             };
             mockEngine.getDb.mockReturnValue(mockDb as any);
             mockEngine.getConfig.mockReturnValue(mockConfig as any);
+            mockEngine.getProjectState.mockReturnValue({ vendor: 'github', currentUser: null, activeSprint: null, lastSync: null, activeTask: null });
 
             const result = await toolHandler({});
-            
+
             expect(result.content[0].type).toBe('text');
             expect(result.content[0].text).toContain('| id | state | title | assignee |');
             expect(result.content[0].text).toContain('| 1 | open | Task 1 | john |');
+        });
+
+        it('should filter by active sprint', async () => {
+            const mockDb = {
+                getTasks: jest.fn().mockReturnValue([
+                    { id: '1', state: 'open', title: 'Sprint task', assignee: 'john', milestone: 'Sprint 1' },
+                    { id: '2', state: 'open', title: 'Other task', assignee: 'john', milestone: 'Sprint 2' },
+                ])
+            };
+            mockEngine.getDb.mockReturnValue(mockDb as any);
+            mockEngine.getConfig.mockReturnValue({ views: { list_columns: ['id', 'state', 'title'] } } as any);
+            mockEngine.getProjectState.mockReturnValue({ vendor: 'github', currentUser: null, activeSprint: { name: 'Sprint 1' }, lastSync: null, activeTask: null });
+
+            const result = await toolHandler({});
+
+            expect(result.content[0].text).toContain('Sprint task');
+            expect(result.content[0].text).not.toContain('Other task');
+        });
+
+        it('should show all tasks when sprint=all', async () => {
+            const mockDb = {
+                getTasks: jest.fn().mockReturnValue([
+                    { id: '1', state: 'open', title: 'T1', milestone: 'Sprint 1' },
+                    { id: '2', state: 'open', title: 'T2', milestone: 'Sprint 2' },
+                ])
+            };
+            mockEngine.getDb.mockReturnValue(mockDb as any);
+            mockEngine.getConfig.mockReturnValue({ views: { list_columns: ['id', 'title'] } } as any);
+            mockEngine.getProjectState.mockReturnValue({ vendor: 'github', currentUser: null, activeSprint: { name: 'Sprint 1' }, lastSync: null, activeTask: null });
+
+            const result = await toolHandler({ sprint: 'all' });
+
+            expect(result.content[0].text).toContain('T1');
+            expect(result.content[0].text).toContain('T2');
         });
     });
 

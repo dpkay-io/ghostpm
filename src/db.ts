@@ -54,6 +54,22 @@ export class Db {
                 value TEXT NOT NULL
             );
         `);
+        this.migrateSchema();
+    }
+
+    private migrateSchema() {
+        const cols = this.db.pragma('table_info(tasks)') as { name: string }[];
+        const existing = new Set(cols.map(c => c.name));
+        const additions: [string, string][] = [
+            ['labels', 'TEXT'],
+            ['milestone', 'TEXT'],
+            ['url', 'TEXT'],
+        ];
+        for (const [col, type] of additions) {
+            if (!existing.has(col)) {
+                this.db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`);
+            }
+        }
     }
 
     public getMetadata(key: string): string | undefined {
@@ -71,6 +87,10 @@ export class Db {
         stmt.run({ key, value });
     }
 
+    public deleteMetadata(key: string) {
+        this.db.prepare('DELETE FROM metadata WHERE key = ?').run(key);
+    }
+
     public getTasks(): Task[] {
         const stmt = this.db.prepare('SELECT * FROM tasks');
         return stmt.all() as Task[];
@@ -83,15 +103,18 @@ export class Db {
 
     public upsertTask(task: Task) {
         const stmt = this.db.prepare(`
-            INSERT INTO tasks (id, title, state, assignee, body, comments, updatedAt)
-            VALUES (@id, @title, @state, @assignee, @body, @comments, @updatedAt)
+            INSERT INTO tasks (id, title, state, assignee, body, comments, updatedAt, labels, milestone, url)
+            VALUES (@id, @title, @state, @assignee, @body, @comments, @updatedAt, @labels, @milestone, @url)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 state = excluded.state,
                 assignee = excluded.assignee,
                 body = excluded.body,
                 comments = excluded.comments,
-                updatedAt = excluded.updatedAt
+                updatedAt = excluded.updatedAt,
+                labels = excluded.labels,
+                milestone = excluded.milestone,
+                url = excluded.url
         `);
         stmt.run({
             id: task.id,
@@ -100,7 +123,10 @@ export class Db {
             assignee: task.assignee ?? null,
             body: task.body ?? null,
             comments: task.comments ?? null,
-            updatedAt: task.updatedAt ?? null
+            updatedAt: task.updatedAt ?? null,
+            labels: task.labels ?? null,
+            milestone: task.milestone ?? null,
+            url: task.url ?? null,
         });
     }
 

@@ -22,12 +22,14 @@ Use these tools whenever the user:
 
 ## How to use
 
-1. **List tasks**: Call \`query_tasks\` — returns a markdown table of all cached tasks. Use this as the default when user asks to see tasks.
-2. **Task details**: Call \`get_task\` with the task ID — returns full details including description and comments.
-3. **Start work**: Call \`start_task\` with the task ID — transitions the task to "in progress" and creates a git branch \`task/<id>\`.
-4. **Update task**: Call \`update_task\` with task ID and optional state/comment — changes state or adds a comment.
-5. **Open links**: Call \`open_attachment\` with a URL — opens it in the user's browser.
-6. **Resolve conflicts**: If a sync conflict is reported, call \`resolve_conflict\` — lets user pick local or remote changes.
+1. **Project context**: Call \`get_project_state\` at session start — returns vendor, user, active sprint, task counts, and sync status. This is the first thing to check.
+2. **Set sprint scope**: Call \`set_sprint\` to activate a sprint/milestone. Once set, \`query_tasks\` defaults to that sprint's tasks.
+3. **List tasks**: Call \`query_tasks\` — returns a markdown table. Filters by active sprint unless you pass sprint='all'. Supports assignee filter with '@me'.
+4. **Task details**: Call \`get_task\` with the task ID — returns full details including description and comments.
+5. **Start work**: Call \`start_task\` with the task ID — transitions the task to "in progress" and creates a git branch \`task/<id>\`.
+6. **Update task**: Call \`update_task\` with task ID and optional state/comment — changes state or adds a comment.
+7. **Open links**: Call \`open_attachment\` with a URL — opens it in the user's browser.
+8. **Resolve conflicts**: If a sync conflict is reported, call \`resolve_conflict\` — lets user pick local or remote changes.
 
 ## Important
 
@@ -35,7 +37,8 @@ Use these tools whenever the user:
 - Task IDs match the remote system (GitHub issue numbers or Azure DevOps work item IDs).
 - When the user says a bare number like "#42" or "42", treat it as a task ID.
 - Do NOT ask the user to install or configure anything — GhostPM is already set up for this repo.
-- Prefer showing results directly rather than explaining what you could do.`;
+- Prefer showing results directly rather than explaining what you could do.
+- Project state (active sprint, user identity) persists across sessions in the local database — all sessions share the same state.`;
 
 export class PmServer {
     private server: McpServer;
@@ -50,27 +53,112 @@ export class PmServer {
         this.registerTools();
     }
 
+    private renderTaskTable(tasks: any[], columns: string[]): string {
+        let markdown = `| ${columns.join(" | ")} |\n`;
+        markdown += `| ${columns.map(() => "---").join(" | ")} |\n`;
+        for (const task of tasks) {
+            const row = columns.map(col => {
+                const val = (task as any)[col];
+                return val !== undefined && val !== null ? String(val).replace(/\|/g, "\\|") : "";
+            });
+            markdown += `| ${row.join(" | ")} |\n`;
+        }
+        return markdown;
+    }
+
     private registerTools() {
-        this.server.tool("query_tasks", "List all tasks/issues from the project's issue tracker. Returns a markdown table with ID, state, title, and assignee. Use when the user asks to see tasks, issues, backlog, or project status.", {}, async () => {
+        this.server.tool("get_project_state", "Get the current project context: vendor, user identity, active sprint, task summary, and sync status. Call this at the start of a session to understand the project state.", {}, async () => {
+            const state = this.engine.getProjectState();
+
+            let currentBranch: string | null = null;
+            try {
+                const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
+                currentBranch = stdout.trim();
+            } catch { /* not in a git repo or git not available */ }
+
+            const taskMatch = currentBranch?.match(/^task\/(.+)$/);
+            if (taskMatch) state.activeTask = taskMatch[1];
+
+            const summary = this.engine.getSprintSummary(state.activeSprint?.name);
+            const availableSprints = this.engine.getAvailableSprints();
+
+            const lines = [
+                `**Vendor:** ${state.vendor}`,
+                `**User:** ${state.currentUser || '_not detected yet — will resolve on next sync_'}`,
+                `**Active Sprint:** ${state.activeSprint?.name || '_none set_'}`,
+                state.activeSprint?.endDate ? `**Sprint Ends:** ${state.activeSprint.endDate}` : null,
+                `**Current Branch:** ${currentBranch || '_unknown_'}`,
+                state.activeTask ? `**Active Task:** #${state.activeTask}` : null,
+                `**Last Sync:** ${state.lastSync || '_never_'}`,
+                '',
+                `**Tasks:** ${summary.total} total` + (Object.keys(summary.byState).length
+                    ? ' — ' + Object.entries(summary.byState).map(([s, n]) => `${n} ${s}`).join(', ')
+                    : ''),
+                availableSprints.length > 0
+                    ? `**Available Sprints:** ${availableSprints.join(', ')}`
+                    : null,
+            ].filter(Boolean);
+
+            return { content: [{ type: "text", text: lines.join('\n') }] };
+        });
+
+        this.server.tool("set_sprint", "Set or clear the active sprint/milestone. When set, query_tasks defaults to showing only that sprint's tasks. Omit sprint_name to list available sprints.", {
+            sprint_name: z.string().optional().describe("Sprint/milestone name to activate. Omit to list available sprints. Use '__clear__' to unset.")
+        }, async ({ sprint_name }) => {
+            if (!sprint_name) {
+                const sprints = this.engine.getAvailableSprints();
+                if (sprints.length === 0) return { content: [{ type: "text", text: "No sprints/milestones found in cached tasks. Sync first." }] };
+                const active = this.engine.getProjectState().activeSprint?.name;
+                const list = sprints.map(s => `${s === active ? '→ ' : '  '}${s}`).join('\n');
+                return { content: [{ type: "text", text: `Available sprints:\n${list}` }] };
+            }
+            if (sprint_name === '__clear__') {
+                this.engine.setActiveSprint(null);
+                return { content: [{ type: "text", text: "Active sprint cleared." }] };
+            }
+            this.engine.setActiveSprint({ name: sprint_name });
+            const summary = this.engine.getSprintSummary(sprint_name);
+            return { content: [{ type: "text", text: `Active sprint set to **${sprint_name}** (${summary.total} tasks: ${Object.entries(summary.byState).map(([s, n]) => `${n} ${s}`).join(', ')})` }] };
+        });
+
+        this.server.tool("query_tasks", "List tasks/issues from the project's issue tracker. Returns a markdown table. Defaults to active sprint if one is set; pass sprint='all' to see everything.", {
+            sprint: z.string().optional().describe("Filter by sprint/milestone. Defaults to active sprint. Use 'all' to show all tasks."),
+            assignee: z.string().optional().describe("Filter by assignee. Use '@me' for the current user."),
+        }, async ({ sprint, assignee }) => {
             const db = this.engine.getDb();
             const config = this.engine.getConfig();
-            const tasks = db.getTasks();
-            
-            const columns = config.views.list_columns || ["id", "state", "title", "assignee"];
-            
-            let markdown = `| ${columns.join(" | ")} |\n`;
-            markdown += `| ${columns.map(() => "---").join(" | ")} |\n`;
-            
-            for (const task of tasks) {
-                const row = columns.map(col => {
-                    const val = (task as any)[col];
-                    return val !== undefined && val !== null ? String(val).replace(/\|/g, "\\|") : "";
-                });
-                markdown += `| ${row.join(" | ")} |\n`;
+            let tasks = db.getTasks();
+
+            const activeSprint = this.engine.getProjectState().activeSprint;
+            if (sprint !== 'all') {
+                const filterSprint = sprint || activeSprint?.name;
+                if (filterSprint) {
+                    tasks = tasks.filter(t => t.milestone === filterSprint);
+                }
             }
 
+            if (assignee) {
+                const resolvedAssignee = assignee === '@me'
+                    ? this.engine.getProjectState().currentUser
+                    : assignee;
+                if (resolvedAssignee) {
+                    tasks = tasks.filter(t => t.assignee === resolvedAssignee);
+                }
+            }
+
+            const columns = config.views.list_columns || ["id", "state", "title", "assignee"];
+
+            if (tasks.length === 0) {
+                const context = sprint === 'all' ? '' : activeSprint?.name ? ` in sprint "${activeSprint.name}"` : '';
+                return { content: [{ type: "text", text: `No tasks found${context}.` }] };
+            }
+
+            const header = sprint !== 'all' && activeSprint?.name && !sprint
+                ? `_Showing sprint: ${activeSprint.name}_\n\n`
+                : '';
+
             return {
-                content: [{ type: "text", text: markdown }]
+                content: [{ type: "text", text: header + this.renderTaskTable(tasks, columns) }]
             };
         });
 

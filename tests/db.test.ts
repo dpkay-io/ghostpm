@@ -31,11 +31,18 @@ describe('db', () => {
         it('should set and get metadata', () => {
             db.setMetadata('key1', 'value1');
             expect(db.getMetadata('key1')).toBe('value1');
-            
+
             db.setMetadata('key1', 'value2'); // upsert
             expect(db.getMetadata('key1')).toBe('value2');
-            
+
             expect(db.getMetadata('unknown')).toBeUndefined();
+        });
+
+        it('should delete metadata', () => {
+            db.setMetadata('key1', 'value1');
+            expect(db.getMetadata('key1')).toBe('value1');
+            db.deleteMetadata('key1');
+            expect(db.getMetadata('key1')).toBeUndefined();
         });
     });
 
@@ -48,26 +55,38 @@ describe('db', () => {
                 assignee: 'john',
                 body: 'body',
                 comments: 'comments',
-                updatedAt: '2023-01-01T00:00:00Z'
+                updatedAt: '2023-01-01T00:00:00Z',
+                labels: '["bug"]',
+                milestone: 'Sprint 1',
+                url: 'https://github.com/repo/issues/123',
             };
-            
+
             db.upsertTask(task);
-            
+
             const fetched = db.getTask('123');
             expect(fetched).toEqual(task);
-            
+
             const allTasks = db.getTasks();
             expect(allTasks).toHaveLength(1);
             expect(allTasks[0]).toEqual(task);
-            
+
             // Upsert again
             const updatedTask = { ...task, state: 'closed' };
             db.upsertTask(updatedTask);
             expect(db.getTask('123')?.state).toBe('closed');
-            
+
             // clear cache
             db.clearCache();
             expect(db.getTasks()).toHaveLength(0);
+        });
+
+        it('should handle null optional fields', () => {
+            const task = { id: '1', title: 'Minimal', state: 'open' };
+            db.upsertTask(task);
+            const fetched = db.getTask('1')!;
+            expect(fetched.labels).toBeNull();
+            expect(fetched.milestone).toBeNull();
+            expect(fetched.url).toBeNull();
         });
     });
 

@@ -20,7 +20,9 @@ This repo has GhostPM connected to its issue tracker. Use the ghostpm MCP tools 
 
 | Intent | Tool | Example |
 |--------|------|---------|
-| See all tasks | \`query_tasks\` | "show my tasks" |
+| Project context | \`get_project_state\` | "what sprint are we in?" |
+| Set sprint | \`set_sprint\` | "switch to Sprint 5" |
+| See tasks | \`query_tasks\` | "show my tasks" |
 | Task details | \`get_task\` | "what's #42 about?" |
 | Start working | \`start_task\` | "pick up issue 7" |
 | Update/close | \`update_task\` | "close #15" |
@@ -28,7 +30,8 @@ This repo has GhostPM connected to its issue tracker. Use the ghostpm MCP tools 
 
 ## Proactive workflow
 
-- **Before starting dev work**: Query tasks to find what's assigned. Don't start coding without context.
+- **Session start**: Call \`get_project_state\` to understand the current sprint, user, and task state.
+- **Before starting dev work**: Query tasks (filtered by sprint and assignee) to find what's assigned. Don't start coding without context.
 - **After creating a PR**: Update the task state to "in_review" via update_task.
 - **When a task is done**: Close it via update_task with state "closed".
 - **Conflict?**: If an update reports a conflict, explain both versions and ask which to keep, then call resolve_conflict.
@@ -39,4 +42,5 @@ This repo has GhostPM connected to its issue tracker. Use the ghostpm MCP tools 
 - Task IDs are issue numbers (GitHub) or work item IDs (Azure DevOps).
 - Bare numbers like "#42" or "42" are task IDs.
 - Show results directly, don't narrate what you're about to do.
+- Project state (sprint, user) persists across sessions — all sessions share it.
 `;

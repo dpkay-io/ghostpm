@@ -1,5 +1,5 @@
 import { Db, OutboxItem } from './db';
-import { PmAdapter, Task } from './pm-adapter';
+import { PmAdapter, Task, SprintInfo, ProjectState } from './pm-adapter';
 import { loadConfig, McpPmConfig } from './config';
 import { GitHubAdapter } from './github-adapter';
 import { AzureAdapter } from './azure-adapter';
@@ -19,6 +19,50 @@ export class Engine {
         this.config = loadConfig(currentPath);
         this.db = new Db(currentPath);
         this.adapter = this.config.vendor === 'azure_devops' ? new AzureAdapter() : new GitHubAdapter();
+    }
+
+    public getProjectState(): ProjectState {
+        const sprintRaw = this.db.getMetadata('active_sprint');
+        return {
+            vendor: this.config.vendor,
+            currentUser: this.db.getMetadata('current_user') ?? null,
+            activeSprint: sprintRaw ? JSON.parse(sprintRaw) : null,
+            lastSync: this.db.getMetadata('last_sync') ?? null,
+            activeTask: null,
+        };
+    }
+
+    public setActiveSprint(sprint: SprintInfo | null) {
+        if (sprint) {
+            this.db.setMetadata('active_sprint', JSON.stringify(sprint));
+        } else {
+            this.db.deleteMetadata('active_sprint');
+        }
+    }
+
+    public setCurrentUser(user: string) {
+        this.db.setMetadata('current_user', user);
+    }
+
+    public getAvailableSprints(): string[] {
+        const tasks = this.db.getTasks();
+        const milestones = new Set<string>();
+        for (const t of tasks) {
+            if (t.milestone) milestones.add(t.milestone);
+        }
+        return Array.from(milestones).sort();
+    }
+
+    public getSprintSummary(sprintName?: string): { total: number; byState: Record<string, number> } {
+        let tasks = this.db.getTasks();
+        if (sprintName) {
+            tasks = tasks.filter(t => t.milestone === sprintName);
+        }
+        const byState: Record<string, number> = {};
+        for (const t of tasks) {
+            byState[t.state] = (byState[t.state] || 0) + 1;
+        }
+        return { total: tasks.length, byState };
     }
 
     public sync(): Promise<void> {
@@ -54,7 +98,7 @@ export class Engine {
                 filter = `updated:>=${lastSync}`;
             } else if (this.config.vendor === 'azure_devops') {
                 const dateOnly = lastSync.slice(0, 10);
-                filter = `SELECT [System.Id], [System.State], [System.Title], [System.AssignedTo], [System.ChangedDate] FROM workitems WHERE [System.ChangedDate] >= '${dateOnly}'`;
+                filter = `SELECT [System.Id], [System.State], [System.Title], [System.AssignedTo], [System.ChangedDate], [System.Tags], [System.IterationPath] FROM workitems WHERE [System.ChangedDate] >= '${dateOnly}'`;
             }
         }
 
@@ -71,6 +115,17 @@ export class Engine {
         }
 
         this.db.setMetadata('last_sync', syncTime);
+
+        if (!this.db.getMetadata('current_user')) {
+            this.detectCurrentUser().catch(e => console.error('User detection failed:', e));
+        }
+    }
+
+    private async detectCurrentUser() {
+        try {
+            const user = await this.adapter.getCurrentUser();
+            if (user) this.db.setMetadata('current_user', user);
+        } catch { /* non-fatal */ }
     }
 
     private async processOutbox() {

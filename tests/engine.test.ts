@@ -27,10 +27,10 @@ describe('engine', () => {
         (Db as jest.Mock).mockImplementation(() => mockDb);
 
         mockGitHubAdapter = new GitHubAdapter() as jest.Mocked<GitHubAdapter>;
-        (GitHubAdapter as jest.Mock).mockImplementation(() => mockGitHubAdapter);
+        (GitHubAdapter as unknown as jest.Mock).mockImplementation(() => mockGitHubAdapter);
 
         mockAzureAdapter = new AzureAdapter() as jest.Mocked<AzureAdapter>;
-        (AzureAdapter as jest.Mock).mockImplementation(() => mockAzureAdapter);
+        (AzureAdapter as unknown as jest.Mock).mockImplementation(() => mockAzureAdapter);
         
         jest.clearAllMocks(); // Clear the instantiations above so we can assert on Engine initialization
         engine = new Engine();
@@ -156,6 +156,83 @@ describe('engine', () => {
             engine.resolveConflict(1, 'force_push');
             expect(mockDb.updateOutboxItemStatus).toHaveBeenCalledWith(1, 'pending');
             expect(syncSpy).toHaveBeenCalled();
+        });
+    });
+
+    describe('project state', () => {
+        it('should return project state from metadata', () => {
+            mockDb.getMetadata.mockImplementation((key: string) => {
+                if (key === 'current_user') return 'dpk';
+                if (key === 'active_sprint') return JSON.stringify({ name: 'Sprint 1' });
+                if (key === 'last_sync') return '2023-01-01T00:00:00.000Z';
+                return undefined;
+            });
+
+            const state = engine.getProjectState();
+            expect(state.vendor).toBe('github');
+            expect(state.currentUser).toBe('dpk');
+            expect(state.activeSprint).toEqual({ name: 'Sprint 1' });
+            expect(state.lastSync).toBe('2023-01-01T00:00:00.000Z');
+        });
+
+        it('should set and clear active sprint', () => {
+            engine.setActiveSprint({ name: 'Sprint 2' });
+            expect(mockDb.setMetadata).toHaveBeenCalledWith('active_sprint', JSON.stringify({ name: 'Sprint 2' }));
+
+            engine.setActiveSprint(null);
+            expect(mockDb.deleteMetadata).toHaveBeenCalledWith('active_sprint');
+        });
+
+        it('should set current user', () => {
+            engine.setCurrentUser('dpk');
+            expect(mockDb.setMetadata).toHaveBeenCalledWith('current_user', 'dpk');
+        });
+
+        it('should get available sprints from tasks', () => {
+            mockDb.getTasks.mockReturnValue([
+                { id: '1', title: 'T1', state: 'open', milestone: 'Sprint 1' },
+                { id: '2', title: 'T2', state: 'open', milestone: 'Sprint 2' },
+                { id: '3', title: 'T3', state: 'open', milestone: 'Sprint 1' },
+                { id: '4', title: 'T4', state: 'open' },
+            ]);
+            const sprints = engine.getAvailableSprints();
+            expect(sprints).toEqual(['Sprint 1', 'Sprint 2']);
+        });
+
+        it('should get sprint summary', () => {
+            mockDb.getTasks.mockReturnValue([
+                { id: '1', title: 'T1', state: 'open', milestone: 'Sprint 1' },
+                { id: '2', title: 'T2', state: 'closed', milestone: 'Sprint 1' },
+                { id: '3', title: 'T3', state: 'open', milestone: 'Sprint 2' },
+            ]);
+            const summary = engine.getSprintSummary('Sprint 1');
+            expect(summary.total).toBe(2);
+            expect(summary.byState).toEqual({ open: 1, closed: 1 });
+        });
+
+        it('should auto-detect user on first sync', async () => {
+            mockDb.getMetadata.mockReturnValue(undefined);
+            mockGitHubAdapter.getTasks.mockResolvedValue([]);
+            mockDb.getPendingOutboxItems.mockReturnValue([]);
+            mockGitHubAdapter.getCurrentUser.mockResolvedValue('dpk');
+
+            await engine.sync();
+
+            expect(mockGitHubAdapter.getCurrentUser).toHaveBeenCalled();
+            expect(mockDb.setMetadata).toHaveBeenCalledWith('current_user', 'dpk');
+        });
+
+        it('should skip user detection if already set', async () => {
+            mockDb.getMetadata.mockImplementation((key: string) => {
+                if (key === 'current_user') return 'dpk';
+                return undefined;
+            });
+            mockGitHubAdapter.getTasks.mockResolvedValue([]);
+            mockDb.getPendingOutboxItems.mockReturnValue([]);
+
+            await engine.sync();
+
+            expect(mockGitHubAdapter.getCurrentUser).not.toHaveBeenCalled();
         });
     });
 });
