@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { findGitRoot, detectVendor, sniffWorkflowStates, initMcpPm } from '../src/init';
+import { findGitRoot, detectVendor, detectRemote, sniffWorkflowStates, initMcpPm } from '../src/init';
 import { runCli } from '../src/cli';
 import * as os from 'os';
 
@@ -86,10 +86,28 @@ describe('init', () => {
         
         it('should return null if worktree config not found', () => {
             fs.rmSync(gitDir, { recursive: true });
-            
+
             const realGitDir = path.join(tmpDir, 'realgit');
             fs.writeFileSync(gitDir, `gitdir: ${realGitDir}`); // no config inside realGitDir
             expect(detectVendor(tmpDir)).toBeNull();
+        });
+    });
+
+    describe('detectRemote', () => {
+        beforeEach(() => {
+            gitDir = path.join(tmpDir, '.git');
+            fs.mkdirSync(gitDir);
+        });
+
+        it('returns vendor and the full url, including urls that contain "="', () => {
+            const url = 'https://dev.azure.com/org/proj/_git/repo?version=GBmain';
+            fs.writeFileSync(path.join(gitDir, 'config'), `[remote "origin"]\n\turl = ${url}\n`);
+            expect(detectRemote(tmpDir)).toEqual({ vendor: 'azure_devops', url });
+        });
+
+        it('returns null for unknown hosts', () => {
+            fs.writeFileSync(path.join(gitDir, 'config'), 'url = https://gitlab.com/user/repo.git');
+            expect(detectRemote(tmpDir)).toBeNull();
         });
     });
 

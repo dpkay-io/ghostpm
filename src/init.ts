@@ -18,39 +18,41 @@ export function findGitRoot(currentPath: string = process.cwd()): string | null 
     }
 }
 
-export function detectVendor(currentPath: string = process.cwd()): 'github' | 'azure_devops' | null {
+export interface RemoteInfo {
+    vendor: 'github' | 'azure_devops';
+    url: string;
+}
+
+const GITHUB_HOST = 'github.com';
+const AZURE_HOSTS = ['dev.azure.com', 'visualstudio.com'];
+
+export function detectRemote(currentPath: string = process.cwd()): RemoteInfo | null {
     const gitRoot = findGitRoot(currentPath);
     if (!gitRoot) return null;
-    
-    let configContent = '';
+
     const gitPath = path.join(gitRoot, '.git');
-    const stat = fs.statSync(gitPath);
-    
     let configPath = path.join(gitPath, 'config');
-    if (stat.isFile()) {
+    if (fs.statSync(gitPath).isFile()) {
         const gitdirMatch = fs.readFileSync(gitPath, 'utf8').match(/gitdir:\s+(.+)/);
         if (gitdirMatch) {
-            const realGitDir = path.resolve(gitRoot, gitdirMatch[1].trim());
-            configPath = path.join(realGitDir, 'config');
+            configPath = path.join(path.resolve(gitRoot, gitdirMatch[1].trim()), 'config');
         }
     }
-    
-    if (fs.existsSync(configPath)) {
-        configContent = fs.readFileSync(configPath, 'utf8');
-    } else {
-        return null;
-    }
+    if (!fs.existsSync(configPath)) return null;
 
-    const urls = configContent.match(/^\s*url\s*=\s*(.+)$/gm) || [];
-    for (const urlMatch of urls) {
-        const url = urlMatch.split('=')[1].trim();
-        if (url.includes('github.com')) {
-            return 'github';
-        } else if (url.includes('dev.azure.com') || url.includes('visualstudio.com')) {
-            return 'azure_devops';
-        }
+    const configContent = fs.readFileSync(configPath, 'utf8');
+    const urlLine = /^\s*url\s*=\s*(.+)$/gm;
+    let match: RegExpExecArray | null;
+    while ((match = urlLine.exec(configContent)) !== null) {
+        const url = match[1].trim();
+        if (url.includes(GITHUB_HOST)) return { vendor: 'github', url };
+        if (AZURE_HOSTS.some(host => url.includes(host))) return { vendor: 'azure_devops', url };
     }
     return null;
+}
+
+export function detectVendor(currentPath: string = process.cwd()): 'github' | 'azure_devops' | null {
+    return detectRemote(currentPath)?.vendor ?? null;
 }
 
 export async function sniffWorkflowStates(vendor: 'github' | 'azure_devops'): Promise<string[]> {
