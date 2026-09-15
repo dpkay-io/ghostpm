@@ -1,0 +1,152 @@
+import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as path from 'path';
+import { getGhostpmHome } from '../registry';
+
+export type Ledger = Database.Database;
+
+export const LEDGER_FILE = 'ledger.db';
+export const BUSY_TIMEOUT_MS = 5000;
+
+/** One entry per schema version. Never edit a shipped entry; append a new one. */
+const MIGRATIONS: readonly string[] = [
+    `
+    CREATE TABLE workspaces (
+        id INTEGER PRIMARY KEY,
+        path TEXT NOT NULL UNIQUE,
+        git_remote TEXT,
+        vendor TEXT NOT NULL DEFAULT 'none',
+        settings TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE TABLE tasks (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        workspace_id INTEGER,
+        origin TEXT NOT NULL,
+        summary TEXT,
+        body TEXT,
+        assignee TEXT,
+        milestone TEXT,
+        rev INTEGER NOT NULL DEFAULT 0,
+        human_phase_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX tasks_workspace ON tasks (workspace_id, updated_at);
+    CREATE TABLE events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        session_id TEXT,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT,
+        at TEXT NOT NULL
+    );
+    CREATE INDEX events_task ON events (task_id, seq);
+    CREATE INDEX events_at ON events (at);
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        client TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        workspace_id INTEGER,
+        task_id INTEGER,
+        transcript_path TEXT,
+        started_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        ended_at TEXT
+    );
+    CREATE TABLE vendor_links (
+        task_id INTEGER NOT NULL,
+        vendor TEXT NOT NULL,
+        remote_id TEXT NOT NULL,
+        remote_url TEXT,
+        remote_state TEXT,
+        labels TEXT,
+        remote_updated_at TEXT,
+        last_pushed_rev INTEGER,
+        PRIMARY KEY (task_id, vendor)
+    );
+    CREATE INDEX vendor_links_remote ON vendor_links (vendor, remote_id);
+    CREATE TABLE outbox (
+        id INTEGER PRIMARY KEY,
+        task_id INTEGER NOT NULL,
+        op TEXT NOT NULL,
+        payload TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        claimed_by TEXT,
+        claimed_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        error TEXT
+    );
+    CREATE TABLE leases (
+        name TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    );
+    CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    `,
+];
+
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+export function ledgerPath(): string {
+    return path.join(getGhostpmHome(), LEDGER_FILE);
+}
+
+export function nowIso(): string {
+    return new Date().toISOString();
+}
+
+export type SqlParam = string | number;
+
+/** Collects AND-joined conditions and their bound parameters for dynamic filters. */
+export class Where {
+    private readonly conditions: string[] = [];
+    readonly params: SqlParam[] = [];
+
+    add(condition: string, ...params: SqlParam[]): this {
+        this.conditions.push(condition);
+        this.params.push(...params);
+        return this;
+    }
+
+    in(column: string, values: readonly SqlParam[] | undefined): this {
+        if (!values || values.length === 0) return this;
+        return this.add(`${column} IN (${values.map(() => '?').join(', ')})`, ...values);
+    }
+
+    toString(): string {
+        return this.conditions.length > 0 ? ` WHERE ${this.conditions.join(' AND ')}` : '';
+    }
+}
+
+/** Runs fn in a BEGIN IMMEDIATE transaction. A nested call becomes a savepoint of the outer transaction. */
+export function write<T>(db: Ledger, fn: () => T): T {
+    return db.transaction(fn).immediate();
+}
+
+export function migrate(db: Ledger): void {
+    // Re-reading the version inside the lock makes concurrent first opens safe.
+    const applyNext = (): boolean => {
+        const version = db.pragma('user_version', { simple: true }) as number;
+        if (version >= SCHEMA_VERSION) return false;
+        db.exec(MIGRATIONS[version]);
+        db.pragma(`user_version = ${version + 1}`);
+        return true;
+    };
+    while (write(db, applyNext)) { /* one schema version per transaction */ }
+}
+
+export function openLedger(filePath: string = ledgerPath()): Ledger {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const db = new Database(filePath);
+    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    db.pragma('journal_mode = WAL');
+    migrate(db);
+    return db;
+}

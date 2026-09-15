@@ -8,12 +8,12 @@ export interface WorkspaceEntry {
     addedAt: string;
 }
 
-function getRegistryDir(): string {
+export function getGhostpmHome(): string {
     return process.env.GHOSTPM_HOME || path.join(os.homedir(), '.ghostpm');
 }
 
 function getRegistryPath(): string {
-    return path.join(getRegistryDir(), 'workspaces.json');
+    return path.join(getGhostpmHome(), 'workspaces.json');
 }
 
 export function getWorkspaces(): WorkspaceEntry[] {
@@ -28,7 +28,7 @@ export function getWorkspaces(): WorkspaceEntry[] {
 }
 
 function saveWorkspaces(workspaces: WorkspaceEntry[]): void {
-    const dir = getRegistryDir();
+    const dir = getGhostpmHome();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(getRegistryPath(), JSON.stringify(workspaces, null, 2), 'utf8');
 }
