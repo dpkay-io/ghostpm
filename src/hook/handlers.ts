@@ -1,7 +1,7 @@
 import { Ledger, openLedger, ledgerPath, write, nowIso } from '../ledger/db';
 import { ensureWorkspace } from '../ledger/workspaces';
 import { getTask, bumpRevision } from '../ledger/tasks';
-import { getSession, startSession, touchSession } from '../ledger/sessions';
+import { getSession, startSession, touchSession, endSession } from '../ledger/sessions';
 import { activeTaskFor, currentBranch } from '../ledger/branch';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
 import { listEvents, recordEvent } from '../ledger/events';
@@ -14,6 +14,7 @@ export const HOOK_CLIENT = 'claude-code';
 const SESSION_START = 'SessionStart';
 const USER_PROMPT_SUBMIT = 'UserPromptSubmit';
 const POST_TOOL_BATCH = 'PostToolBatch';
+const SESSION_END = 'SessionEnd';
 
 const HOOK_SOURCE = `hook:${HOOK_CLIENT}`;
 /** Tools whose use means a file was changed. */
@@ -100,6 +101,17 @@ function collectEvidence(payload: HookPayload): BatchEvidence {
     return evidence;
 }
 
+/**
+ * Marks the session ended. Deliberately does not ensure a workspace or heartbeat:
+ * ending needs only the id, and moving last_seen_at on the way out would work against
+ * the staleness fallback that covers SessionEnd never firing (Ctrl+C, crash, closed
+ * terminal). endSession is a bare UPDATE, so an id we never saw stays unknown.
+ */
+function onSessionEnd(db: Ledger, payload: HookPayload): string | null {
+    endSession(db, payload.sessionId);
+    return null;
+}
+
 /** Writes what the batch proves. Injects nothing: evidence is recorded, not narrated back. */
 function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     const workspace = ensureWorkspace(db, payload.cwd);
@@ -144,6 +156,8 @@ export function handleWith(db: Ledger, payload: HookPayload): string | null {
             return onUserPromptSubmit(db, payload);
         case POST_TOOL_BATCH:
             return onPostToolBatch(db, payload);
+        case SESSION_END:
+            return onSessionEnd(db, payload);
         default:
             return null;
     }
