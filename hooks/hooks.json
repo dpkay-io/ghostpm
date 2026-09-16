@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\" SessionStart", "timeout": 5 }] }
+    ],
+    "UserPromptSubmit": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\" UserPromptSubmit", "timeout": 5 }] }
+    ],
+    "PostToolBatch": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\" PostToolBatch", "timeout": 5 }] }
+    ],
+    "SessionEnd": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\" SessionEnd", "timeout": 5 }] }
+    ]
+  }
+}

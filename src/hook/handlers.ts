@@ -141,6 +141,22 @@ function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     return null;
 }
 
+type Handler = (db: Ledger, payload: HookPayload) => string | null;
+
+const HANDLERS: { [event: string]: Handler } = {
+    [SESSION_START]: onSessionStart,
+    [USER_PROMPT_SUBMIT]: onUserPromptSubmit,
+    [POST_TOOL_BATCH]: onPostToolBatch,
+    [SESSION_END]: onSessionEnd,
+};
+
+/**
+ * The events this hook implements. Derived from the dispatch table rather than listed
+ * separately, so the plugin's hooks.json can be checked against it without the two
+ * drifting apart.
+ */
+export const HANDLED_EVENTS: string[] = Object.keys(HANDLERS);
+
 /**
  * Ledger-injected entry, so tests drive a temp ledger rather than the real one.
  * Returns the text to inject, or null when there is nothing to say.
@@ -149,18 +165,8 @@ export function handleWith(db: Ledger, payload: HookPayload): string | null {
     // Without a session id nothing can be correlated later, and every such hook would
     // share one row keyed on the empty string.
     if (payload.sessionId.length === 0) return null;
-    switch (payload.event) {
-        case SESSION_START:
-            return onSessionStart(db, payload);
-        case USER_PROMPT_SUBMIT:
-            return onUserPromptSubmit(db, payload);
-        case POST_TOOL_BATCH:
-            return onPostToolBatch(db, payload);
-        case SESSION_END:
-            return onSessionEnd(db, payload);
-        default:
-            return null;
-    }
+    const handler = HANDLERS[payload.event];
+    return handler === undefined ? null : handler(db, payload);
 }
 
 export function handle(payload: HookPayload): string | null {

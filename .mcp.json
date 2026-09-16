@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ghostpm": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/cli-main.js", "serve"]
+    }
+  }
+}
