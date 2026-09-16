@@ -1,11 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { findGitRoot, detectRemote } from '../init';
+import { findGitRoot, detectRemote, readGitdirLink } from '../init';
 import { Ledger } from './db';
 import { NO_VENDOR, Vendor, WorkspaceRow } from './types';
 
 const GIT_ENTRY = '.git';
-const GITDIR_LINE = /^gitdir:\s*(.+)$/m;
 const COMMONDIR_FILE = 'commondir';
 const FOLD_PATH_CASE = process.platform === 'win32';
 
@@ -20,12 +19,10 @@ export function resolveWorkspaceRoot(cwd: string): string {
     if (!gitRoot) return normalizePath(cwd);
 
     const dotGit = path.join(gitRoot, GIT_ENTRY);
-    if (fs.statSync(dotGit).isDirectory()) return normalizePath(gitRoot);
+    const linked = readGitdirLink(dotGit);
+    if (!linked) return normalizePath(gitRoot);
 
-    const gitdir = fs.readFileSync(dotGit, 'utf8').match(GITDIR_LINE);
-    if (!gitdir) return normalizePath(gitRoot);
-
-    const commonDirFile = path.join(path.resolve(gitRoot, gitdir[1].trim()), COMMONDIR_FILE);
+    const commonDirFile = path.join(linked, COMMONDIR_FILE);
     if (!fs.existsSync(commonDirFile)) return normalizePath(gitRoot);
 
     const commonDir = path.resolve(path.dirname(commonDirFile), fs.readFileSync(commonDirFile, 'utf8').trim());

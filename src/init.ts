@@ -25,19 +25,28 @@ export interface RemoteInfo {
 
 const GITHUB_HOST = 'github.com';
 const AZURE_HOSTS = ['dev.azure.com', 'visualstudio.com'];
+const GITDIR_LINE = /^gitdir:\s*(.+)$/m;
+
+export function readGitdirLink(gitEntryPath: string): string | null {
+    try {
+        const stat = fs.statSync(gitEntryPath);
+        if (!stat.isFile()) return null;
+        const content = fs.readFileSync(gitEntryPath, 'utf8');
+        const match = content.match(GITDIR_LINE);
+        if (!match) return null;
+        return path.resolve(path.dirname(gitEntryPath), match[1].trim());
+    } catch {
+        return null;
+    }
+}
 
 export function detectRemote(currentPath: string = process.cwd()): RemoteInfo | null {
     const gitRoot = findGitRoot(currentPath);
     if (!gitRoot) return null;
 
     const gitPath = path.join(gitRoot, '.git');
-    let configPath = path.join(gitPath, 'config');
-    if (fs.statSync(gitPath).isFile()) {
-        const gitdirMatch = fs.readFileSync(gitPath, 'utf8').match(/gitdir:\s+(.+)/);
-        if (gitdirMatch) {
-            configPath = path.join(path.resolve(gitRoot, gitdirMatch[1].trim()), 'config');
-        }
-    }
+    const linked = readGitdirLink(gitPath);
+    const configPath = path.join(linked ?? gitPath, 'config');
     if (!fs.existsSync(configPath)) return null;
 
     const configContent = fs.readFileSync(configPath, 'utf8');

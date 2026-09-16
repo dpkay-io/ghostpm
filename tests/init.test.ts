@@ -109,6 +109,15 @@ describe('init', () => {
             fs.writeFileSync(path.join(gitDir, 'config'), 'url = https://gitlab.com/user/repo.git');
             expect(detectRemote(tmpDir)).toBeNull();
         });
+
+        it('handles .git file without space after gitdir colon', () => {
+            fs.rmSync(gitDir, { recursive: true });
+            const realGitDir = path.join(tmpDir, 'realgit');
+            fs.mkdirSync(realGitDir);
+            fs.writeFileSync(path.join(realGitDir, 'config'), 'url = https://github.com/user/repo.git');
+            fs.writeFileSync(gitDir, `gitdir:${realGitDir}\n`);
+            expect(detectRemote(tmpDir)).toEqual({ vendor: 'github', url: 'https://github.com/user/repo.git' });
+        });
     });
 
     describe('sniffWorkflowStates', () => {
