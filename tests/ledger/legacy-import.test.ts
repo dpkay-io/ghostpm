@@ -6,6 +6,7 @@ import { Db } from '../../src/db';
 import { listTasks, getVendorLink } from '../../src/ledger/tasks';
 import { getWorkspace, normalizePath } from '../../src/ledger/workspaces';
 import { registerWorkspace } from '../../src/registry';
+import * as registry from '../../src/registry';
 import { getSetting, getWorkspaceSetting, SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 import {
@@ -154,6 +155,22 @@ describe('legacy import', () => {
         expect(runLegacyImportOnce(ledger.db, [repo])).toHaveLength(1);
         expect(getSetting<string>(ledger.db, LEGACY_IMPORT_SETTING)).toBeDefined();
         expect(runLegacyImportOnce(ledger.db, [repo])).toEqual([]);
+    });
+
+    it('does not scan the disk for roots once the import has already run', () => {
+        // Discovery reads ~/.claude.json and stats every project path in it. Once the
+        // guard is set that work can only ever be thrown away, so it must not happen at all:
+        // this runs on every server start, ahead of the session.
+        seedLegacyDb(repo);
+        runLegacyImportOnce(ledger.db, [repo]);
+        // getWorkspaces is discovery's first call, so it stands in for "discovery ran at all".
+        const discoverySpy = jest.spyOn(registry, 'getWorkspaces');
+        try {
+            expect(runLegacyImportOnce(ledger.db)).toEqual([]);
+            expect(discoverySpy).not.toHaveBeenCalled();
+        } finally {
+            discoverySpy.mockRestore();
+        }
     });
 
     it('keeps importing the other repos when one fails', () => {

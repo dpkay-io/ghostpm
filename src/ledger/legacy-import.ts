@@ -158,11 +158,15 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
     });
 }
 
-/** Runs once per ledger. A repo that fails is logged and skipped; the others still import. */
-export function runLegacyImportOnce(db: Ledger, roots: string[] = discoverLegacyRoots()): LegacyImportResult[] {
+/**
+ * Runs once per ledger. A repo that fails is logged and skipped; the others still import.
+ * The guard is checked before discovery: discovery stats every project path in ~/.claude.json,
+ * and this runs on every server start, so once the import is done that work must not happen at all.
+ */
+export function runLegacyImportOnce(db: Ledger, roots?: string[]): LegacyImportResult[] {
     if (getSetting<string>(db, LEGACY_IMPORT_SETTING)) return [];
     const results: LegacyImportResult[] = [];
-    for (const root of roots) {
+    for (const root of roots ?? discoverLegacyRoots()) {
         try {
             results.push(importLegacyWorkspace(db, root));
         } catch (error) {
