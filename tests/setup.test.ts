@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { setup } from '../src/setup';
+import { removeTempDir } from './temp-dir';
 
 jest.mock('child_process', () => ({
     execFileSync: jest.fn(() => { throw new Error('not found'); })
@@ -29,15 +30,7 @@ describe('setup', () => {
     afterEach(() => {
         process.env.HOME = origHome;
         process.env.USERPROFILE = origUserProfile;
-        try {
-            fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch (error) {
-            // ponytail: Windows can still be releasing a handle on a file just written under
-            // this disposable temp dir (e.g. the installed skill plugin), so rmSync sometimes
-            // hits ENOTEMPTY/EBUSY/EPERM here. Leaking it is harmless; failing the test on it is not.
-            const code = (error as NodeJS.ErrnoException).code;
-            if (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM') throw error;
-        }
+        removeTempDir(tmpDir);
     });
 
     it('should create .claude/settings.local.json with MCP config', async () => {

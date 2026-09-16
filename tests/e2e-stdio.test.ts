@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
 const STARTUP_TIMEOUT_MS = 30000;
@@ -43,8 +44,8 @@ describeBuilt('ghostpm serve over stdio', () => {
 
     afterAll(async () => {
         await client.close();
-        fs.rmSync(home, { recursive: true, force: true });
-        fs.rmSync(workspace, { recursive: true, force: true });
+        removeTempDir(home);
+        removeTempDir(workspace);
     });
 
     it('starts outside a git repository and tracks work end to end', async () => {
