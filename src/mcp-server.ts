@@ -203,7 +203,7 @@ export class PmServer {
             case 'comment': detail = String(payload.text ?? ''); break;
             case 'renamed': detail = `renamed to ${payload.to}`; break;
             case 'progress': detail = `${payload.intent}: ${payload.note}`; break;
-            case 'merged': detail = payload.into !== undefined ? `merged into T${payload.into}` : `absorbed T${payload.from}`; break;
+            case 'merged': detail = payload.into !== undefined ? `merged into ${formatTaskId(payload.into as number)}` : `absorbed ${formatTaskId(payload.from as number)}`; break;
             default: detail = entry.kind;
         }
         return `- ${entry.at} · ${task}${detail} (${entry.source})`;

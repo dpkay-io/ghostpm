@@ -175,6 +175,14 @@ describe('mcp server on the ledger', () => {
         expect(await call('timeline', { since: new Date(Date.now() + 60_000).toISOString() })).toBe('Nothing recorded in that period.');
     });
 
+    it('renders merged task ids in the timeline using the real id format', async () => {
+        const duplicate = task('Dup');
+        const kept = task('Kept');
+        await call('merge_task', { from: `T${duplicate.id}`, into: `T${kept.id}` });
+        const timeline = await call('timeline');
+        expect(timeline).toContain(`merged into T${kept.id}`);
+    });
+
     it('creates a git branch only when the setting is on', async () => {
         mockExecFile(null, '');
         await call('track_work', { title: 'No branch', intent: 'fix' });
