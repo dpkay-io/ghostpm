@@ -10,6 +10,7 @@ import { ensureWorkspace, getWorkspace } from "./ledger/workspaces";
 import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
 import { listEvents, TimelineEntry } from "./ledger/events";
 import { mergeTask, trackWork } from "./ledger/work";
+import { activeTaskFor, taskBranchName } from "./ledger/branch";
 import {
     DEFAULT_STALE_SESSION_MINUTES, MCP_CLIENT, endSession, getSession, listLiveSessions,
     mcpSessionId, startSession, touchSession,
@@ -31,8 +32,6 @@ export const CURRENT_USER_REF = "@me";
 
 const TASK_COLUMNS = ["id", "phase", "title", "assignee", "remote"] as const;
 type TaskColumn = typeof TASK_COLUMNS[number];
-const TASK_BRANCH_PREFIX = "task/";
-const BRANCH_TASK = new RegExp(`^${TASK_BRANCH_PREFIX}(.+)$`);
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
@@ -134,10 +133,7 @@ export class PmServer {
 
     /** The session's task, or the task named by a task/<ref> branch. */
     private activeTask(branch: string | null, workspaceId: number): TaskRow | undefined {
-        const sessionTaskId = getSession(this.db, this.sessionId)?.task_id ?? null;
-        if (sessionTaskId !== null) return getTask(this.db, sessionTaskId);
-        const match = branch === null ? null : branch.match(BRANCH_TASK);
-        return match ? resolveTaskRef(this.db, match[1], workspaceId) : undefined;
+        return activeTaskFor(this.db, this.sessionId, branch, workspaceId);
     }
 
     private phaseSummary(tasks: TaskRow[]): string {
@@ -189,7 +185,7 @@ export class PmServer {
 
     /** Checks out task/T<id>, creating it only when it does not exist yet. */
     private async ensureBranch(task: TaskRow): Promise<string> {
-        const branch = `${TASK_BRANCH_PREFIX}${formatTaskId(task.id)}`;
+        const branch = taskBranchName(task.id);
         try {
             await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: this.cwd });
             await execFileAsync('git', ['checkout', branch], { cwd: this.cwd });
