@@ -51,6 +51,27 @@ async function main() {
             break;
         }
 
+        case 'statusline': {
+            const { buildStatusline, runPreviousCommand } = await import('./statusline');
+            const { openLedger, ledgerPath } = await import('./ledger/db');
+            const { getSetting, SETTING_PREVIOUS_STATUSLINE } = await import('./ledger/settings');
+            // Event-based read rather than `for await`: async stream iteration needs lib
+            // support an es2016 target does not give, and this matches src/hook.ts.
+            const stdin = await new Promise<string>(resolve => {
+                let buffer = '';
+                process.stdin.on('data', chunk => { buffer += chunk; });
+                process.stdin.on('end', () => resolve(buffer));
+            });
+            const db = openLedger(ledgerPath());
+            try {
+                const previousCommand = getSetting<string>(db, SETTING_PREVIOUS_STATUSLINE) ?? null;
+                process.stdout.write(buildStatusline(db, { stdin, previousCommand, run: runPreviousCommand }));
+            } finally {
+                db.close();
+            }
+            break;
+        }
+
         case 'init': {
             const { initMcpPm, findGitRoot } = await import('./init');
             await initMcpPm();

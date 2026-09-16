@@ -4,6 +4,8 @@ export const SETTING_CREATE_BRANCH = 'create_branch';
 export const SETTING_STALE_SESSION_MINUTES = 'stale_session_minutes';
 export const SETTING_CURRENT_USER = 'current_user';
 export const SETTING_ACTIVE_SPRINT = 'active_sprint';
+/** The statusline command configured before ghostpm chained itself in; restored on uninstall. */
+export const SETTING_PREVIOUS_STATUSLINE = 'previous_statusline';
 
 type SettingsObject = Record<string, unknown>;
 
