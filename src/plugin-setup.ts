@@ -7,6 +7,17 @@ import { getSetting, setSetting, SETTING_PREVIOUS_STATUSLINE } from './ledger/se
 export const STATUSLINE_COMMAND = 'ghostpm statusline';
 
 const COMMAND_TYPE = 'command';
+const CLAUDE_DIR = '.claude';
+const USER_SETTINGS_FILE = 'settings.json';
+
+/**
+ * statusLine is a user-level setting, so a per-project settings file would never take
+ * effect. Shared so chaining and restoring cannot end up pointing at different files.
+ */
+export function userSettingsPath(): string {
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    return path.join(home, CLAUDE_DIR, USER_SETTINGS_FILE);
+}
 
 interface Settings {
     statusLine?: { type?: string; command?: string };

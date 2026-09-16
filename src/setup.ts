@@ -1,134 +1,66 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
 import { findGitRoot } from './init';
 import { SKILL_CONTENT, PLUGIN_JSON } from './skill';
+import { openLedger, ledgerPath } from './ledger/db';
+import { chainStatusline, userSettingsPath } from './plugin-setup';
 
 interface SetupOptions {
     global?: boolean;
     silent?: boolean;
 }
 
-function resolveServerCommand(): { command: string; args: string[] } {
-    try {
-        const finder = process.platform === 'win32' ? 'where.exe' : 'which';
-        execFileSync(finder, ['ghostpm'], { stdio: 'ignore' });
-        return { command: 'ghostpm', args: ['serve'] };
-    } catch {
-        return {
-            command: 'node',
-            args: [path.resolve(__dirname, 'cli-main.js'), 'serve']
-        };
-    }
+const CLAUDE_DIR = '.claude';
+const SKILL_FILE = 'SKILL.md';
+const LEGACY_SKILL_FILE = 'ghostpm.md';
+
+function homeDir(): string {
+    return process.env.HOME || process.env.USERPROFILE || '';
 }
 
-function patchJsonFile(filePath: string, serverName: string, serverConfig: object): void {
-    let existing: any = {};
-    if (fs.existsSync(filePath)) {
-        try {
-            existing = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        } catch {
-            existing = {};
-        }
-    }
-
-    if (!existing.mcpServers) existing.mcpServers = {};
-    existing.mcpServers[serverName] = serverConfig;
-
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+function skillDir(options: SetupOptions, gitRoot: string | null): string | null {
+    const base = options.global ? homeDir() : gitRoot;
+    return base ? path.join(base, CLAUDE_DIR, 'skills', 'ghostpm') : null;
 }
 
-function getClaudeDesktopConfigPath(): string | null {
-    const home = process.env.HOME || process.env.USERPROFILE || '';
-    switch (process.platform) {
-        case 'win32':
-            return process.env.APPDATA
-                ? path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json')
-                : null;
-        case 'darwin':
-            return path.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
-        default:
-            return path.join(home, '.config', 'Claude', 'claude_desktop_config.json');
-    }
+function installSkill(target: string): void {
+    const pluginDir = path.join(target, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginDir, 'plugin.json'), JSON.stringify(PLUGIN_JSON, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(path.join(target, SKILL_FILE), SKILL_CONTENT, 'utf8');
+
+    const legacy = path.join(path.dirname(target), LEGACY_SKILL_FILE);
+    if (fs.existsSync(legacy)) fs.unlinkSync(legacy);
 }
 
-function tryClaudeMcpAdd(scope: string, command: string, args: string[]): boolean {
-    try {
-        const finder = process.platform === 'win32' ? 'where.exe' : 'which';
-        execFileSync(finder, ['claude'], { stdio: 'ignore' });
-    } catch {
-        return false;
-    }
-    try {
-        execFileSync('claude', ['mcp', 'add', 'ghostpm', '-s', scope, '--', command, ...args], { stdio: 'pipe' });
-        return true;
-    } catch {
-        return false;
-    }
-}
-
+/**
+ * Does only what the plugin cannot. The MCP server and the hooks are declared by
+ * .mcp.json and hooks/hooks.json in the plugin itself, so setup no longer registers
+ * a server anywhere: doing that is what left machines pointed at a stale global
+ * install instead of the plugin.
+ */
 export async function setup(options: SetupOptions = {}): Promise<void> {
     const gitRoot = findGitRoot();
-    const home = process.env.HOME || process.env.USERPROFILE || '';
-    const { command, args } = resolveServerCommand();
-    const targets: string[] = [];
+    const settingsPath = userSettingsPath();
 
-    // Claude CLI: use `claude mcp add` which writes to the correct internal config
-    const cliScope = options.global ? 'user' : 'local';
-    if (tryClaudeMcpAdd(cliScope, command, args)) {
-        targets.push(`Claude CLI (scope: ${cliScope})`);
-    } else if (gitRoot && !options.global) {
-        const settingsPath = path.join(gitRoot, '.claude', 'settings.local.json');
-        patchJsonFile(settingsPath, 'ghostpm', { command, args });
-        targets.push(settingsPath);
-    } else if (options.global && home) {
-        const settingsPath = path.join(home, '.claude', 'settings.json');
-        patchJsonFile(settingsPath, 'ghostpm', { command, args });
-        targets.push(settingsPath);
+    const db = openLedger(ledgerPath());
+    try {
+        chainStatusline(db, settingsPath);
+    } finally {
+        db.close();
     }
 
-    // Claude Desktop: patch its config file directly
-    const desktopPath = getClaudeDesktopConfigPath();
-    if (desktopPath && fs.existsSync(path.dirname(desktopPath))) {
-        const config: any = { command, args };
-        if (gitRoot) config.cwd = gitRoot;
-        patchJsonFile(desktopPath, 'ghostpm', config);
-        targets.push(desktopPath);
-    }
-
-    // Install companion skill plugin for auto-discovery
-    const skillTargets: string[] = [];
-    const skillBase = (options.global && home)
-        ? path.join(home, '.claude', 'skills', 'ghostpm')
-        : gitRoot
-            ? path.join(gitRoot, '.claude', 'skills', 'ghostpm')
-            : null;
-
-    if (skillBase) {
-        const pluginDir = path.join(skillBase, '.claude-plugin');
-        if (!fs.existsSync(pluginDir)) fs.mkdirSync(pluginDir, { recursive: true });
-        fs.writeFileSync(path.join(pluginDir, 'plugin.json'), JSON.stringify(PLUGIN_JSON, null, 2) + '\n', 'utf8');
-        fs.writeFileSync(path.join(skillBase, 'SKILL.md'), SKILL_CONTENT, 'utf8');
-        skillTargets.push(skillBase);
-
-        // Clean up legacy flat skill file
-        const legacyPath = path.join(path.dirname(skillBase), 'ghostpm.md');
-        if (fs.existsSync(legacyPath)) fs.unlinkSync(legacyPath);
-    }
+    const target = skillDir(options, gitRoot);
+    if (target) installSkill(target);
 
     if (options.silent) return;
 
-    if (targets.length === 0) {
-        console.log('No MCP clients detected. Add manually:');
-        console.log(JSON.stringify({ mcpServers: { ghostpm: { command, args } } }, null, 2));
-    } else {
-        console.log('MCP server registered:');
-        targets.forEach(t => console.log(`  + ${t}`));
-    }
-    if (skillTargets.length > 0) {
+    console.log('Statusline chained:');
+    console.log(`  + ${settingsPath}`);
+    if (target) {
         console.log('Skill installed:');
-        skillTargets.forEach(t => console.log(`  + ${t}`));
+        console.log(`  + ${target}`);
     }
+    console.log('\nThe MCP server and hooks come from the plugin itself.');
+    console.log('Run `ghostpm doctor` to check what this machine is configured to run.');
 }

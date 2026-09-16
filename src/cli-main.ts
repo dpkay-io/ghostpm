@@ -121,8 +121,21 @@ async function main() {
         }
 
         case 'setup': {
-            const { setup } = await import('./setup');
             const flags = process.argv.slice(3);
+            if (flags.includes('--restore')) {
+                const { restoreStatusline, userSettingsPath } = await import('./plugin-setup');
+                const { openLedger, ledgerPath } = await import('./ledger/db');
+                const settingsPath = userSettingsPath();
+                const db = openLedger(ledgerPath());
+                try {
+                    restoreStatusline(db, settingsPath);
+                } finally {
+                    db.close();
+                }
+                console.log(`Statusline restored in ${settingsPath}`);
+                break;
+            }
+            const { setup } = await import('./setup');
             await setup({ global: flags.includes('--global') });
             break;
         }

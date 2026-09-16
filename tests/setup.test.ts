@@ -2,127 +2,122 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { setup } from '../src/setup';
+import { STATUSLINE_COMMAND } from '../src/plugin-setup';
 import { removeTempDir } from './temp-dir';
 
-jest.mock('child_process', () => ({
-    execFileSync: jest.fn(() => { throw new Error('not found'); })
-}));
-
+// Mocking init also keeps cli.ts — and with it child_process — out of the test graph:
+// setup imports findGitRoot from init, and init imports runCli from cli. setup never
+// calls anything that shells out, but the import path exists, so this mock is what
+// makes that irrelevant here.
 jest.mock('../src/init', () => ({
-    findGitRoot: jest.fn()
+    findGitRoot: jest.fn(),
 }));
 
 import { findGitRoot } from '../src/init';
-import { execFileSync } from 'child_process';
 
+const PREVIOUS_STATUSLINE = 'claude-ticker';
+
+/**
+ * These test what setup is for, not how it works: the plugin declares the MCP server
+ * and the hooks, so setup exists only to do what a plugin cannot — chain the statusline
+ * and install the skill.
+ */
 describe('setup', () => {
     let tmpDir: string;
+    let userSettingsPath: string;
     const origHome = process.env.HOME;
     const origUserProfile = process.env.USERPROFILE;
+    const origGhostpmHome = process.env.GHOSTPM_HOME;
+
+    const readJson = (file: string): any => JSON.parse(fs.readFileSync(file, 'utf8'));
+
+    const writeUserSettings = (settings: unknown): void => {
+        fs.mkdirSync(path.dirname(userSettingsPath), { recursive: true });
+        fs.writeFileSync(userSettingsPath, JSON.stringify(settings, null, 2), 'utf8');
+    };
+
+    /** Every settings file setup could plausibly have written to. */
+    const allSettingsFiles = (): string[] => [
+        userSettingsPath,
+        path.join(tmpDir, '.claude', 'settings.local.json'),
+    ].filter(file => fs.existsSync(file));
 
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-setup-'));
+        userSettingsPath = path.join(tmpDir, '.claude', 'settings.json');
         process.env.HOME = tmpDir;
         process.env.USERPROFILE = tmpDir;
+        process.env.GHOSTPM_HOME = path.join(tmpDir, '.ghostpm');
         jest.clearAllMocks();
+        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
     });
 
     afterEach(() => {
         process.env.HOME = origHome;
         process.env.USERPROFILE = origUserProfile;
+        if (origGhostpmHome === undefined) delete process.env.GHOSTPM_HOME;
+        else process.env.GHOSTPM_HOME = origGhostpmHome;
         removeTempDir(tmpDir);
     });
 
-    it('should create .claude/settings.local.json with MCP config', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
+    it('registers no MCP server: the plugin declares it', async () => {
+        // Registering it here is what left this machine pointed at a global install
+        // predating the ledger. .mcp.json in the plugin is the single declaration now.
+        await setup({ silent: true });
+
+        for (const file of allSettingsFiles()) {
+            expect(readJson(file).mcpServers).toBeUndefined();
+        }
+    });
+
+    it('keeps the statusline the user already had working', async () => {
+        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
         await setup({ silent: true });
 
-        const settingsPath = path.join(tmpDir, '.claude', 'settings.local.json');
-        expect(fs.existsSync(settingsPath)).toBe(true);
-
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        expect(settings.mcpServers.ghostpm).toBeDefined();
-        expect(settings.mcpServers.ghostpm.command).toBe('node');
-        expect(settings.mcpServers.ghostpm.args).toContain('serve');
+        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
     });
 
-    it('should preserve existing settings when patching', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
-
-        const settingsDir = path.join(tmpDir, '.claude');
-        fs.mkdirSync(settingsDir, { recursive: true });
-        fs.writeFileSync(
-            path.join(settingsDir, 'settings.local.json'),
-            JSON.stringify({ permissions: { allow: ["read"] }, mcpServers: { other: { command: "other" } } }),
-            'utf8'
-        );
-
+    it('shows the active task when no statusline was configured', async () => {
         await setup({ silent: true });
 
-        const settings = JSON.parse(fs.readFileSync(path.join(settingsDir, 'settings.local.json'), 'utf8'));
-        expect(settings.permissions.allow).toEqual(["read"]);
-        expect(settings.mcpServers.other.command).toBe('other');
-        expect(settings.mcpServers.ghostpm).toBeDefined();
+        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
     });
 
-    it('should use ghostpm command when globally installed', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
-        (execFileSync as jest.Mock).mockImplementation((cmd: string, args: string[]) => {
-            if (args && args[0] === 'ghostpm') return 'C:\\ghostpm.cmd';
-            throw new Error('not found');
+    it('installs the skill so the model knows the workflow', async () => {
+        await setup({ silent: true });
+
+        const skillPath = path.join(tmpDir, '.claude', 'skills', 'ghostpm', 'SKILL.md');
+        expect(fs.readFileSync(skillPath, 'utf8')).toContain('name: ghostpm');
+    });
+
+    it('leaves the rest of the user settings alone', async () => {
+        writeUserSettings({
+            model: 'opus',
+            permissions: { allow: ['read'] },
+            statusLine: { type: 'command', command: PREVIOUS_STATUSLINE },
         });
 
         await setup({ silent: true });
 
-        const settingsPath = path.join(tmpDir, '.claude', 'settings.local.json');
-        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-        expect(settings.mcpServers.ghostpm.command).toBe('ghostpm');
-        expect(settings.mcpServers.ghostpm.args).toEqual(['serve']);
+        const settings = readJson(userSettingsPath);
+        expect(settings.model).toBe('opus');
+        expect(settings.permissions.allow).toEqual(['read']);
     });
 
-    it('should install skill plugin to project .claude/skills/ghostpm on local setup', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
+    it('is safe to run twice', async () => {
+        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
         await setup({ silent: true });
-
-        const skillDir = path.join(tmpDir, '.claude', 'skills', 'ghostpm');
-        expect(fs.existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true);
-        expect(fs.existsSync(path.join(skillDir, '.claude-plugin', 'plugin.json'))).toBe(true);
-
-        const skill = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
-        expect(skill).toContain('name: ghostpm');
-
-        const plugin = JSON.parse(fs.readFileSync(path.join(skillDir, '.claude-plugin', 'plugin.json'), 'utf8'));
-        expect(plugin.name).toBe('ghostpm');
-        expect(plugin.skills).toEqual(['./']);
-    });
-
-    it('should install skill plugin to global ~/.claude/skills/ghostpm on global setup', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(null);
-
-        await setup({ global: true, silent: true });
-
-        const skillDir = path.join(tmpDir, '.claude', 'skills', 'ghostpm');
-        expect(fs.existsSync(path.join(skillDir, 'SKILL.md'))).toBe(true);
-        expect(fs.existsSync(path.join(skillDir, '.claude-plugin', 'plugin.json'))).toBe(true);
-    });
-
-    it('should clean up legacy flat skill file', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
-
-        // Create legacy flat file
-        const legacyDir = path.join(tmpDir, '.claude', 'skills');
-        fs.mkdirSync(legacyDir, { recursive: true });
-        fs.writeFileSync(path.join(legacyDir, 'ghostpm.md'), 'old', 'utf8');
-
         await setup({ silent: true });
 
-        expect(fs.existsSync(path.join(legacyDir, 'ghostpm.md'))).toBe(false);
-        expect(fs.existsSync(path.join(legacyDir, 'ghostpm', 'SKILL.md'))).toBe(true);
+        // Still chained once, and the original is still recoverable rather than lost
+        // behind a second layer of ghostpm.
+        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
+        expect(readJson(userSettingsPath).statusLine.command).not.toContain(`${STATUSLINE_COMMAND} ${STATUSLINE_COMMAND}`);
     });
 
-    it('should handle no git root gracefully', async () => {
+    it('works outside a git repository', async () => {
         (findGitRoot as jest.Mock).mockReturnValue(null);
 
         await expect(setup({ silent: true })).resolves.not.toThrow();
