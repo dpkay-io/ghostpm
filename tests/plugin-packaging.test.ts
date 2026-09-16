@@ -25,10 +25,14 @@ function hookEntries(): { event: string; command: string; timeout: unknown; type
 }
 
 describe('plugin packaging', () => {
-    it('points the plugin manifest at the hooks file', () => {
+    it('leaves the standard hooks file to load itself', () => {
+        // hooks/hooks.json at the standard path is loaded automatically. Naming it in
+        // the manifest as well makes Claude Code reject the entire plugin with
+        // "Duplicate hooks file detected", so the manifest must stay silent about it.
         const manifest = readJson('.claude-plugin/plugin.json');
         expect(manifest.name).toBe('ghostpm');
-        expect(manifest.hooks).toBe('./hooks/hooks.json');
+        expect(manifest.hooks).toBeUndefined();
+        expect(fs.existsSync(path.join(ROOT, 'hooks', 'hooks.json'))).toBe(true);
     });
 
     it('wires exactly the events the handler implements', () => {

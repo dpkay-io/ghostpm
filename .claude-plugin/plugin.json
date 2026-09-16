@@ -3,6 +3,5 @@
   "name": "ghostpm",
   "version": "1.4.0",
   "description": "Invisible project management: captures work from your sessions into a local task ledger shared by every tool on the machine.",
-  "author": { "name": "dpkay" },
-  "hooks": "./hooks/hooks.json"
+  "author": { "name": "dpkay" }
 }
