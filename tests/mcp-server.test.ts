@@ -9,6 +9,7 @@ import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
 import { setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER } from '../src/ledger/settings';
+import * as ledgerTypes from '../src/ledger/types';
 
 jest.mock('child_process');
 
@@ -176,11 +177,20 @@ describe('mcp server on the ledger', () => {
     });
 
     it('renders merged task ids in the timeline using the real id format', async () => {
-        const duplicate = task('Dup');
-        const kept = task('Kept');
-        await call('merge_task', { from: `T${duplicate.id}`, into: `T${kept.id}` });
-        const timeline = await call('timeline');
-        expect(timeline).toContain(`merged into T${kept.id}`);
+        // formatTaskId(id) === `T${id}` today, so a plain string check can't tell a call
+        // through formatTaskId apart from a hardcoded `T${id}` template. Replacing its
+        // implementation makes the two observably different: only a real call picks up
+        // the replaced prefix, so this fails if the merged case reverts to a literal.
+        const formatSpy = jest.spyOn(ledgerTypes, 'formatTaskId').mockImplementation(id => `X${id}`);
+        try {
+            const duplicate = task('Dup');
+            const kept = task('Kept');
+            await call('merge_task', { from: `T${duplicate.id}`, into: `T${kept.id}` });
+            const timeline = await call('timeline');
+            expect(timeline).toContain(`merged into X${kept.id}`);
+        } finally {
+            formatSpy.mockRestore();
+        }
     });
 
     it('creates a git branch only when the setting is on', async () => {
