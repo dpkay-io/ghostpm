@@ -5,6 +5,7 @@ import { tempLedger, TempLedger, eventKinds } from './helpers';
 import { Db } from '../../src/db';
 import { listTasks, getVendorLink } from '../../src/ledger/tasks';
 import { getWorkspace, normalizePath } from '../../src/ledger/workspaces';
+import { registerWorkspace } from '../../src/registry';
 import { getSetting, getWorkspaceSetting, SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 import {
@@ -131,6 +132,21 @@ describe('legacy import', () => {
         } finally {
             fs.rmSync(plain, { recursive: true, force: true });
         }
+    });
+
+    it('falls back to registry-only roots when ~/.claude.json does not exist', () => {
+        registerWorkspace(repo, 'github');
+        const missing = path.join(tmpHome, 'does-not-exist.json');
+        const roots = discoverLegacyRoots(missing).map(normalizePath);
+        expect(roots).toEqual([normalizePath(repo)]);
+    });
+
+    it('falls back to registry-only roots when ~/.claude.json is malformed', () => {
+        registerWorkspace(repo, 'github');
+        const malformed = path.join(tmpHome, 'malformed.json');
+        fs.writeFileSync(malformed, '{ not valid json', 'utf8');
+        const roots = discoverLegacyRoots(malformed).map(normalizePath);
+        expect(roots).toEqual([normalizePath(repo)]);
     });
 
     it('runs only once per ledger', () => {

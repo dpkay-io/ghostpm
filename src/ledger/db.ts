@@ -131,6 +131,16 @@ export function write<T>(db: Ledger, fn: () => T): T {
 }
 
 export function migrate(db: Ledger): void {
+    // Read outside any transaction first: the common case (already current) then needs
+    // no write lock at all, which matters when this runs on every hook invocation.
+    const initialVersion = db.pragma('user_version', { simple: true }) as number;
+    if (initialVersion > SCHEMA_VERSION) {
+        throw new Error(
+            `Ledger at ${db.name} is schema version ${initialVersion}, newer than this build's ${SCHEMA_VERSION}. Update GhostPM before opening it.`
+        );
+    }
+    if (initialVersion === SCHEMA_VERSION) return;
+
     // Re-reading the version inside the lock makes concurrent first opens safe.
     const applyNext = (): boolean => {
         const version = db.pragma('user_version', { simple: true }) as number;

@@ -10,6 +10,7 @@ import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
 import { setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER } from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
+import { removeTempDir } from './temp-dir';
 
 jest.mock('child_process');
 
@@ -38,6 +39,16 @@ describe('mcp server on the ledger', () => {
         return result.content[0].text;
     };
 
+    /** Discriminates by the git subcommand, unlike mockExecFile which answers every call the same way. */
+    const mockExecFileByArgs = (handler: (args: string[]) => { error: Error | null; stdout?: string }) => {
+        (child_process.execFile as unknown as jest.Mock).mockImplementation((...callArgs: unknown[]) => {
+            const cb = callArgs[callArgs.length - 1];
+            const gitArgs = (callArgs[1] as string[]) ?? [];
+            const { error, stdout = '' } = handler(gitArgs);
+            if (typeof cb === 'function') (cb as (e: Error | null, out: string, err: string) => void)(error, stdout, '');
+        });
+    };
+
     const task = (title: string, overrides: Partial<NewTask> = {}) =>
         createTask(db, { title, phase: 'planned', workspaceId, origin: 'local', source: 'test', ...overrides });
 
@@ -55,7 +66,7 @@ describe('mcp server on the ledger', () => {
     afterEach(async () => {
         await client.close();
         db.close();
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeTempDir(dir);
         jest.clearAllMocks();
     });
 
@@ -126,10 +137,37 @@ describe('mcp server on the ledger', () => {
         expect(await call('get_task', { task_id: 'T999' })).toBe('Task T999 not found.');
     });
 
+    it("reports the task's own workspace, not the caller's", async () => {
+        const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-other-'));
+        try {
+            const callerWorkspace = ensureWorkspace(db, dir);
+            const other = ensureWorkspace(db, otherDir);
+            const elsewhere = createTask(db, {
+                title: 'Elsewhere', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test',
+            });
+            const parsed = JSON.parse(await call('get_task', { task_id: `T${elsewhere.id}` }));
+            expect(parsed.workspace).toBe(other.path);
+            expect(parsed.workspace).not.toBe(callerWorkspace.path);
+        } finally {
+            fs.rmSync(otherDir, { recursive: true, force: true });
+        }
+    });
+
     it('opens an attachment through the platform command', async () => {
         mockExecFile(null);
         expect(await call('open_attachment', { url: 'https://example.invalid/x' })).toContain('opened');
         expect(child_process.execFile).toHaveBeenCalled();
+    });
+
+    it('opens a vendor URL with shell metacharacters via rundll32, never through cmd.exe', async () => {
+        mockExecFile(null);
+        // A vendor-supplied URL (spec §8.9) can carry '&'; a shell-parsed cmd.exe form would
+        // split this into two commands. The exact argv below only holds for a shell-free call.
+        const url = 'https://example.invalid/x?a=1&b=2';
+        expect(await call('open_attachment', { url })).toContain('opened');
+        expect(child_process.execFile).toHaveBeenCalledWith(
+            'rundll32.exe', ['url.dll,FileProtocolHandler', url], expect.any(Function)
+        );
     });
 
     it('creates a task and attaches later work to it', async () => {
@@ -188,16 +226,58 @@ describe('mcp server on the ledger', () => {
             await call('merge_task', { from: `T${duplicate.id}`, into: `T${kept.id}` });
             const timeline = await call('timeline');
             expect(timeline).toContain(`merged into X${kept.id}`);
+            expect(timeline).toContain(`absorbed X${duplicate.id}`);
         } finally {
             formatSpy.mockRestore();
         }
     });
 
-    it('creates a git branch only when the setting is on', async () => {
+    it('does not touch git branches when the setting is off', async () => {
         mockExecFile(null, '');
         await call('track_work', { title: 'No branch', intent: 'fix' });
         expect(child_process.execFile).not.toHaveBeenCalledWith('git', expect.arrayContaining(['checkout']), expect.anything(), expect.anything());
+    });
+
+    it('switches to an existing task/<id> branch when one is already checked out', async () => {
         setSetting(db, SETTING_CREATE_BRANCH, true);
-        expect(await call('track_work', { title: 'With branch', intent: 'fix' })).toContain('branch task/T');
+        // rev-parse --verify succeeds for every ref, so ensureBranch takes the existing-branch path.
+        mockExecFile(null, '');
+        const result = await call('track_work', { title: 'With branch', intent: 'fix' });
+        expect(result).toContain('Switched to existing branch task/T');
+        expect(result).not.toContain('Created branch');
+    });
+
+    it('creates a new task/<id> branch when it does not exist yet', async () => {
+        setSetting(db, SETTING_CREATE_BRANCH, true);
+        mockExecFileByArgs(gitArgs => gitArgs.includes('--verify')
+            ? { error: new Error('unknown revision') }
+            : { error: null, stdout: '' });
+        const result = await call('track_work', { title: 'With branch', intent: 'fix' });
+        expect(result).toContain('Created branch task/T');
+        expect(result).not.toContain('Switched to existing branch');
+    });
+
+    it("notes the owning workspace when a write touches another workspace's task", async () => {
+        const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-other-'));
+        try {
+            const other = ensureWorkspace(db, otherDir);
+            const forTrack = createTask(db, { title: 'Elsewhere A', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test' });
+            const forUpdate = createTask(db, { title: 'Elsewhere B', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test' });
+            const forMerge = createTask(db, { title: 'Elsewhere C', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test' });
+            const localDup = task('Local dup');
+
+            expect(await call('track_work', { title: 'poke', intent: 'fix', task_id: `T${forTrack.id}` })).toContain(other.path);
+            expect(await call('update_task', { task_id: `T${forUpdate.id}`, comment: 'poke' })).toContain(other.path);
+            expect(await call('merge_task', { from: `T${localDup.id}`, into: `T${forMerge.id}` })).toContain(other.path);
+        } finally {
+            fs.rmSync(otherDir, { recursive: true, force: true });
+        }
+    });
+
+    it('does not claim a phase change when only a comment is added', async () => {
+        const existing = task('Login fix');
+        const result = await call('update_task', { task_id: `T${existing.id}`, comment: 'note only' });
+        expect(result).toContain('comment added');
+        expect(result).not.toContain('phase');
     });
 });

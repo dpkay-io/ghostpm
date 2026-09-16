@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { openLedger, ledgerPath, write, Where, SCHEMA_VERSION, LEDGER_FILE } from '../../src/ledger/db';
+import Database from 'better-sqlite3';
+import { openLedger, ledgerPath, migrate, write, Where, SCHEMA_VERSION, LEDGER_FILE } from '../../src/ledger/db';
+import { removeTempDir } from '../temp-dir';
 
 const EXPECTED_TABLES = ['events', 'leases', 'outbox', 'sessions', 'settings', 'tasks', 'vendor_links', 'workspaces'];
 const SPEC_BUSY_TIMEOUT_MS = 5000;
@@ -19,7 +21,7 @@ describe('ledger db', () => {
     afterEach(() => {
         if (originalHome !== undefined) process.env.GHOSTPM_HOME = originalHome;
         else delete process.env.GHOSTPM_HOME;
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeTempDir(dir);
     });
 
     it('resolves the ledger path under GHOSTPM_HOME', () => {
@@ -72,6 +74,38 @@ describe('ledger db', () => {
                 throw new Error('boom');
             })).toThrow('boom');
             expect(db.prepare('SELECT COUNT(*) AS n FROM settings').get()).toEqual({ n: 0 });
+        } finally {
+            db.close();
+        }
+    });
+
+    it('refuses to open a ledger written by a newer schema version', () => {
+        const newerVersion = SCHEMA_VERSION + 1;
+        const bumped = openLedger();
+        bumped.pragma(`user_version = ${newerVersion}`);
+        bumped.close();
+
+        let thrown: Error | undefined;
+        try {
+            openLedger();
+        } catch (error) {
+            thrown = error as Error;
+        }
+        expect(thrown).toBeDefined();
+        expect(thrown!.message).toContain(String(newerVersion));
+        expect(thrown!.message).toContain(String(SCHEMA_VERSION));
+        expect(thrown!.message).toContain(ledgerPath());
+    });
+
+    it('does not open a write transaction to migrate an already-current ledger', () => {
+        openLedger().close();
+        const db = new Database(ledgerPath());
+        try {
+            // write() calls db.transaction(...).immediate(), which takes the write lock.
+            // The fast path must return before migrate() ever calls it.
+            const transactionSpy = jest.spyOn(db, 'transaction');
+            migrate(db);
+            expect(transactionSpy).not.toHaveBeenCalled();
         } finally {
             db.close();
         }

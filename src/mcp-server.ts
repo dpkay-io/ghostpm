@@ -6,7 +6,7 @@ import { z } from "zod";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { Ledger, openLedger } from "./ledger/db";
-import { ensureWorkspace } from "./ledger/workspaces";
+import { ensureWorkspace, getWorkspace } from "./ledger/workspaces";
 import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
 import { listEvents, TimelineEntry } from "./ledger/events";
 import { mergeTask, trackWork } from "./ledger/work";
@@ -31,7 +31,8 @@ export const CURRENT_USER_REF = "@me";
 
 const TASK_COLUMNS = ["id", "phase", "title", "assignee", "remote"] as const;
 type TaskColumn = typeof TASK_COLUMNS[number];
-const BRANCH_TASK = /^task\/(.+)$/;
+const TASK_BRANCH_PREFIX = "task/";
+const BRANCH_TASK = new RegExp(`^${TASK_BRANCH_PREFIX}(.+)$`);
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
@@ -164,6 +165,13 @@ export class PmServer {
         return `${header}${rows.join('\n')}\n`;
     }
 
+    /** Task ids are machine-global (spec §9.1), so a write can silently land on another workspace's task. Say so. */
+    private crossWorkspaceNote(task: TaskRow, workspaceId: number): string {
+        if (task.workspace_id === null || task.workspace_id === workspaceId) return '';
+        const owner = getWorkspace(this.db, task.workspace_id);
+        return owner ? ` Note: this task belongs to workspace ${owner.path}.` : '';
+    }
+
     private sprintsOf(workspaceId: number): string[] {
         const milestones = listTasks(this.db, { workspaceId })
             .map(task => task.milestone)
@@ -179,7 +187,7 @@ export class PmServer {
 
     /** Checks out task/T<id>, creating it only when it does not exist yet. */
     private async ensureBranch(task: TaskRow): Promise<string> {
-        const branch = `task/${formatTaskId(task.id)}`;
+        const branch = `${TASK_BRANCH_PREFIX}${formatTaskId(task.id)}`;
         try {
             await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: this.cwd });
             await execFileAsync('git', ['checkout', branch], { cwd: this.cwd });
@@ -307,12 +315,13 @@ export class PmServer {
                     source: event.source,
                     text: (JSON.parse(event.payload ?? '{}') as { text?: string }).text ?? '',
                 }));
+                const taskWorkspace = task.workspace_id === null ? undefined : getWorkspace(this.db, task.workspace_id);
                 return text(JSON.stringify({
                     id: formatTaskId(task.id),
                     title: task.title,
                     phase: task.phase,
                     origin: task.origin,
-                    workspace: workspace.path,
+                    workspace: taskWorkspace?.path ?? null,
                     assignee: task.assignee,
                     milestone: task.milestone,
                     body: task.body,
@@ -333,8 +342,10 @@ export class PmServer {
                     let cmd: string;
                     let args: string[];
                     if (process.platform === "win32") {
-                        cmd = "cmd";
-                        args = ["/c", "start", "", url];
+                        // No shell: rundll32 hands the URL straight to the default handler, so
+                        // vendor-supplied URLs (spec §8.9) never pass through cmd.exe's parser.
+                        cmd = "rundll32.exe";
+                        args = ["url.dll,FileProtocolHandler", url];
                     } else if (process.platform === "darwin") {
                         cmd = "open";
                         args = [url];
@@ -368,7 +379,8 @@ export class PmServer {
                     const verb = result.created ? 'Created' : result.reopened ? 'Reopened' : 'Attached to';
                     const wantsBranch = resolveSetting(this.db, workspace.id, SETTING_CREATE_BRANCH, false);
                     const branchNote = wantsBranch && (result.created || result.reopened) ? await this.ensureBranch(result.task) : '';
-                    return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${branchNote}`);
+                    const crossNote = this.crossWorkspaceNote(result.task, workspace.id);
+                    return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${crossNote}${branchNote}`);
                 } catch (error) {
                     return failure(error);
                 }
@@ -394,10 +406,11 @@ export class PmServer {
                     const updated = updateTask(this.db, task.id, { phase, title, comment }, {
                         source: this.source(), sessionId: this.sessionId, human: true,
                     });
-                    const changes = [`phase ${updated.phase}`, title ? 'renamed' : '', comment ? 'comment added' : '']
+                    const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '']
                         .filter(part => part.length > 0)
                         .join(', ');
-                    return text(`${formatTaskId(updated.id)} updated: ${changes}.`);
+                    const crossNote = this.crossWorkspaceNote(updated, workspace.id);
+                    return text(`${formatTaskId(updated.id)} updated: ${changes}.${crossNote}`);
                 } catch (error) {
                     return failure(error);
                 }
@@ -418,7 +431,8 @@ export class PmServer {
                         fromRef: from, intoRef: into, workspaceId: workspace.id,
                         source: this.source(), sessionId: this.sessionId,
                     });
-                    return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${result.into.title}".`);
+                    const crossNote = this.crossWorkspaceNote(result.into, workspace.id);
+                    return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${result.into.title}".${crossNote}`);
                 } catch (error) {
                     return failure(error);
                 }
