@@ -6,7 +6,7 @@ import { INTENT_PHASE, Intent, Phase, TaskRow } from './types';
 
 /** Forward order for automatic phase moves; done and dropped are terminal. */
 const PHASE_RANK: Record<Phase, number> = { brainstorming: 0, planned: 1, in_progress: 2, in_review: 3, done: 4, dropped: 4 };
-const CLOSED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['done', 'dropped']);
+export const CLOSED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['done', 'dropped']);
 /** Spec §7.3: attaching new work to a done or dropped task reopens it in this phase. */
 export const REOPEN_PHASE: Phase = 'in_progress';
 
