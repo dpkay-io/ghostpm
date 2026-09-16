@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { registerWorkspace, unregisterWorkspace, getWorkspaces, WorkspaceEntry } from '../src/registry';
+import { removeTempDir } from './temp-dir';
 
 describe('registry', () => {
     let originalHome: string | undefined;
@@ -19,7 +20,7 @@ describe('registry', () => {
         } else {
             delete process.env.GHOSTPM_HOME;
         }
-        fs.rmSync(tmpHome, { recursive: true, force: true });
+        removeTempDir(tmpHome);
     });
 
     it('should return empty array when no registry exists', () => {
