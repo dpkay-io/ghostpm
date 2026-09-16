@@ -1,272 +1,308 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
-import { Engine } from "./engine";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { Ledger, openLedger } from "./ledger/db";
+import { ensureWorkspace } from "./ledger/workspaces";
+import { getTask, getVendorLink, listTasks, resolveTaskRef } from "./ledger/tasks";
+import { listEvents } from "./ledger/events";
+import {
+    DEFAULT_STALE_SESSION_MINUTES, MCP_CLIENT, endSession, getSession, listLiveSessions,
+    mcpSessionId, startSession, touchSession,
+} from "./ledger/sessions";
+import {
+    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
+    getWorkspaceSetting, resolveSetting, setWorkspaceSetting,
+} from "./ledger/settings";
+import { runLegacyImportOnce } from "./ledger/legacy-import";
+import { PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 
 const execFileAsync = promisify(execFile);
 
-const SERVER_INSTRUCTIONS = `You have access to GhostPM — a project management interface connected to this repository's issue tracker (GitHub Issues or Azure DevOps Work Items).
+export const SERVER_NAME = "ghostpm";
+export const SERVER_VERSION = "2.0.0";
+export const ALL_SPRINTS = "all";
+export const CLEAR_SPRINT = "__clear__";
+export const CURRENT_USER_REF = "@me";
+
+const TASK_COLUMNS = ["id", "phase", "title", "assignee", "remote"] as const;
+type TaskColumn = typeof TASK_COLUMNS[number];
+const BRANCH_TASK = /^task\/(.+)$/;
+const UNKNOWN = "_unknown_";
+const NONE_SET = "_none set_";
+
+const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task log shared by every session on this machine.
 
 ## When to use
 
-Use these tools whenever the user:
-- Asks about tasks, issues, work items, tickets, bugs, stories, or backlog ("show my tasks", "what's assigned to me", "list open issues", "any blockers?")
-- Wants to start, update, close, or comment on a task ("start working on #42", "close issue 7", "add a comment to that bug", "move it to in review")
-- References a specific issue number or task ID ("what's #15 about?", "details on task 123")
-- Asks about project status, sprint progress, or workload ("what's in progress?", "pending items", "what needs review?")
-- Wants to open a link or attachment from a task ("open that link", "show the attachment")
-- Is about to begin development work (check for assigned tasks first)
+- The user asks about tasks, issues, work items, tickets, bugs, backlog, sprint or project status
+- The user names a task (T42, #42, 42)
+- Before starting development work: check what is already tracked
 
-## How to use
+## Reading
 
-1. **Project context**: Call \`get_project_state\` at session start — returns vendor, user, active sprint, task counts, and sync status. This is the first thing to check.
-2. **Set sprint scope**: Call \`set_sprint\` to activate a sprint/milestone. Once set, \`query_tasks\` defaults to that sprint's tasks.
-3. **List tasks**: Call \`query_tasks\` — returns a markdown table. Filters by active sprint unless you pass sprint='all'. Supports assignee filter with '@me'.
-4. **Task details**: Call \`get_task\` with the task ID — returns full details including description and comments.
-5. **Start work**: Call \`start_task\` with the task ID — transitions the task to "in progress" and creates a git branch \`task/<id>\`.
-6. **Update task**: Call \`update_task\` with task ID and optional state/comment — changes state or adds a comment.
-7. **Open links**: Call \`open_attachment\` with a URL — opens it in the user's browser.
-8. **Resolve conflicts**: If a sync conflict is reported, call \`resolve_conflict\` — lets user pick local or remote changes.
+1. \`get_project_state\` — workspace, user, sprint, branch, active task, counts, live sessions, pending sync. Call it first in a session.
+2. \`set_sprint\` — activate a milestone; omit the name to list them; '${CLEAR_SPRINT}' unsets it.
+3. \`query_tasks\` — markdown table. Defaults to the active sprint and this workspace; supports sprint='${ALL_SPRINTS}', assignee='${CURRENT_USER_REF}', phase and all_workspaces.
+4. \`get_task\` — full details, vendor link and comments.
+5. \`open_attachment\` — open a URL in the user's browser.
 
 ## Important
 
-- Tasks are cached locally for instant reads. Data is synced with the remote PM tool in the background.
-- Task IDs match the remote system (GitHub issue numbers or Azure DevOps work item IDs).
-- When the user says a bare number like "#42" or "42", treat it as a task ID.
-- Do NOT ask the user to install or configure anything — GhostPM is already set up for this repo.
-- Prefer showing results directly rather than explaining what you could do.
-- Project state (active sprint, user identity) persists across sessions in the local database — all sessions share the same state.`;
+- Task ids are local: T42. \`#42\` or a bare \`42\` means the vendor's id in the current workspace.
+- Phases are: ${PHASES.join(', ')}.
+- Everything is read from the local ledger; reading never calls GitHub or Azure DevOps.
+- Do NOT ask the user to install or configure anything — GhostPM is already set up.
+- Show results directly rather than describing what you are about to do.`;
+
+export interface PmServerOptions {
+    db?: Ledger;
+    cwd?: string;
+    sessionId?: string;
+    /** Import legacy per-repo databases on start. Tests disable this. */
+    legacyImport?: boolean;
+}
+
+interface ToolResult {
+    [key: string]: unknown;
+    content: { type: "text"; text: string }[];
+    isError?: boolean;
+}
+
+const text = (value: string): ToolResult => ({ content: [{ type: "text", text: value }] });
 
 export class PmServer {
-    private server: McpServer;
-    private engine: Engine;
+    private readonly server: McpServer;
+    private readonly db: Ledger;
+    private readonly cwd: string;
+    private readonly sessionId: string;
+    private readonly legacyImport: boolean;
 
-    constructor() {
-        this.server = new McpServer(
-            { name: "ghostpm", version: "1.0.0" },
-            { instructions: SERVER_INSTRUCTIONS }
-        );
-        this.engine = new Engine();
+    constructor(options: PmServerOptions = {}) {
+        this.server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
+        this.db = options.db ?? openLedger();
+        this.cwd = options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+        this.sessionId = options.sessionId ?? mcpSessionId();
+        this.legacyImport = options.legacyImport ?? true;
+        startSession(this.db, {
+            id: this.sessionId,
+            client: MCP_CLIENT,
+            cwd: this.cwd,
+            workspaceId: ensureWorkspace(this.db, this.cwd).id,
+        });
         this.registerTools();
     }
 
-    private renderTaskTable(tasks: any[], columns: string[]): string {
-        let markdown = `| ${columns.join(" | ")} |\n`;
-        markdown += `| ${columns.map(() => "---").join(" | ")} |\n`;
-        for (const task of tasks) {
-            const row = columns.map(col => {
-                const val = (task as any)[col];
-                return val !== undefined && val !== null ? String(val).replace(/\|/g, "\\|") : "";
-            });
-            markdown += `| ${row.join(" | ")} |\n`;
+    /** Heartbeat plus the workspace every tool call works against. */
+    private context(): WorkspaceRow {
+        const workspace = ensureWorkspace(this.db, this.cwd);
+        touchSession(this.db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: workspace.id });
+        return workspace;
+    }
+
+    private async currentBranch(): Promise<string | null> {
+        try {
+            // execFile's util.promisify.custom resolves { stdout, stderr }; a plain jest.fn()
+            // mock of child_process (no custom symbol) resolves the raw stdout string instead.
+            const result = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: this.cwd });
+            const stdout = typeof result === 'string' ? result : result.stdout;
+            return stdout.trim();
+        } catch {
+            return null;
         }
-        return markdown;
     }
 
-    private registerTools() {
-        this.server.tool("get_project_state", "Get the current project context: vendor, user identity, active sprint, task summary, and sync status. Call this at the start of a session to understand the project state.", {}, async () => {
-            const state = this.engine.getProjectState();
-
-            let currentBranch: string | null = null;
-            try {
-                const { stdout } = await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
-                currentBranch = stdout.trim();
-            } catch { /* not in a git repo or git not available */ }
-
-            const taskMatch = currentBranch?.match(/^task\/(.+)$/);
-            if (taskMatch) state.activeTask = taskMatch[1];
-
-            const summary = this.engine.getSprintSummary(state.activeSprint?.name);
-            const availableSprints = this.engine.getAvailableSprints();
-
-            const lines = [
-                `**Vendor:** ${state.vendor}`,
-                `**User:** ${state.currentUser || '_not detected yet — will resolve on next sync_'}`,
-                `**Active Sprint:** ${state.activeSprint?.name || '_none set_'}`,
-                state.activeSprint?.endDate ? `**Sprint Ends:** ${state.activeSprint.endDate}` : null,
-                `**Current Branch:** ${currentBranch || '_unknown_'}`,
-                state.activeTask ? `**Active Task:** #${state.activeTask}` : null,
-                `**Last Sync:** ${state.lastSync || '_never_'}`,
-                '',
-                `**Tasks:** ${summary.total} total` + (Object.keys(summary.byState).length
-                    ? ' — ' + Object.entries(summary.byState).map(([s, n]) => `${n} ${s}`).join(', ')
-                    : ''),
-                availableSprints.length > 0
-                    ? `**Available Sprints:** ${availableSprints.join(', ')}`
-                    : null,
-            ].filter(Boolean);
-
-            return { content: [{ type: "text", text: lines.join('\n') }] };
-        });
-
-        this.server.tool("set_sprint", "Set or clear the active sprint/milestone. When set, query_tasks defaults to showing only that sprint's tasks. Omit sprint_name to list available sprints.", {
-            sprint_name: z.string().optional().describe("Sprint/milestone name to activate. Omit to list available sprints. Use '__clear__' to unset.")
-        }, async ({ sprint_name }) => {
-            if (!sprint_name) {
-                const sprints = this.engine.getAvailableSprints();
-                if (sprints.length === 0) return { content: [{ type: "text", text: "No sprints/milestones found in cached tasks. Sync first." }] };
-                const active = this.engine.getProjectState().activeSprint?.name;
-                const list = sprints.map(s => `${s === active ? '→ ' : '  '}${s}`).join('\n');
-                return { content: [{ type: "text", text: `Available sprints:\n${list}` }] };
-            }
-            if (sprint_name === '__clear__') {
-                this.engine.setActiveSprint(null);
-                return { content: [{ type: "text", text: "Active sprint cleared." }] };
-            }
-            this.engine.setActiveSprint({ name: sprint_name });
-            const summary = this.engine.getSprintSummary(sprint_name);
-            return { content: [{ type: "text", text: `Active sprint set to **${sprint_name}** (${summary.total} tasks: ${Object.entries(summary.byState).map(([s, n]) => `${n} ${s}`).join(', ')})` }] };
-        });
-
-        this.server.tool("query_tasks", "List tasks/issues from the project's issue tracker. Returns a markdown table. Defaults to active sprint if one is set; pass sprint='all' to see everything.", {
-            sprint: z.string().optional().describe("Filter by sprint/milestone. Defaults to active sprint. Use 'all' to show all tasks."),
-            assignee: z.string().optional().describe("Filter by assignee. Use '@me' for the current user."),
-        }, async ({ sprint, assignee }) => {
-            const db = this.engine.getDb();
-            const config = this.engine.getConfig();
-            let tasks = db.getTasks();
-
-            const activeSprint = this.engine.getProjectState().activeSprint;
-            if (sprint !== 'all') {
-                const filterSprint = sprint || activeSprint?.name;
-                if (filterSprint) {
-                    tasks = tasks.filter(t => t.milestone === filterSprint);
-                }
-            }
-
-            if (assignee) {
-                const resolvedAssignee = assignee === '@me'
-                    ? this.engine.getProjectState().currentUser
-                    : assignee;
-                if (resolvedAssignee) {
-                    tasks = tasks.filter(t => t.assignee === resolvedAssignee);
-                }
-            }
-
-            const columns = config.views.list_columns || ["id", "state", "title", "assignee"];
-
-            if (tasks.length === 0) {
-                const context = sprint === 'all' ? '' : activeSprint?.name ? ` in sprint "${activeSprint.name}"` : '';
-                return { content: [{ type: "text", text: `No tasks found${context}.` }] };
-            }
-
-            const header = sprint !== 'all' && activeSprint?.name && !sprint
-                ? `_Showing sprint: ${activeSprint.name}_\n\n`
-                : '';
-
-            return {
-                content: [{ type: "text", text: header + this.renderTaskTable(tasks, columns) }]
-            };
-        });
-
-        this.server.tool("get_task", "Get full details of a specific task/issue including description and comments. Use when the user asks about a particular issue number or wants details on a task.", {
-            task_id: z.string().describe("The task/issue ID (e.g. '42' for GitHub issue #42)")
-        }, async ({ task_id }) => {
-            const db = this.engine.getDb();
-            const task = db.getTask(task_id);
-            if (!task) {
-                return { content: [{ type: "text", text: `Task ${task_id} not found.` }] };
-            }
-            
-            const config = this.engine.getConfig();
-            const detailFields = config.views.detail_fields || ["id", "title", "body", "comments"];
-            const filteredTask: any = {};
-            for (const field of detailFields) {
-                if ((task as any)[field] !== undefined) {
-                    filteredTask[field] = (task as any)[field];
-                }
-            }
-            
-            return { content: [{ type: "text", text: JSON.stringify(filteredTask, null, 2) }] };
-        });
-
-        this.server.tool("start_task", "Begin working on a task: transitions it to 'in progress' and creates a git branch task/<id>. Use when the user says they want to start, pick up, or work on a specific task.", {
-            task_id: z.string().describe("The task/issue ID to start working on")
-        }, async ({ task_id }) => {
-            const config = this.engine.getConfig();
-            const startState = config.workflow?.transitions?.start_task || "in_progress";
-            await this.engine.queueUpdateTask(task_id, startState);
-            
-            let branchOutput = "";
-            try {
-                const branchName = `task/${task_id.replace(/[^a-zA-Z0-9-]/g, '-')}`;
-                await execFileAsync('git', ['checkout', '-b', branchName]);
-                branchOutput = `\nChecked out new branch: ${branchName}`;
-            } catch (err: any) {
-                branchOutput = `\n(Note: Failed to checkout git branch: ${err.message})`;
-            }
-            
-            return { content: [{ type: "text", text: `Task ${task_id} queued for start (state: ${startState}). Background sync triggered.${branchOutput}` }] };
-        });
-
-        this.server.tool("update_task", "Update a task's state or add a comment. Use when the user wants to close, reopen, move, or comment on a task/issue.", {
-            task_id: z.string().describe("The task/issue ID to update"),
-            state: z.string().optional().describe("New state (e.g. 'closed', 'in_review', 'open')"),
-            comment: z.string().optional().describe("Comment text to add to the task")
-        }, async ({ task_id, state, comment }) => {
-            if (!state && !comment) {
-                return { content: [{ type: "text", text: `Must provide state or comment to update task ${task_id}.` }] };
-            }
-            await this.engine.queueUpdateTask(task_id, state, comment);
-            return { content: [{ type: "text", text: `Task ${task_id} update queued. Background sync triggered.` }] };
-        });
-
-        this.server.tool("open_attachment", "Open a URL from a task in the user's local browser. Use when the user wants to view a link, attachment, or external resource referenced in a task.", {
-            url: z.string().url().describe("URL to open in the browser")
-        }, async ({ url }) => {
-            try {
-                let cmd: string;
-                let args: string[];
-                if (process.platform === "win32") {
-                    cmd = "cmd";
-                    args = ["/c", "start", "", url];
-                } else if (process.platform === "darwin") {
-                    cmd = "open";
-                    args = [url];
-                } else {
-                    cmd = "xdg-open";
-                    args = [url];
-                }
-                await execFileAsync(cmd, args);
-                return { content: [{ type: "text", text: `Attachment opened successfully in local browser.` }] };
-            } catch (error: any) {
-                return { content: [{ type: "text", text: `Failed to open attachment: ${error.message}` }] };
-            }
-        });
-
-        this.server.tool("resolve_conflict", "Resolve a sync conflict when local and remote changes clash. Use when a previous update reported a conflict.", {
-            task_id: z.string().describe("The task ID with the conflict"),
-            winning_state: z.enum(["local", "remote"]).describe("'local' to keep your changes, 'remote' to accept the server's version")
-        }, async ({ task_id, winning_state }) => {
-            const outboxItem = this.engine.getDb().getConflictedOutboxItemByTaskId(task_id);
-            if (!outboxItem || !outboxItem.id) {
-                return { content: [{ type: "text", text: `No conflicting outbox item found for task ${task_id}.` }] };
-            }
-            
-            if (winning_state === "local") {
-                this.engine.resolveConflict(outboxItem.id, 'force_push');
-                return { content: [{ type: "text", text: `Conflict resolved by forcing local changes for task ${task_id}.` }] };
-            } else {
-                this.engine.resolveConflict(outboxItem.id, 'drop');
-                return { content: [{ type: "text", text: `Conflict resolved by dropping local changes in favor of remote for task ${task_id}.` }] };
-            }
-        });
+    /** The session's task, or the task named by a task/<ref> branch. */
+    private activeTask(branch: string | null, workspaceId: number): TaskRow | undefined {
+        const sessionTaskId = getSession(this.db, this.sessionId)?.task_id ?? null;
+        if (sessionTaskId !== null) return getTask(this.db, sessionTaskId);
+        const match = branch === null ? null : branch.match(BRANCH_TASK);
+        return match ? resolveTaskRef(this.db, match[1], workspaceId) : undefined;
     }
 
-    public async run() {
-        const transport = new StdioServerTransport();
-        await this.server.connect(transport);
-        console.error("GhostPM MCP server running on stdio");
+    private phaseSummary(tasks: TaskRow[]): string {
+        const counts = new Map<Phase, number>();
+        for (const task of tasks) counts.set(task.phase, (counts.get(task.phase) ?? 0) + 1);
+        return PHASES.filter(phase => counts.has(phase)).map(phase => `${counts.get(phase)} ${phase}`).join(', ');
+    }
 
-        const syncInterval = setInterval(() => {
-            this.engine.sync().catch(e => console.error("Sync daemon error:", e));
-        }, 5 * 60 * 1000);
-        syncInterval.unref();
+    private cell(task: TaskRow, column: TaskColumn): string {
+        switch (column) {
+            case 'id': return formatTaskId(task.id);
+            case 'phase': return task.phase;
+            case 'title': return task.title;
+            case 'assignee': return task.assignee ?? '';
+            case 'remote': {
+                const link = getVendorLink(this.db, task.id);
+                return link ? `#${link.remote_id}` : '';
+            }
+        }
+    }
 
-        this.engine.sync().catch(e => console.error("Initial sync error:", e));
+    private renderTable(tasks: TaskRow[]): string {
+        const header = `| ${TASK_COLUMNS.join(' | ')} |\n| ${TASK_COLUMNS.map(() => '---').join(' | ')} |\n`;
+        const rows = tasks.map(task => `| ${TASK_COLUMNS.map(column => this.cell(task, column).replace(/\|/g, '\\|')).join(' | ')} |`);
+        return `${header}${rows.join('\n')}\n`;
+    }
+
+    private sprintsOf(workspaceId: number): string[] {
+        const milestones = listTasks(this.db, { workspaceId })
+            .map(task => task.milestone)
+            .filter((milestone): milestone is string => milestone !== null && milestone !== '');
+        return Array.from(new Set(milestones)).sort();
+    }
+
+    private registerTools(): void {
+        this.server.tool(
+            "get_project_state",
+            "Current workspace, user, sprint, branch, active task, task counts, live sessions and pending sync work. Call this first in a session.",
+            {},
+            async () => {
+                const workspace = this.context();
+                const branch = await this.currentBranch();
+                const active = this.activeTask(branch, workspace.id);
+                const tasks = listTasks(this.db, { workspaceId: workspace.id });
+                const summary = this.phaseSummary(tasks);
+                const staleMinutes = resolveSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES, DEFAULT_STALE_SESSION_MINUTES);
+                const outbox = this.db.prepare('SELECT status, COUNT(*) AS n FROM outbox GROUP BY status ORDER BY status')
+                    .all() as { status: string; n: number }[];
+                return text([
+                    `**Workspace:** ${workspace.path} (vendor: ${workspace.vendor})`,
+                    `**User:** ${getWorkspaceSetting<string>(this.db, workspace.id, SETTING_CURRENT_USER) ?? UNKNOWN}`,
+                    `**Active Sprint:** ${getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT) ?? NONE_SET}`,
+                    `**Current Branch:** ${branch ?? UNKNOWN}`,
+                    active ? `**Active Task:** ${formatTaskId(active.id)} ${active.title} · ${active.phase}` : '**Active Task:** _none_',
+                    `**Tasks:** ${tasks.length} total${summary ? ` — ${summary}` : ''}`,
+                    `**Live Sessions:** ${listLiveSessions(this.db, staleMinutes).length}`,
+                    `**Outbox:** ${outbox.length > 0 ? outbox.map(row => `${row.n} ${row.status}`).join(', ') : 'empty'}`,
+                ].join('\n'));
+            },
+        );
+
+        this.server.tool(
+            "set_sprint",
+            "Activate a sprint/milestone for this workspace. Omit the name to list available sprints.",
+            {
+                sprint_name: z.string().optional().describe(`Milestone to activate. Omit to list; '${CLEAR_SPRINT}' clears it.`),
+            },
+            async ({ sprint_name }) => {
+                const workspace = this.context();
+                if (!sprint_name) {
+                    const sprints = this.sprintsOf(workspace.id);
+                    if (sprints.length === 0) return text('No sprints found in this workspace.');
+                    const active = getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT);
+                    return text(sprints.map(sprint => `${sprint === active ? '→ ' : '  '}${sprint}`).join('\n'));
+                }
+                if (sprint_name === CLEAR_SPRINT) {
+                    setWorkspaceSetting(this.db, workspace.id, SETTING_ACTIVE_SPRINT, undefined);
+                    return text('Active sprint cleared.');
+                }
+                setWorkspaceSetting(this.db, workspace.id, SETTING_ACTIVE_SPRINT, sprint_name);
+                const count = listTasks(this.db, { workspaceId: workspace.id, milestone: sprint_name }).length;
+                return text(`Active sprint set to **${sprint_name}** (${count} task${count === 1 ? '' : 's'}).`);
+            },
+        );
+
+        this.server.tool(
+            "query_tasks",
+            "List tasks as a markdown table. Defaults to the active sprint and the current workspace.",
+            {
+                sprint: z.string().optional().describe(`Milestone filter. Defaults to the active sprint; '${ALL_SPRINTS}' ignores it.`),
+                assignee: z.string().optional().describe(`Assignee filter. '${CURRENT_USER_REF}' resolves to the detected user.`),
+                phase: z.enum(PHASES).optional().describe('Phase filter.'),
+                all_workspaces: z.boolean().optional().describe('Include tasks from every workspace on this machine.'),
+            },
+            async ({ sprint, assignee, phase, all_workspaces }) => {
+                const workspace = this.context();
+                const activeSprint = getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT);
+                const milestone = sprint === ALL_SPRINTS ? undefined : sprint ?? activeSprint;
+                let resolvedAssignee = assignee;
+                if (assignee === CURRENT_USER_REF) {
+                    resolvedAssignee = getWorkspaceSetting<string>(this.db, workspace.id, SETTING_CURRENT_USER);
+                    if (!resolvedAssignee) {
+                        return text(`The current user is not detected for this workspace, so ${CURRENT_USER_REF} cannot be resolved.`);
+                    }
+                }
+                const tasks = listTasks(this.db, {
+                    workspaceId: all_workspaces ? undefined : workspace.id,
+                    milestone,
+                    assignee: resolvedAssignee,
+                    phases: phase ? [phase] : undefined,
+                });
+                if (tasks.length === 0) return text('No tasks found.');
+                return text(`${milestone ? `_Sprint: ${milestone}_\n\n` : ''}${this.renderTable(tasks)}`);
+            },
+        );
+
+        this.server.tool(
+            "get_task",
+            "Full details of one task: phase, vendor link, description and comments.",
+            {
+                task_id: z.string().describe('T42 for a local id, or #42 / 42 for the vendor id in this workspace.'),
+            },
+            async ({ task_id }) => {
+                const workspace = this.context();
+                const task = resolveTaskRef(this.db, task_id, workspace.id);
+                if (!task) return text(`Task ${task_id} not found.`);
+                const link = getVendorLink(this.db, task.id);
+                const comments = listEvents(this.db, { taskId: task.id, kinds: ['comment'] }).map(event => ({
+                    at: event.at,
+                    source: event.source,
+                    text: (JSON.parse(event.payload ?? '{}') as { text?: string }).text ?? '',
+                }));
+                return text(JSON.stringify({
+                    id: formatTaskId(task.id),
+                    title: task.title,
+                    phase: task.phase,
+                    origin: task.origin,
+                    workspace: workspace.path,
+                    assignee: task.assignee,
+                    milestone: task.milestone,
+                    body: task.body,
+                    vendor: link ? { vendor: link.vendor, id: link.remote_id, url: link.remote_url, state: link.remote_state } : null,
+                    comments,
+                }, null, 2));
+            },
+        );
+
+        this.server.tool(
+            "open_attachment",
+            "Open a URL from a task in the user's local browser.",
+            {
+                url: z.string().url().describe('URL to open in the browser'),
+            },
+            async ({ url }) => {
+                try {
+                    let cmd: string;
+                    let args: string[];
+                    if (process.platform === "win32") {
+                        cmd = "cmd";
+                        args = ["/c", "start", "", url];
+                    } else if (process.platform === "darwin") {
+                        cmd = "open";
+                        args = [url];
+                    } else {
+                        cmd = "xdg-open";
+                        args = [url];
+                    }
+                    await execFileAsync(cmd, args);
+                    return text('Attachment opened successfully in local browser.');
+                } catch (error) {
+                    return text(`Failed to open attachment: ${(error as Error).message}`);
+                }
+            },
+        );
+    }
+
+    public async run(transport?: Transport): Promise<void> {
+        if (this.legacyImport) runLegacyImportOnce(this.db);
+        const stdio = transport === undefined;
+        if (stdio) process.once('exit', () => endSession(this.db, this.sessionId));
+        await this.server.connect(transport ?? new StdioServerTransport());
+        if (stdio) console.error(`GhostPM MCP server running on stdio (${this.sessionId})`);
     }
 }
 
