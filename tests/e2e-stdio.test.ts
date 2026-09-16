@@ -1,0 +1,62 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
+const STARTUP_TIMEOUT_MS = 30000;
+// The built CLI is what this test drives; `npm run build` must run first.
+const describeBuilt = fs.existsSync(CLI) ? describe : describe.skip;
+
+function inheritedEnv(extra: Record<string, string>): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const key of Object.keys(process.env)) {
+        const value = process.env[key];
+        if (value !== undefined) env[key] = value;
+    }
+    return { ...env, ...extra };
+}
+
+describeBuilt('ghostpm serve over stdio', () => {
+    let home: string;
+    let workspace: string;
+    let client: Client;
+
+    const callText = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
+        const result = await client.callTool({ name, arguments: args }) as { content: { text: string }[] };
+        return result.content[0].text;
+    };
+
+    beforeAll(async () => {
+        home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-e2e-home-'));
+        workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-e2e-ws-'));
+        client = new Client({ name: 'e2e', version: '1.0.0' });
+        await client.connect(new StdioClientTransport({
+            command: process.execPath,
+            args: [CLI, 'serve'],
+            cwd: workspace,
+            // HOME/USERPROFILE keep the legacy import away from the real ~/.claude.json.
+            env: inheritedEnv({ GHOSTPM_HOME: home, HOME: home, USERPROFILE: home }),
+        }));
+    }, STARTUP_TIMEOUT_MS);
+
+    afterAll(async () => {
+        await client.close();
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(workspace, { recursive: true, force: true });
+    });
+
+    it('starts outside a git repository and tracks work end to end', async () => {
+        const created = await callText('track_work', { title: 'Smoke test task', intent: 'implement' });
+        expect(created).toMatch(/^Created T\d+ "Smoke test task" \(planned\)\.$/);
+
+        const state = await callText('get_project_state');
+        expect(state).toContain('vendor: none');
+        expect(state).toContain('Smoke test task');
+        expect(state).toContain('**Live Sessions:** 1');
+
+        expect(await callText('query_tasks')).toContain('Smoke test task');
+        expect(fs.existsSync(path.join(home, 'ledger.db'))).toBe(true);
+    }, STARTUP_TIMEOUT_MS);
+});

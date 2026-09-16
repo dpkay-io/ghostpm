@@ -29,7 +29,15 @@ describe('setup', () => {
     afterEach(() => {
         process.env.HOME = origHome;
         process.env.USERPROFILE = origUserProfile;
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+        try {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch (error) {
+            // ponytail: Windows can still be releasing a handle on a file just written under
+            // this disposable temp dir (e.g. the installed skill plugin), so rmSync sometimes
+            // hits ENOTEMPTY/EBUSY/EPERM here. Leaking it is harmless; failing the test on it is not.
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM') throw error;
+        }
     });
 
     it('should create .claude/settings.local.json with MCP config', async () => {
