@@ -165,11 +165,13 @@ export class PmServer {
         return `${header}${rows.join('\n')}\n`;
     }
 
-    /** Task ids are machine-global (spec §9.1), so a write can silently land on another workspace's task. Say so. */
-    private crossWorkspaceNote(task: TaskRow, workspaceId: number): string {
-        if (task.workspace_id === null || task.workspace_id === workspaceId) return '';
-        const owner = getWorkspace(this.db, task.workspace_id);
-        return owner ? ` Note: this task belongs to workspace ${owner.path}.` : '';
+    /** T-form ids stay machine-global (spec §9.1), so a write can land on another workspace's task. Say which one. */
+    private crossWorkspaceNote(workspaceId: number, ...tasks: TaskRow[]): string {
+        return tasks.map(task => {
+            if (task.workspace_id === null || task.workspace_id === workspaceId) return '';
+            const owner = getWorkspace(this.db, task.workspace_id);
+            return owner ? ` Note: ${formatTaskId(task.id)} belongs to workspace ${owner.path}.` : '';
+        }).join('');
     }
 
     private sprintsOf(workspaceId: number): string[] {
@@ -379,7 +381,7 @@ export class PmServer {
                     const verb = result.created ? 'Created' : result.reopened ? 'Reopened' : 'Attached to';
                     const wantsBranch = resolveSetting(this.db, workspace.id, SETTING_CREATE_BRANCH, false);
                     const branchNote = wantsBranch && (result.created || result.reopened) ? await this.ensureBranch(result.task) : '';
-                    const crossNote = this.crossWorkspaceNote(result.task, workspace.id);
+                    const crossNote = this.crossWorkspaceNote(workspace.id, result.task);
                     return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${crossNote}${branchNote}`);
                 } catch (error) {
                     return failure(error);
@@ -409,7 +411,7 @@ export class PmServer {
                     const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '']
                         .filter(part => part.length > 0)
                         .join(', ');
-                    const crossNote = this.crossWorkspaceNote(updated, workspace.id);
+                    const crossNote = this.crossWorkspaceNote(workspace.id, updated);
                     return text(`${formatTaskId(updated.id)} updated: ${changes}.${crossNote}`);
                 } catch (error) {
                     return failure(error);
@@ -431,7 +433,7 @@ export class PmServer {
                         fromRef: from, intoRef: into, workspaceId: workspace.id,
                         source: this.source(), sessionId: this.sessionId,
                     });
-                    const crossNote = this.crossWorkspaceNote(result.into, workspace.id);
+                    const crossNote = this.crossWorkspaceNote(workspace.id, result.into, result.from);
                     return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${result.into.title}".${crossNote}`);
                 } catch (error) {
                     return failure(error);

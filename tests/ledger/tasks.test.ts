@@ -121,6 +121,17 @@ describe('tasks', () => {
             expect(resolveTaskRef(ledger.db, '#777', otherWorkspaceId)?.id).toBe(foreign.id);
         });
 
+        it('does not fall back to a local id owned by another workspace', () => {
+            const otherDir = path.join(ledger.dir, 'other-fallback');
+            fs.mkdirSync(otherDir);
+            const otherWorkspaceId = ensureWorkspace(ledger.db, otherDir).id;
+            const foreign = createTask(ledger.db, newTask({ workspaceId: otherWorkspaceId }));
+            expect(resolveTaskRef(ledger.db, `#${foreign.id}`, workspaceId)).toBeUndefined();
+            expect(resolveTaskRef(ledger.db, String(foreign.id), workspaceId)).toBeUndefined();
+            // T-form stays machine-global: it is the explicit "this ledger id" handle.
+            expect(resolveTaskRef(ledger.db, `T${foreign.id}`, workspaceId)?.id).toBe(foreign.id);
+        });
+
         it('returns undefined for unrecognised references', () => {
             expect(resolveTaskRef(ledger.db, 'login', workspaceId)).toBeUndefined();
         });

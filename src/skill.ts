@@ -41,7 +41,7 @@ GhostPM keeps a local task log shared by every session on this machine. Use its 
 ## Rules
 
 - Use the MCP tools directly — never shell out to \`gh\` or \`az\` for task operations.
-- Task ids are local (T42). \`#42\` or a bare \`42\` means the vendor id in the current workspace.
+- Task ids are ledger ids (T42) and resolve from any repo. \`#42\` or a bare \`42\` stays inside the current workspace: the vendor id there, else local id 42 there.
 - Phases: brainstorming, planned, in_progress, in_review, done, dropped.
 - Show results directly; don't narrate what you are about to do.
 `;

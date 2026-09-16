@@ -269,6 +269,13 @@ describe('mcp server on the ledger', () => {
             expect(await call('track_work', { title: 'poke', intent: 'fix', task_id: `T${forTrack.id}` })).toContain(other.path);
             expect(await call('update_task', { task_id: `T${forUpdate.id}`, comment: 'poke' })).toContain(other.path);
             expect(await call('merge_task', { from: `T${localDup.id}`, into: `T${forMerge.id}` })).toContain(other.path);
+
+            // The merged-away task is a write too: a foreign `from` must be named even when `into` is local.
+            const foreignDup = createTask(db, { title: 'Elsewhere D', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test' });
+            const localKeep = task('Local keep');
+            const merged = await call('merge_task', { from: `T${foreignDup.id}`, into: `T${localKeep.id}` });
+            expect(merged).toContain(other.path);
+            expect(merged).toContain(`T${foreignDup.id} belongs to workspace`);
         } finally {
             fs.rmSync(otherDir, { recursive: true, force: true });
         }

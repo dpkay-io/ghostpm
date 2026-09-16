@@ -102,21 +102,23 @@ export function updateTask(db: Ledger, id: number, update: TaskUpdate, ctx: Chan
     });
 }
 
-/** T42 → local id. #42 or 42 → vendor remote_id in the workspace, else local id (spec §9.1). */
+/** T42 → local id, machine-global. #42 or 42 → vendor remote_id in the workspace, else local id 42 in that same workspace (spec §9.1). */
 export function resolveTaskRef(db: Ledger, ref: string, workspaceId: number | null): TaskRow | undefined {
     const trimmed = ref.trim();
     const local = trimmed.match(LOCAL_REF);
     if (local) return getTask(db, Number(local[1]));
     const numeric = trimmed.match(NUMERIC_REF);
     if (!numeric) return undefined;
-    if (workspaceId !== null) {
-        const linked = db.prepare(`
-            SELECT t.* FROM tasks t JOIN vendor_links l ON l.task_id = t.id
-            WHERE t.workspace_id = ? AND l.remote_id = ?
-            ORDER BY t.id LIMIT 1`).get(workspaceId, numeric[1]) as TaskRow | undefined;
-        if (linked) return linked;
-    }
-    return getTask(db, Number(numeric[1]));
+    // Outside any workspace there is nothing to scope to, so the bare id is the whole ledger.
+    if (workspaceId === null) return getTask(db, Number(numeric[1]));
+    const linked = db.prepare(`
+        SELECT t.* FROM tasks t JOIN vendor_links l ON l.task_id = t.id
+        WHERE t.workspace_id = ? AND l.remote_id = ?
+        ORDER BY t.id LIMIT 1`).get(workspaceId, numeric[1]) as TaskRow | undefined;
+    if (linked) return linked;
+    // Two repos routinely both have an issue #42, so a bare number never escapes its workspace.
+    return db.prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?')
+        .get(Number(numeric[1]), workspaceId) as TaskRow | undefined;
 }
 
 export function listTasks(db: Ledger, filter: TaskFilter = {}): TaskRow[] {
