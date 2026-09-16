@@ -7,14 +7,17 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PmServer } from '../src/mcp-server';
 import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
-import { createTask, updateTask, insertVendorLink, NewTask } from '../src/ledger/tasks';
-import { setWorkspaceSetting, SETTING_CURRENT_USER } from '../src/ledger/settings';
+import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
+import { setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER } from '../src/ledger/settings';
 
 jest.mock('child_process');
 
 const SESSION_ID = 'mcp:test';
 const GIT_FAILURE = 'not a git repository';
-const READ_TOOLS = ['get_project_state', 'get_task', 'open_attachment', 'query_tasks', 'set_sprint'];
+const TOOL_NAMES = [
+    'get_project_state', 'get_task', 'merge_task', 'open_attachment',
+    'query_tasks', 'set_sprint', 'timeline', 'track_work', 'update_task',
+];
 
 describe('mcp server on the ledger', () => {
     let dir: string;
@@ -57,7 +60,7 @@ describe('mcp server on the ledger', () => {
 
     it('registers the ledger tools and none of the removed ones', async () => {
         const names = (await client.listTools()).tools.map(t => t.name).sort();
-        expect(names).toEqual(READ_TOOLS);
+        expect(names).toEqual(TOOL_NAMES);
     });
 
     it('reports workspace, phase counts, live sessions and no active task', async () => {
@@ -126,5 +129,57 @@ describe('mcp server on the ledger', () => {
         mockExecFile(null);
         expect(await call('open_attachment', { url: 'https://example.invalid/x' })).toContain('opened');
         expect(child_process.execFile).toHaveBeenCalled();
+    });
+
+    it('creates a task and attaches later work to it', async () => {
+        const created = await call('track_work', { title: 'Login fix', intent: 'implement' });
+        expect(created).toMatch(/^Created T\d+ "Login fix" \(planned\)\.$/);
+        const id = created.match(/T\d+/)![0];
+        expect(await call('track_work', { title: 'now planning', intent: 'plan', task_id: id })).toContain(`Attached to ${id}`);
+        expect(await call('get_project_state')).toContain(`**Active Task:** ${id} Login fix · planned`);
+    });
+
+    it('reopens a closed task', async () => {
+        const closed = task('Closed', { phase: 'done' });
+        expect(await call('track_work', { title: 'more work', intent: 'fix', task_id: `T${closed.id}` }))
+            .toContain(`Reopened T${closed.id}`);
+    });
+
+    it('updates phase, title and comment as a human change', async () => {
+        const existing = task('Login fix');
+        expect(await call('update_task', { task_id: `T${existing.id}` })).toContain('Provide a phase');
+        expect(await call('update_task', { task_id: `T${existing.id}`, phase: 'in_review', comment: 'PR up' })).toContain('in_review');
+        expect(getTask(db, existing.id)!.human_phase_at).not.toBeNull();
+        expect(await call('update_task', { task_id: 'T999', phase: 'done' })).toBe('Task T999 not found.');
+    });
+
+    it('merges duplicates and reports refusals as errors', async () => {
+        const duplicate = task('Dup');
+        const kept = task('Kept');
+        expect(await call('merge_task', { from: `T${duplicate.id}`, into: `T${kept.id}` }))
+            .toContain(`Merged T${duplicate.id} into T${kept.id}`);
+        expect(getTask(db, duplicate.id)!.phase).toBe('dropped');
+
+        const refused = await client.callTool({ name: 'merge_task', arguments: { from: `T${kept.id}`, into: `T${kept.id}` } }) as { isError?: boolean; content: { text: string }[] };
+        expect(refused.isError).toBe(true);
+        expect(refused.content[0].text).toContain('Cannot merge a task into itself');
+    });
+
+    it('lists recent activity in the timeline', async () => {
+        const created = await call('track_work', { title: 'Login fix', intent: 'implement' });
+        const id = created.match(/T\d+/)![0];
+        await call('update_task', { task_id: id, phase: 'in_review' });
+        const timeline = await call('timeline');
+        expect(timeline).toContain(`${id} Login fix · created`);
+        expect(timeline).toContain('planned → in_review');
+        expect(await call('timeline', { since: new Date(Date.now() + 60_000).toISOString() })).toBe('Nothing recorded in that period.');
+    });
+
+    it('creates a git branch only when the setting is on', async () => {
+        mockExecFile(null, '');
+        await call('track_work', { title: 'No branch', intent: 'fix' });
+        expect(child_process.execFile).not.toHaveBeenCalledWith('git', expect.arrayContaining(['checkout']), expect.anything(), expect.anything());
+        setSetting(db, SETTING_CREATE_BRANCH, true);
+        expect(await call('track_work', { title: 'With branch', intent: 'fix' })).toContain('branch task/T');
     });
 });

@@ -7,18 +7,19 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { Ledger, openLedger } from "./ledger/db";
 import { ensureWorkspace } from "./ledger/workspaces";
-import { getTask, getVendorLink, listTasks, resolveTaskRef } from "./ledger/tasks";
-import { listEvents } from "./ledger/events";
+import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
+import { listEvents, TimelineEntry } from "./ledger/events";
+import { mergeTask, trackWork } from "./ledger/work";
 import {
     DEFAULT_STALE_SESSION_MINUTES, MCP_CLIENT, endSession, getSession, listLiveSessions,
     mcpSessionId, startSession, touchSession,
 } from "./ledger/sessions";
 import {
-    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
+    SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
     getWorkspaceSetting, resolveSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImportOnce } from "./ledger/legacy-import";
-import { PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
+import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +34,9 @@ type TaskColumn = typeof TASK_COLUMNS[number];
 const BRANCH_TASK = /^task\/(.+)$/;
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
+const DEFAULT_TIMELINE_HOURS = 24;
+const MS_PER_HOUR = 60 * 60 * 1000;
+const SOURCE_PREFIX = "mcp";
 
 const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task log shared by every session on this machine.
 
@@ -49,6 +53,13 @@ const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task l
 3. \`query_tasks\` — markdown table. Defaults to the active sprint and this workspace; supports sprint='${ALL_SPRINTS}', assignee='${CURRENT_USER_REF}', phase and all_workspaces.
 4. \`get_task\` — full details, vendor link and comments.
 5. \`open_attachment\` — open a URL in the user's browser.
+
+## Writing
+
+6. \`track_work\` — call it when a prompt starts real work (brainstorm, plan, detail out, implement, fix). Attach to an existing task when one matches (pass task_id); otherwise omit task_id to create one. Ask the user once, inline, when you are unsure which task. Never call it for questions or lookups.
+7. \`update_task\` — phase, title or comment. Only change the phase when the user asks; phases otherwise follow evidence.
+8. \`merge_task\` — when two tasks turn out to be the same piece of work.
+9. \`timeline\` — what happened recently, for standups and recaps.
 
 ## Important
 
@@ -73,6 +84,11 @@ interface ToolResult {
 }
 
 const text = (value: string): ToolResult => ({ content: [{ type: "text", text: value }] });
+
+const failure = (error: unknown): ToolResult => ({
+    content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
+    isError: true,
+});
 
 export class PmServer {
     private readonly server: McpServer;
@@ -153,6 +169,44 @@ export class PmServer {
             .map(task => task.milestone)
             .filter((milestone): milestone is string => milestone !== null && milestone !== '');
         return Array.from(new Set(milestones)).sort();
+    }
+
+    /** Event source for this client, e.g. "mcp:claude-code". */
+    private source(): string {
+        const client = this.server.server.getClientVersion()?.name;
+        return client ? `${SOURCE_PREFIX}:${client}` : SOURCE_PREFIX;
+    }
+
+    /** Checks out task/T<id>, creating it only when it does not exist yet. */
+    private async ensureBranch(task: TaskRow): Promise<string> {
+        const branch = `task/${formatTaskId(task.id)}`;
+        try {
+            await execFileAsync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: this.cwd });
+            await execFileAsync('git', ['checkout', branch], { cwd: this.cwd });
+            return `\nSwitched to existing branch ${branch}.`;
+        } catch {
+            try {
+                await execFileAsync('git', ['checkout', '-b', branch], { cwd: this.cwd });
+                return `\nCreated branch ${branch}.`;
+            } catch (error) {
+                return `\n(Branch not created: ${(error as Error).message})`;
+            }
+        }
+    }
+
+    private renderEvent(entry: TimelineEntry): string {
+        const payload = JSON.parse(entry.payload ?? '{}') as Record<string, unknown>;
+        const task = entry.task_id === null ? '' : `${formatTaskId(entry.task_id)} ${entry.title ?? ''} · `;
+        let detail: string;
+        switch (entry.kind) {
+            case 'phase': detail = `${payload.from} → ${payload.to}`; break;
+            case 'comment': detail = String(payload.text ?? ''); break;
+            case 'renamed': detail = `renamed to ${payload.to}`; break;
+            case 'progress': detail = `${payload.intent}: ${payload.note}`; break;
+            case 'merged': detail = payload.into !== undefined ? `merged into T${payload.into}` : `absorbed T${payload.from}`; break;
+            default: detail = entry.kind;
+        }
+        return `- ${entry.at} · ${task}${detail} (${entry.source})`;
     }
 
     private registerTools(): void {
@@ -293,6 +347,105 @@ export class PmServer {
                 } catch (error) {
                     return text(`Failed to open attachment: ${(error as Error).message}`);
                 }
+            },
+        );
+
+        this.server.tool(
+            "track_work",
+            "Start tracking work: create a task, or attach this session to an existing one. Call it when a prompt starts real work (brainstorm, plan, detail out, implement, fix). Do not call it for questions or lookups.",
+            {
+                title: z.string().min(1).describe('Short title for new work, or a note when attaching to an existing task.'),
+                intent: z.enum(INTENTS).describe('What this work is.'),
+                task_id: z.string().optional().describe('Attach to this task (T42, #42 or 42). Omit to create a new task.'),
+            },
+            async ({ title, intent, task_id }) => {
+                const workspace = this.context();
+                try {
+                    const result = trackWork(this.db, {
+                        sessionId: this.sessionId, source: this.source(), workspaceId: workspace.id,
+                        title, intent, taskRef: task_id,
+                    });
+                    const verb = result.created ? 'Created' : result.reopened ? 'Reopened' : 'Attached to';
+                    const wantsBranch = resolveSetting(this.db, workspace.id, SETTING_CREATE_BRANCH, false);
+                    const branchNote = wantsBranch && (result.created || result.reopened) ? await this.ensureBranch(result.task) : '';
+                    return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${branchNote}`);
+                } catch (error) {
+                    return failure(error);
+                }
+            },
+        );
+
+        this.server.tool(
+            "update_task",
+            "Change a task's phase or title, or add a comment. Only change the phase when the user asks for it.",
+            {
+                task_id: z.string().describe('T42, #42 or 42.'),
+                phase: z.enum(PHASES).optional().describe('New phase.'),
+                title: z.string().optional().describe('New title.'),
+                comment: z.string().optional().describe('Comment to record on the task.'),
+            },
+            async ({ task_id, phase, title, comment }) => {
+                const workspace = this.context();
+                if (!phase && !title && !comment) return text('Provide a phase, a title or a comment to update.');
+                const task = resolveTaskRef(this.db, task_id, workspace.id);
+                if (!task) return text(`Task ${task_id} not found.`);
+                try {
+                    // A tool call carries the user's instruction, so it counts as a human change (spec §8.6).
+                    const updated = updateTask(this.db, task.id, { phase, title, comment }, {
+                        source: this.source(), sessionId: this.sessionId, human: true,
+                    });
+                    const changes = [`phase ${updated.phase}`, title ? 'renamed' : '', comment ? 'comment added' : '']
+                        .filter(part => part.length > 0)
+                        .join(', ');
+                    return text(`${formatTaskId(updated.id)} updated: ${changes}.`);
+                } catch (error) {
+                    return failure(error);
+                }
+            },
+        );
+
+        this.server.tool(
+            "merge_task",
+            "Merge a duplicate into the task to keep: history, vendor link and sessions move over and the duplicate is dropped.",
+            {
+                from: z.string().describe('Duplicate task to merge away (T42, #42 or 42).'),
+                into: z.string().describe('Task to keep.'),
+            },
+            async ({ from, into }) => {
+                const workspace = this.context();
+                try {
+                    const result = mergeTask(this.db, {
+                        fromRef: from, intoRef: into, workspaceId: workspace.id,
+                        source: this.source(), sessionId: this.sessionId,
+                    });
+                    return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${result.into.title}".`);
+                } catch (error) {
+                    return failure(error);
+                }
+            },
+        );
+
+        this.server.tool(
+            "timeline",
+            "Recent activity: task creations, phase changes, progress and comments. Use it for standups and 'what did I do' questions.",
+            {
+                since: z.string().optional().describe('ISO timestamp or date. Defaults to the last 24 hours.'),
+                task_id: z.string().optional().describe('Limit to one task.'),
+                all_workspaces: z.boolean().optional().describe('Include every workspace on this machine.'),
+                limit: z.number().int().positive().optional().describe('Maximum number of entries.'),
+            },
+            async ({ since, task_id, all_workspaces, limit }) => {
+                const workspace = this.context();
+                const task = task_id ? resolveTaskRef(this.db, task_id, workspace.id) : undefined;
+                if (task_id && !task) return text(`Task ${task_id} not found.`);
+                const entries = listEvents(this.db, {
+                    taskId: task?.id,
+                    workspaceId: task || all_workspaces ? undefined : workspace.id,
+                    since: since ?? new Date(Date.now() - DEFAULT_TIMELINE_HOURS * MS_PER_HOUR).toISOString(),
+                    limit,
+                });
+                if (entries.length === 0) return text('Nothing recorded in that period.');
+                return text(entries.map(entry => this.renderEvent(entry)).join('\n'));
             },
         );
     }

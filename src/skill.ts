@@ -9,38 +9,39 @@ export const PLUGIN_JSON = {
 
 export const SKILL_CONTENT = `---
 name: ghostpm
-description: "Use when the user asks about tasks, issues, work items, tickets, bugs, backlog, sprint, or project status. Also use proactively before starting development work to check for assigned tasks. Triggers: 'show tasks', 'my issues', 'what should I work on', 'start task', 'update issue', 'close ticket', 'project status', 'backlog', 'assigned to me'."
+description: "Use when the user asks about tasks, issues, work items, tickets, bugs, backlog, sprint, or project status, and whenever a prompt starts real work (brainstorm, plan, detail out, implement, fix). Triggers: 'show tasks', 'my issues', 'what should I work on', 'update issue', 'close ticket', 'project status', 'backlog', 'assigned to me', 'what did I do yesterday'."
 ---
 
 # GhostPM Task Workflow
 
-This repo has GhostPM connected to its issue tracker. Use the ghostpm MCP tools for all task operations.
+GhostPM keeps a local task log shared by every session on this machine. Use its MCP tools for all task operations.
 
 ## Quick reference
 
 | Intent | Tool | Example |
 |--------|------|---------|
-| Project context | \`get_project_state\` | "what sprint are we in?" |
-| Set sprint | \`set_sprint\` | "switch to Sprint 5" |
+| Project context | \`get_project_state\` | "what am I working on?" |
+| Start or continue work | \`track_work\` | "let's fix the login bug" |
 | See tasks | \`query_tasks\` | "show my tasks" |
-| Task details | \`get_task\` | "what's #42 about?" |
-| Start working | \`start_task\` | "pick up issue 7" |
-| Update/close | \`update_task\` | "close #15" |
-| Open link | \`open_attachment\` | "open that URL" |
+| Task details | \`get_task\` | "what's T42 about?" |
+| Update or close | \`update_task\` | "mark T42 done" |
+| Duplicate found | \`merge_task\` | "T43 is the same as T42" |
+| Recent activity | \`timeline\` | "what did I do yesterday?" |
+| Set sprint | \`set_sprint\` | "switch to Sprint 5" |
+| Open a link | \`open_attachment\` | "open that URL" |
 
 ## Proactive workflow
 
-- **Session start**: Call \`get_project_state\` to understand the current sprint, user, and task state.
-- **Before starting dev work**: Query tasks (filtered by sprint and assignee) to find what's assigned. Don't start coding without context.
-- **After creating a PR**: Update the task state to "in_review" via update_task.
-- **When a task is done**: Close it via update_task with state "closed".
-- **Conflict?**: If an update reports a conflict, explain both versions and ask which to keep, then call resolve_conflict.
+- **Session start**: call \`get_project_state\` for the workspace, active task and sprint.
+- **A prompt that starts real work** (brainstorm, plan, detail out, implement, fix): call \`track_work\`. Attach to a matching task, or create a new one. Never for questions or lookups.
+- **Unsure which task**: ask once, inline, then call \`track_work\`.
+- **Duplicate spotted**: call \`merge_task\`.
+- **Phases follow evidence.** Change a phase only when the user asks.
 
 ## Rules
 
-- Use MCP tools directly — never shell out to \`gh\` or \`az\` CLI for task operations.
-- Task IDs are issue numbers (GitHub) or work item IDs (Azure DevOps).
-- Bare numbers like "#42" or "42" are task IDs.
-- Show results directly, don't narrate what you're about to do.
-- Project state (sprint, user) persists across sessions — all sessions share it.
+- Use the MCP tools directly — never shell out to \`gh\` or \`az\` for task operations.
+- Task ids are local (T42). \`#42\` or a bare \`42\` means the vendor id in the current workspace.
+- Phases: brainstorming, planned, in_progress, in_review, done, dropped.
+- Show results directly; don't narrate what you are about to do.
 `;
