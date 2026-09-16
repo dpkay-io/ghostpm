@@ -51,6 +51,39 @@ async function main() {
             break;
         }
 
+        case 'doctor': {
+            const { diagnose } = await import('./doctor');
+            const fs = await import('fs');
+            const { execFileSync } = await import('child_process');
+            const home = process.env.HOME || process.env.USERPROFILE || '';
+            const findings = diagnose({
+                settingsPath: path.join(home, '.claude', 'settings.json'),
+                // The binary on PATH is a shim; the package sits beside it in node_modules.
+                resolveGlobal: () => {
+                    try {
+                        const finder = process.platform === 'win32' ? 'where.exe' : 'which';
+                        const shim = String(execFileSync(finder, ['ghostpm'])).split(/\r?\n/)[0].trim();
+                        if (shim.length === 0) return null;
+                        const installDir = path.join(path.dirname(shim), 'node_modules', 'ghostpm');
+                        return fs.existsSync(installDir) ? installDir : null;
+                    } catch {
+                        return null;
+                    }
+                },
+                hasLedgerCode: installDir => fs.existsSync(path.join(installDir, 'dist', 'ledger', 'db.js')),
+            });
+            if (findings.length === 0) {
+                console.log('No problems found.');
+            } else {
+                findings.forEach(finding => {
+                    console.log(`\n[${finding.code}]`);
+                    console.log(`  ${finding.message}`);
+                    console.log(`  fix: ${finding.fix}`);
+                });
+            }
+            break;
+        }
+
         case 'statusline': {
             const { buildStatusline, runPreviousCommand } = await import('./statusline');
             const { openLedger, ledgerPath } = await import('./ledger/db');
