@@ -169,6 +169,12 @@ describe('runCli', () => {
         expect((looked.mock.calls[0][2] as { cwd?: string }).cwd).toBe(systemDir);
     });
 
+    itOnWindows('prints nothing of its own when a command cannot be found', () => {
+        const script = "require('./dist/cli').runCli('ghostpm-surely-missing-cmd', []).then(() => process.exit(2), e => process.exit(e.notFound ? 0 : 3))";
+        const result = child_process.spawnSync(process.execPath, ['-e', script], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+        expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+    });
+
     describe('a batch file on Windows (az.cmd)', () => {
         beforeEach(() => {
             const fakeAz = path.join(dir, 'az.cmd');

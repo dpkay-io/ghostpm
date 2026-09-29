@@ -90,7 +90,7 @@ function resolveCommand(command: string): string {
     const cached = resolvedCommands.get(command);
     if (cached !== undefined) return cached;
     try {
-        const lines = execFileSync(systemTool('where.exe'), [command], { encoding: 'utf8', windowsHide: true, cwd: systemDir() }).trim().split(LINE_BREAK);
+        const lines = execFileSync(systemTool('where.exe'), [command], { encoding: 'utf8', windowsHide: true, cwd: systemDir(), stdio: ['ignore', 'pipe', 'pipe'] }).trim().split(LINE_BREAK);
         const resolved = lines.find(line => WIN_EXECUTABLE_EXTS.has(path.extname(line).toLowerCase())) || lines[0];
         resolvedCommands.set(command, resolved);
         return resolved;

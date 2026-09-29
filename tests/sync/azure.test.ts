@@ -1,6 +1,6 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
 import { AzureAdapter, isLossyCopy, AZ_LOGGED_OUT, AZ_MISSING } from '../../src/sync/azure';
-import { PermanentError, SyncPausedError } from '../../src/sync/vendor';
+import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
 import { PhaseStateMap } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 
@@ -127,9 +127,19 @@ describe('AzureAdapter', () => {
         const wiql = (az.calls[0].args[7] as { freeText: string }).freeText;
         expect(az.calls[0].args.slice(0, 7)).toEqual(['boards', 'query', '--org', freeText(ORG), '--project', freeText(PROJECT), '--wiql']);
         expect(wiql).toContain("[System.TeamProject] = 'Widgets ''Next'''");
-        expect(wiql).toContain("[System.ChangedDate] >= '2026-09-20'");
+        expect(wiql).toContain("[System.ChangedDate] >= '2026-09-19'");
         expect(wiql).toContain('ORDER BY [System.ChangedDate] ASC');
         expect(items.map(item => item.remoteId)).toEqual(['42']);
+    });
+
+    it('reads the day before since as the lower bound, also just after UTC midnight and across a month', async () => {
+        const bound = async (since: string): Promise<string> => {
+            const az = fakeAz({ 'boards query': '[]' });
+            await adapter(az.run).listChangedSince(since, 1);
+            return (az.calls[0].args[7] as { freeText: string }).freeText.match(/ChangedDate\] >= '([^']+)'/)![1];
+        };
+        expect(await bound('2026-09-20T00:00:01.000Z')).toBe('2026-09-19');
+        expect(await bound('2026-10-01T23:59:59.000Z')).toBe('2026-09-30');
     });
 
     it('answers null for a deleted item, or one moved to another project', async () => {
@@ -151,6 +161,47 @@ describe('AzureAdapter', () => {
             if (typeof reason === 'string') expect(thrown.reason).toBe(reason);
             else expect(thrown.reason).toMatch(reason);
         }
+    });
+
+    it('pauses on a project or type Azure DevOps does not know, but only a work item is gone', async () => {
+        const missing = azFailure('ERROR: TF401232: Work item 42 does not exist, or you do not have permissions to read it.');
+        const outcome = (call: (a: AzureAdapter) => Promise<unknown>): Promise<unknown> =>
+            call(adapter(fakeAz({ 'boards work-item': missing, 'boards query': missing, 'account show': missing }).run)).catch((e: unknown) => e);
+        const projectLevel = [
+            (a: AzureAdapter) => a.create({ title: 'x', phase: 'planned' }, 'b'),
+            (a: AzureAdapter) => a.listChangedSince('2026-09-20T00:00:00.000Z', 1),
+            (a: AzureAdapter) => a.currentUser(),
+        ];
+        for (const call of projectLevel) {
+            const thrown = await outcome(call) as SyncPausedError;
+            expect(thrown).toBeInstanceOf(SyncPausedError);
+            expect(thrown.reason).toContain(PROJECT);
+            expect(thrown.reason).toContain(TYPE);
+            expect(thrown.reason).toContain('ghostpm config set ado_work_item_type');
+        }
+        const itemLevel = [
+            (a: AzureAdapter) => a.syncState({ remoteId: '42', state: 'New', labels: [] }, { title: 'x', phase: 'done' }),
+            (a: AzureAdapter) => a.comment('42', 'n'),
+            (a: AzureAdapter) => a.closeDuplicate('42', '1'),
+        ];
+        for (const call of itemLevel) expect(await outcome(call)).toBeInstanceOf(GoneError);
+    });
+
+    it.each([
+        'ERROR: (HTTP 401) Unauthorized',
+        'ERROR: TF400813: The user is not authorized to access this resource.',
+        'ERROR: AADSTS70043: The refresh token has expired',
+        'ERROR: Interactive authentication is needed. Please run: az login',
+        'ERROR: HTTP 403 Forbidden',
+    ])('pauses on the auth failure %s, while an unrelated failure stays a CliError', async stderr => {
+        const since = '2026-09-20T00:00:00.000Z';
+        const thrown = await adapter(fakeAz({ 'boards query': azFailure(stderr) }).run).listChangedSince(since, 1)
+            .catch((e: unknown) => e) as SyncPausedError;
+        expect(thrown).toBeInstanceOf(SyncPausedError);
+        expect(thrown.reason).toMatch(/az login/);
+        const other = await adapter(fakeAz({ 'boards query': azFailure('ERROR: something else broke') }).run).listChangedSince(since, 1)
+            .catch((e: unknown) => e);
+        expect(other).toBeInstanceOf(CliError);
     });
 
     it('pauses when the current user is asked for while logged out', async () => {

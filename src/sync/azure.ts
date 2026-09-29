@@ -15,11 +15,15 @@ const FIELD = {
 const QUERY_FIELDS = [FIELD.id, FIELD.title, FIELD.state, FIELD.assignedTo, FIELD.changed, FIELD.tags, FIELD.iteration, FIELD.description, FIELD.project];
 /** WIQL compares dates, not times, unless the REST call asks for time precision, which az cannot. */
 const WIQL_DATE_LENGTH = 10;
+/** WIQL date literals are read in the user's time zone, so the bound starts a day before the UTC date of `since`; a pull de-dupes by baseline. */
+const WIQL_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const WIQL_QUOTE = /'/g;
 const WIQL_ESCAPED_QUOTE = "''";
 /** Verified with az 2.85 while logged out: "...you need to run the login command(az login if using AAD/MSA identity else az devops login ...". */
 const LOGGED_OUT = /az login|az devops login/i;
 const GONE = /TF401232|does not exist/i;
+/** Expired or missing credentials, or a sign-in only a person can complete. */
+const NOT_AUTHENTICATED = /HTTP 401|HTTP 403|TF400813|AADSTS|Interactive authentication is needed/i;
 const PULL_REQUEST_ID = /\/pullrequest\/(\d+)/i;
 const PR_COMPLETED = 'completed';
 const TAG_SEPARATOR = /;\s*/;
@@ -33,6 +37,9 @@ const REPLACEMENT_CHAR = '�';
 
 export const AZ_MISSING = 'Azure CLI (az) was not found. Install it, or set GHOSTPM_AZ to its path, then run `ghostpm sync`.';
 export const AZ_LOGGED_OUT = 'Azure CLI is not logged in to Azure DevOps. Run `az login` (or `az devops login`), then `ghostpm sync`.';
+const azNotAuthenticated = (detail: string): string => `Azure DevOps refused the Azure CLI's credentials (${detail}). Run \`az login\` (or \`az devops login\`), then \`ghostpm sync\`.`;
+const azNotFound = (project: string, workItemType: string): string =>
+    `Azure DevOps does not know project "${project}" or work item type "${workItemType}". Check the remote and run: ghostpm config set ado_work_item_type <Type> --workspace <repo folder>, then \`ghostpm sync\`.`;
 const azRefused = (detail: string): string => `GhostPM will not run az this way (${detail}). Fix that, then run \`ghostpm sync\`.`;
 const noState = (phase: Phase): string =>
     `No Azure DevOps state is set for phase ${phase}. Run: ghostpm config set phase_state_map ${phase}=<State> --workspace <repo folder>`;
@@ -42,12 +49,14 @@ interface AzWorkItem {
     fields?: { [name: string]: unknown };
 }
 
-function classify(error: unknown): unknown {
+/** `itemLevel` calls name one work item or PR: "does not exist" there means it is gone. Anywhere else it means the project or type is wrong. */
+function classify(error: unknown, itemLevel: boolean, project: string, workItemType: string): unknown {
     if (!(error instanceof CliError)) return error;
     if (error.refused) return new SyncPausedError(azRefused(error.message));
     if (error.notFound) return new SyncPausedError(AZ_MISSING);
     if (LOGGED_OUT.test(error.stderr)) return new SyncPausedError(AZ_LOGGED_OUT);
-    if (GONE.test(error.stderr)) return new GoneError(error.message);
+    if (NOT_AUTHENTICATED.test(error.stderr)) return new SyncPausedError(azNotAuthenticated(error.message));
+    if (GONE.test(error.stderr)) return itemLevel ? new GoneError(error.message) : new SyncPausedError(azNotFound(project, workItemType));
     return error;
 }
 
@@ -81,16 +90,16 @@ export class AzureAdapter implements VendorAdapter {
         private readonly run: Runner = runCli,
     ) {}
 
-    private async azText(args: CliArg[]): Promise<string> {
+    private async azText(args: CliArg[], itemLevel = false): Promise<string> {
         try {
             return await this.run(AZ, [...args, ...JSON_OUTPUT]);
         } catch (error) {
-            throw classify(error);
+            throw classify(error, itemLevel, this.project, this.workItemType);
         }
     }
 
-    private async az<T>(args: CliArg[]): Promise<T> {
-        return JSON.parse(await this.azText(args)) as T;
+    private async az<T>(args: CliArg[], itemLevel = false): Promise<T> {
+        return JSON.parse(await this.azText(args, itemLevel)) as T;
     }
 
     private orgArgs(): CliArg[] {
@@ -132,7 +141,7 @@ export class AzureAdapter implements VendorAdapter {
     }
 
     private async update(remoteId: string, fields: CliArg[]): Promise<RemoteItem> {
-        return this.toItem(await this.az<AzWorkItem>(this.updateArgs(remoteId, fields)));
+        return this.toItem(await this.az<AzWorkItem>(this.updateArgs(remoteId, fields), true));
     }
 
     async create(desired: DesiredState, body: string): Promise<RemoteItem> {
@@ -154,7 +163,7 @@ export class AzureAdapter implements VendorAdapter {
     }
 
     async comment(remoteId: string, text: string): Promise<RemoteItem | null> {
-        const output = await this.azText(this.updateArgs(remoteId, ['--discussion', freeText(text)]));
+        const output = await this.azText(this.updateArgs(remoteId, ['--discussion', freeText(text)]), true);
         // Posted: an unreadable answer must not read as a failed comment, or a retry posts it twice.
         try {
             return this.toItem(JSON.parse(output) as AzWorkItem);
@@ -173,7 +182,7 @@ export class AzureAdapter implements VendorAdapter {
     async listChangedSince(since: string, _limit: number): Promise<RemoteItem[]> {
         const project = this.project.replace(WIQL_QUOTE, WIQL_ESCAPED_QUOTE);
         const wiql = `SELECT ${QUERY_FIELDS.map(field => `[${field}]`).join(', ')} FROM workitems`
-            + ` WHERE [${FIELD.project}] = '${project}' AND [${FIELD.changed}] >= '${since.slice(0, WIQL_DATE_LENGTH)}'`
+            + ` WHERE [${FIELD.project}] = '${project}' AND [${FIELD.changed}] >= '${new Date(Date.parse(since) - WIQL_LOOKBACK_MS).toISOString().slice(0, WIQL_DATE_LENGTH)}'`
             + ` ORDER BY [${FIELD.changed}] ASC`;
         const result = await this.az<AzWorkItem[] | { items?: AzWorkItem[] }>([
             'boards', 'query', ...this.orgArgs(), '--project', freeText(this.project), '--wiql', freeText(wiql),
@@ -184,7 +193,7 @@ export class AzureAdapter implements VendorAdapter {
     async fetch(remoteId: string): Promise<RemoteItem | null> {
         let raw: AzWorkItem;
         try {
-            raw = await this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId]);
+            raw = await this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
         } catch (error) {
             if (error instanceof GoneError) return null;
             throw error;
@@ -199,7 +208,7 @@ export class AzureAdapter implements VendorAdapter {
         if (!prUrl.toLowerCase().startsWith(this.orgPrefix().toLowerCase())) return null;
         const id = prUrl.match(PULL_REQUEST_ID);
         if (!id) return null;
-        const pr = await this.az<{ status?: string; closedDate?: string }>(['repos', 'pr', 'show', ...this.orgArgs(), '--id', id[1]]);
+        const pr = await this.az<{ status?: string; closedDate?: string }>(['repos', 'pr', 'show', ...this.orgArgs(), '--id', id[1]], true);
         return pr.status === PR_COMPLETED && pr.closedDate ? pr.closedDate : null;
     }
 
@@ -207,7 +216,7 @@ export class AzureAdapter implements VendorAdapter {
         try {
             return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'])).trim();
         } catch (error) {
-            throw classify(error);
+            throw classify(error, false, this.project, this.workItemType);
         }
     }
 
