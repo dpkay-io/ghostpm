@@ -2,10 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { tempLedger, TempLedger } from '../ledger/helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
-import { createTask } from '../../src/ledger/tasks';
+import { createTask, getTask } from '../../src/ledger/tasks';
 import { listEvents } from '../../src/ledger/events';
 import { startSession, setSessionTask } from '../../src/ledger/sessions';
-import { EventKind, TaskRow } from '../../src/ledger/types';
+import { setSetting, SETTING_PLAN_GLOBS } from '../../src/ledger/settings';
+import { EventKind, Phase, TaskRow } from '../../src/ledger/types';
 import { readPayload, ToolCall } from '../../src/hook/payload';
 import { handleWith, HOOK_CLIENT } from '../../src/hook/handlers';
 
@@ -102,5 +103,67 @@ describe('PostToolBatch evidence', () => {
         batch({ tool_name: 'Read', tool_input: { file_path: 'src/a.ts' } });
 
         expect(kindsFor(active.id)).toEqual(['created']);
+    });
+
+    describe('moves the phase forward (spec §7.3)', () => {
+        const attachNew = (phase: Phase): TaskRow => {
+            const task = createTask(ledger.db, { title: 'Phase task', phase, workspaceId, origin: 'local', source: 'test' });
+            setSessionTask(ledger.db, SESSION_ID, task.id);
+            return task;
+        };
+        const phaseNow = (task: TaskRow): Phase => getTask(ledger.db, task.id)!.phase;
+        const write = (file: string): ToolCall => ({ tool_name: 'Write', tool_input: { file_path: file } });
+        const planFile = (): string => path.join(repo, 'docs', 'superpowers', 'plans', 'login.md');
+
+        it('moves a brainstorm to planned when a plan file is written', () => {
+            const task = attachNew('brainstorming');
+            batch(write(planFile()));
+            expect(phaseNow(task)).toBe('planned');
+        });
+
+        it('matches a relative tool path against the session folder', () => {
+            const task = attachNew('brainstorming');
+            batch(write('docs/specs/login.md'));
+            expect(phaseNow(task)).toBe('planned');
+        });
+
+        it('moves to in_progress on the first edit outside the plan files', () => {
+            const task = attachNew('planned');
+            batch(write(planFile()), { tool_name: 'Edit', tool_input: { file_path: path.join(repo, 'src', 'login.ts') } });
+            expect(phaseNow(task)).toBe('in_progress');
+        });
+
+        it('moves to in_progress on a commit', () => {
+            const task = attachNew('planned');
+            batch({ tool_name: 'Bash', tool_input: { command: 'git commit -m "login"' } });
+            expect(phaseNow(task)).toBe('in_progress');
+        });
+
+        it('moves to in_review when a PR is created', () => {
+            const task = attachNew('in_progress');
+            batch({ tool_name: 'Bash', tool_input: { command: 'gh pr create --fill' }, tool_response: 'https://github.com/acme/app/pull/7\n' });
+            expect(phaseNow(task)).toBe('in_review');
+        });
+
+        it('does not move work backwards when a plan file is touched later', () => {
+            const task = attachNew('in_review');
+            batch(write(planFile()));
+            expect(phaseNow(task)).toBe('in_review');
+        });
+
+        it('leaves a done task done: only track_work reopens', () => {
+            const task = attachNew('done');
+            batch(write(path.join(repo, 'src', 'login.ts')));
+            expect(phaseNow(task)).toBe('done');
+        });
+
+        it('uses the plan_globs setting', () => {
+            setSetting(ledger.db, SETTING_PLAN_GLOBS, ['notes/*.md']);
+            const task = attachNew('brainstorming');
+            batch(write(path.join(repo, 'notes', 'idea.md')));
+            expect(phaseNow(task)).toBe('planned');
+            batch(write(planFile()));
+            expect(phaseNow(task)).toBe('in_progress');
+        });
     });
 });

@@ -1,8 +1,9 @@
 import { tempLedger, TempLedger, eventKinds } from './helpers';
+import { write } from '../../src/ledger/db';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
-import { createTask } from '../../src/ledger/tasks';
+import { createTask, getTask, updateTask } from '../../src/ledger/tasks';
 import { startSession, getSession } from '../../src/ledger/sessions';
-import { trackWork, TrackWorkInput, REOPEN_PHASE } from '../../src/ledger/work';
+import { trackWork, TrackWorkInput, REOPEN_PHASE, advancePhase } from '../../src/ledger/work';
 import { Intent, Phase } from '../../src/ledger/types';
 
 const SESSION_ID = 'session-1';
@@ -72,5 +73,50 @@ describe('trackWork', () => {
         const before = eventCount();
         expect(() => track({ taskRef: 'T999' })).toThrow('Task T999 not found');
         expect(eventCount()).toEqual(before);
+    });
+});
+
+describe('advancePhase', () => {
+    let ledger: TempLedger;
+    let workspaceId: number;
+    const HOUR_MS = 60 * 60 * 1000;
+    const AUTOMATION = { source: SOURCE, human: false };
+
+    const advance = (taskId: number, target: Phase, evidenceAt: string): boolean =>
+        write(ledger.db, () => advancePhase(ledger.db, getTask(ledger.db, taskId)!, target, AUTOMATION, new Date().toISOString(), evidenceAt));
+
+    beforeEach(() => {
+        ledger = tempLedger();
+        workspaceId = ensureWorkspace(ledger.db, ledger.dir).id;
+    });
+
+    afterEach(() => ledger.cleanup());
+
+    it('blocks evidence older than the last human phase change, and lets newer evidence through', () => {
+        const task = createTask(ledger.db, { title: 'Reviewed', phase: 'in_progress', workspaceId, origin: 'local', source: SOURCE });
+        const human = updateTask(ledger.db, task.id, { phase: 'in_review' }, { source: SOURCE, human: true });
+        const humanAt = Date.parse(human.human_phase_at!);
+
+        expect(advance(task.id, 'done', new Date(humanAt - HOUR_MS).toISOString())).toBe(false);
+        expect(getTask(ledger.db, task.id)!.phase).toBe('in_review');
+
+        expect(advance(task.id, 'done', new Date(humanAt + HOUR_MS).toISOString())).toBe(true);
+        expect(getTask(ledger.db, task.id)!.phase).toBe('done');
+    });
+
+    it('compares times, not their spelling', () => {
+        // GitHub writes `…:00Z`, the ledger `…:00.000Z`: the same instant sorts differently as text.
+        const task = createTask(ledger.db, { title: 'Same instant', phase: 'in_progress', workspaceId, origin: 'local', source: SOURCE });
+        ledger.db.prepare('UPDATE tasks SET human_phase_at = ? WHERE id = ?').run('2026-09-20T10:00:00.000Z', task.id);
+        expect(advance(task.id, 'done', '2026-09-20T10:00:00Z')).toBe(false);
+    });
+
+    it('never moves backwards, and never out of done or dropped', () => {
+        const review = createTask(ledger.db, { title: 'Review', phase: 'in_review', workspaceId, origin: 'local', source: SOURCE });
+        const dropped = createTask(ledger.db, { title: 'Dropped', phase: 'dropped', workspaceId, origin: 'local', source: SOURCE });
+        const now = new Date().toISOString();
+        expect(advance(review.id, 'in_progress', now)).toBe(false);
+        expect(advance(dropped.id, 'done', now)).toBe(false);
+        expect(eventKinds(ledger.db, review.id)).toEqual(['created']);
     });
 });

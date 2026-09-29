@@ -1,10 +1,11 @@
-import { Ledger, openLedger, ledgerPath, write, nowIso } from '../ledger/db';
+import { Ledger, openLedger, ledgerPath } from '../ledger/db';
 import { ensureWorkspace } from '../ledger/workspaces';
-import { getTask, bumpRevision } from '../ledger/tasks';
+import { getTask } from '../ledger/tasks';
 import { getSession, startSession, touchSession, endSession } from '../ledger/sessions';
 import { activeTaskFor, currentBranch } from '../ledger/branch';
+import { recordEvidence } from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
-import { listEvents, recordEvent } from '../ledger/events';
+import { listEvents } from '../ledger/events';
 import { TaskRow, formatTaskId } from '../ledger/types';
 import { HookPayload } from './payload';
 
@@ -129,14 +130,10 @@ function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     const { files, committed, prUrls } = collectEvidence(payload);
     if (files.length === 0 && !committed && prUrls.length === 0) return null;
 
-    // One transaction per batch, so a batch lands whole and updated_at moves once.
-    write(db, () => {
-        const at = nowIso();
-        const common = { taskId, source: HOOK_SOURCE, sessionId: payload.sessionId };
-        if (files.length > 0) recordEvent(db, { ...common, kind: 'progress', payload: { files } }, at);
-        if (committed) recordEvent(db, { ...common, kind: 'commit', payload: {} }, at);
-        for (const url of prUrls) recordEvent(db, { ...common, kind: 'pr', payload: { url } }, at);
-        bumpRevision(db, taskId, at);
+    // One transaction per batch: the batch lands whole, with the phase it proves.
+    recordEvidence(db, {
+        taskId, sessionId: payload.sessionId, source: HOOK_SOURCE, workspaceId: workspace.id,
+        cwd: payload.cwd, files, committed, prUrls,
     });
     return null;
 }

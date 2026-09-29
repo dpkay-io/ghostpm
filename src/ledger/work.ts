@@ -1,14 +1,43 @@
+import * as path from 'path';
 import { Ledger, write, nowIso } from './db';
 import { recordEvent } from './events';
 import { applyPhaseChange, bumpRevision, getTask, insertTaskRow, resolveTaskRef, ChangeContext } from './tasks';
 import { setSessionTask } from './sessions';
-import { INTENT_PHASE, Intent, Phase, TaskRow } from './types';
+import { readSetting, SETTING_PLAN_GLOBS } from './settings';
+import { getWorkspace } from './workspaces';
+import { matchesAnyGlob } from './glob';
+import { INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
 
 /** Forward order for automatic phase moves; done and dropped are terminal. */
 const PHASE_RANK: Record<Phase, number> = { brainstorming: 0, planned: 1, in_progress: 2, in_review: 3, done: 4, dropped: 4 };
 export const CLOSED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['done', 'dropped']);
 /** Spec §7.3: attaching new work to a done or dropped task reopens it in this phase. */
 export const REOPEN_PHASE: Phase = 'in_progress';
+const PLAN_PHASE: Phase = 'planned';
+const WORK_PHASE: Phase = 'in_progress';
+const REVIEW_PHASE: Phase = 'in_review';
+const PARENT_SEGMENT = '..';
+
+/**
+ * Spec §7.3: evidence moves a phase forward only, never out of done/dropped, and never on
+ * evidence that is not newer than the last human-sourced phase change (§8.6). `at` is when
+ * the move is recorded; `evidenceAt` is when the evidence happened (a PR's merge time).
+ * Call inside write().
+ */
+export function advancePhase(
+    db: Ledger,
+    task: TaskRow,
+    target: Phase,
+    ctx: ChangeContext,
+    at: string,
+    evidenceAt: string = at,
+): boolean {
+    if (CLOSED_PHASES.has(task.phase)) return false;
+    if (PHASE_RANK[target] <= PHASE_RANK[task.phase]) return false;
+    if (task.human_phase_at !== null && Date.parse(evidenceAt) <= Date.parse(task.human_phase_at)) return false;
+    applyPhaseChange(db, task, target, ctx, at);
+    return true;
+}
 
 export interface TrackWorkInput {
     sessionId: string;
@@ -47,8 +76,8 @@ export function trackWork(db: Ledger, input: TrackWorkInput): TrackWorkResult {
         const reopened = CLOSED_PHASES.has(existing.phase);
         if (reopened) {
             applyPhaseChange(db, existing, REOPEN_PHASE, ctx, at);
-        } else if (PHASE_RANK[intentPhase] > PHASE_RANK[existing.phase]) {
-            applyPhaseChange(db, existing, intentPhase, ctx, at);
+        } else {
+            advancePhase(db, existing, intentPhase, ctx, at);
         }
         recordEvent(db, { taskId: existing.id, kind: 'progress', source: input.source, sessionId: input.sessionId, payload: { intent: input.intent, note: input.title } }, at);
         bumpRevision(db, existing.id, at);
@@ -98,5 +127,53 @@ export function mergeTask(db: Ledger, input: MergeInput): MergeResult {
         bumpRevision(db, into.id, at);
 
         return { from: getTask(db, from.id)!, into: getTask(db, into.id)! };
+    });
+}
+
+export interface EvidenceInput {
+    taskId: number;
+    sessionId: string;
+    source: string;
+    /** The session's workspace: plan files are matched relative to its root. */
+    workspaceId: number;
+    /** Folder relative tool paths are resolved against. */
+    cwd: string;
+    files: string[];
+    committed: boolean;
+    prUrls: string[];
+}
+
+function isPlanFile(root: string, cwd: string, file: string, globs: readonly string[]): boolean {
+    const relative = path.relative(root, path.resolve(cwd, file));
+    if (relative.startsWith(PARENT_SEGMENT) || path.isAbsolute(relative)) return false;
+    return matchesAnyGlob(relative, globs);
+}
+
+/** Spec §7.3 table, strongest evidence first. */
+function evidencePhase(input: EvidenceInput, isPlan: (file: string) => boolean): Phase | null {
+    if (input.prUrls.length > 0) return REVIEW_PHASE;
+    if (input.committed || input.files.some(file => !isPlan(file))) return WORK_PHASE;
+    return input.files.length > 0 ? PLAN_PHASE : null;
+}
+
+/** One tool batch's evidence, and the phase it proves, as one transaction. */
+export function recordEvidence(db: Ledger, input: EvidenceInput): TaskRow {
+    return write(db, () => {
+        const task = getTask(db, input.taskId);
+        if (!task) throw new Error(`Task ${formatTaskId(input.taskId)} not found`);
+        const at = nowIso();
+        const common = { taskId: task.id, source: input.source, sessionId: input.sessionId };
+        if (input.files.length > 0) recordEvent(db, { ...common, kind: 'progress', payload: { files: input.files } }, at);
+        if (input.committed) recordEvent(db, { ...common, kind: 'commit', payload: {} }, at);
+        for (const url of input.prUrls) recordEvent(db, { ...common, kind: 'pr', payload: { url } }, at);
+
+        const root = getWorkspace(db, input.workspaceId)?.path ?? input.cwd;
+        const globs = readSetting(db, input.workspaceId, SETTING_PLAN_GLOBS);
+        const target = evidencePhase(input, file => isPlanFile(root, input.cwd, file, globs));
+        if (target !== null) {
+            advancePhase(db, task, target, { source: input.source, sessionId: input.sessionId, human: false }, at);
+        }
+        bumpRevision(db, task.id, at);
+        return getTask(db, task.id)!;
     });
 }
