@@ -136,12 +136,15 @@ async function main() {
                 const { openLedger, ledgerPath } = await import('./ledger/db');
                 const settingsPath = userSettingsPath();
                 const db = openLedger(ledgerPath());
+                let restored: boolean;
                 try {
-                    restoreStatusline(db, settingsPath);
+                    restored = restoreStatusline(db, settingsPath);
                 } finally {
                     db.close();
                 }
-                console.log(`Statusline restored in ${settingsPath}`);
+                console.log(restored
+                    ? `Statusline restored in ${settingsPath}`
+                    : `Nothing to restore: the statusline in ${settingsPath} is not ghostpm's.`);
                 break;
             }
             const { setup } = await import('./setup');

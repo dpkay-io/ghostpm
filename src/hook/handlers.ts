@@ -11,7 +11,7 @@ import { HookPayload } from './payload';
 /** Distinguishes hook-captured sessions from the MCP server's own (`mcp`). */
 export const HOOK_CLIENT = 'claude-code';
 
-const SESSION_START = 'SessionStart';
+export const SESSION_START = 'SessionStart';
 const USER_PROMPT_SUBMIT = 'UserPromptSubmit';
 const POST_TOOL_BATCH = 'PostToolBatch';
 const SESSION_END = 'SessionEnd';

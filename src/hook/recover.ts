@@ -1,9 +1,8 @@
 import { spawn } from 'child_process';
-import * as path from 'path';
 import { MISSING_BINDING_HELP } from '../ledger/db';
+import { CLI_ENTRY_PATH } from '../plugin-setup';
+import { SESSION_START } from './handlers';
 
-const SESSION_START = 'SessionStart';
-const CLI_ENTRY = 'cli-main.js';
 const BOOTSTRAP_COMMAND = 'bootstrap';
 
 /** Said in the session itself, because nobody goes looking in hook.log. */
@@ -14,7 +13,7 @@ export type StartBootstrap = () => void;
 
 /** Detached: compiling takes far longer than the few seconds a hook is allowed. */
 const spawnBootstrap: StartBootstrap = () => {
-    spawn(process.execPath, [path.join(__dirname, '..', CLI_ENTRY), BOOTSTRAP_COMMAND], {
+    spawn(process.execPath, [CLI_ENTRY_PATH, BOOTSTRAP_COMMAND], {
         detached: true,
         stdio: 'ignore',
     }).unref();

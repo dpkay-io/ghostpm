@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { setup } from '../src/setup';
-import { STATUSLINE_COMMAND } from '../src/plugin-setup';
+import { statuslineCommand } from '../src/plugin-setup';
 import { removeTempDir } from './temp-dir';
 
 // Mocking init also keeps cli.ts — and with it child_process — out of the test graph:
@@ -90,7 +90,7 @@ describe('setup', () => {
 
         await setup({ silent: true, statusline: true });
 
-        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
+        expect(readJson(userSettingsPath).statusLine.command).toBe(statuslineCommand());
     });
 
     it('installs the skill so the model knows the workflow', async () => {
@@ -122,8 +122,7 @@ describe('setup', () => {
 
         // Still chained once, and the original is still recoverable rather than lost
         // behind a second layer of ghostpm.
-        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
-        expect(readJson(userSettingsPath).statusLine.command).not.toContain(`${STATUSLINE_COMMAND} ${STATUSLINE_COMMAND}`);
+        expect(readJson(userSettingsPath).statusLine.command).toBe(statuslineCommand());
     });
 
     it('works outside a git repository', async () => {
