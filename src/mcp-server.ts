@@ -12,12 +12,11 @@ import { listEvents, TimelineEntry } from "./ledger/events";
 import { mergeTask, trackWork } from "./ledger/work";
 import { activeTaskFor, taskBranchName } from "./ledger/branch";
 import {
-    DEFAULT_STALE_SESSION_MINUTES, MCP_CLIENT, endSession, getSession, listLiveSessions,
-    mcpSessionId, startSession, touchSession,
+    MCP_CLIENT, endSession, getSession, listLiveSessions, mcpSessionId, startSession, touchSession,
 } from "./ledger/sessions";
 import {
     SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
-    getWorkspaceSetting, resolveSetting, setWorkspaceSetting,
+    getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImportOnce } from "./ledger/legacy-import";
 import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
@@ -226,7 +225,7 @@ export class PmServer {
                 const active = this.activeTask(branch, workspace.id);
                 const tasks = listTasks(this.db, { workspaceId: workspace.id });
                 const summary = this.phaseSummary(tasks);
-                const staleMinutes = resolveSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES, DEFAULT_STALE_SESSION_MINUTES);
+                const staleMinutes = readSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES);
                 const outbox = this.db.prepare('SELECT status, COUNT(*) AS n FROM outbox GROUP BY status ORDER BY status')
                     .all() as { status: string; n: number }[];
                 return text([
@@ -375,7 +374,7 @@ export class PmServer {
                         title, intent, taskRef: task_id,
                     });
                     const verb = result.created ? 'Created' : result.reopened ? 'Reopened' : 'Attached to';
-                    const wantsBranch = resolveSetting(this.db, workspace.id, SETTING_CREATE_BRANCH, false);
+                    const wantsBranch = readSetting(this.db, workspace.id, SETTING_CREATE_BRANCH);
                     const branchNote = wantsBranch && (result.created || result.reopened) ? await this.ensureBranch(result.task) : '';
                     const crossNote = this.crossWorkspaceNote(workspace.id, result.task);
                     return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${crossNote}${branchNote}`);

@@ -16,6 +16,8 @@ Commands:
   setup --global    Install the skill for every project
   setup --statusline    Also show the active task in the statusline (off by default)
   setup --restore   Put the statusline back the way it was
+  config get|set|unset <key> [value...] [--workspace <path>]
+                    Read or change a setting (sync_policy, progress_comments, plan_globs, ...)
   tasks             List cached tasks
   sync              Force sync with remote
   status            Show sync status and config
@@ -152,6 +154,18 @@ async function main() {
                 global: flags.includes('--global'),
                 statusline: flags.includes('--statusline'),
             });
+            break;
+        }
+
+        case 'config': {
+            const { runConfigCommand } = await import('./config-cli');
+            const { openLedger, ledgerPath } = await import('./ledger/db');
+            const db = openLedger(ledgerPath());
+            try {
+                console.log(runConfigCommand(db, process.argv.slice(3), process.cwd()));
+            } finally {
+                db.close();
+            }
             break;
         }
 

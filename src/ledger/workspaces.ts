@@ -37,6 +37,11 @@ function getWorkspaceByPath(db: Ledger, root: string): WorkspaceRow | undefined 
     return db.prepare('SELECT * FROM workspaces WHERE path = ?').get(root) as WorkspaceRow | undefined;
 }
 
+/** Lookup only: unlike ensureWorkspace it never inserts, so a read-only connection can use it. */
+export function findWorkspace(db: Ledger, cwd: string): WorkspaceRow | undefined {
+    return getWorkspaceByPath(db, resolveWorkspaceRoot(cwd));
+}
+
 export function ensureWorkspace(db: Ledger, cwd: string): WorkspaceRow {
     const root = resolveWorkspaceRoot(cwd);
     const existing = getWorkspaceByPath(db, root);
