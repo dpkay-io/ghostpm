@@ -3,10 +3,10 @@ import { recordEvent } from '../ledger/events';
 import { dropPendingSyncState } from '../ledger/projection';
 import { updateTask } from '../ledger/tasks';
 import { SYNC_SOURCE, TaskRow, VENDOR_SOURCE, VendorLinkRow } from '../ledger/types';
-import { DesiredState, RemoteItem, VendorAdapter, parseLabels } from './vendor';
+import { DesiredState, RemoteItem, VendorAdapter, parseLabels, stripMarkers } from './vendor';
 
 const LINK_KEY = 'task_id = ? AND vendor = ?';
-const CLEAR_INTENT = ', intent_title = NULL, intent_phase = NULL, intent_rev = NULL';
+const NO_INTENT = 'intent_title = NULL, intent_phase = NULL, intent_rev = NULL';
 
 /** An answer older than the stored baseline arrived late (a slower runner): it must not replace the newer one. */
 function isStale(db: Ledger, link: VendorLinkRow, updatedAt: string): boolean {
@@ -17,12 +17,12 @@ function isStale(db: Ledger, link: VendorLinkRow, updatedAt: string): boolean {
 }
 
 /** What the vendor holds becomes the comparison point for the next pull (spec §8.6). Monotonic in remote_updated_at. */
-function writeBaseline(db: Ledger, link: VendorLinkRow, item: RemoteItem, title: string, lastPushedRev: number | null, ours: boolean): void {
+function writeBaseline(db: Ledger, link: VendorLinkRow, item: RemoteItem, title: string, lastPushedRev: number | null, endIntent: boolean): void {
     if (isStale(db, link, item.updatedAt)) return;
     db.prepare(`
         UPDATE vendor_links
         SET remote_title = ?, remote_state = ?, labels = ?, remote_updated_at = ?, remote_url = COALESCE(?, remote_url),
-            broken_at = NULL, last_pushed_rev = COALESCE(?, last_pushed_rev)${ours ? CLEAR_INTENT : ''}
+            broken_at = NULL, last_pushed_rev = COALESCE(?, last_pushed_rev)${endIntent ? `, ${NO_INTENT}` : ''}
         WHERE ${LINK_KEY}`)
         .run(title, item.state, JSON.stringify(item.labels), item.updatedAt, item.url, lastPushedRev, link.task_id, link.vendor);
 }
@@ -65,11 +65,12 @@ export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRo
             edited = true;
         }
     }
-    // Vendor-owned fields: shown locally, never pushed.
+    // Vendor-owned fields: shown locally (without our retry markers), never pushed.
     db.prepare('UPDATE tasks SET body = ?, assignee = ?, milestone = ? WHERE id = ?')
-        .run(item.body, item.assignee, item.milestone, task.id);
+        .run(item.body === null ? null : stripMarkers(item.body), item.assignee, item.milestone, task.id);
+    // The intent ends with our push adopted, or with a person's edit applied over it (it can never be ours after that).
     if (ours) writeBaseline(db, link, item, link.intent_title!, link.intent_rev, true);
-    else writeBaseline(db, link, item, item.title, null, false);
+    else writeBaseline(db, link, item, item.title, null, edited);
     return edited;
 }
 
@@ -87,9 +88,14 @@ export function recordOwnPush(db: Ledger, link: VendorLinkRow, item: RemoteItem,
     writeBaseline(db, link, item, pushedTitle, rev, true);
 }
 
+/** The push in flight ended without landing (refused, retries used up): nothing on the vendor is ours to recognise. */
+export function clearIntent(db: Ledger, taskId: number): void {
+    db.prepare(`UPDATE vendor_links SET ${NO_INTENT} WHERE task_id = ?`).run(taskId);
+}
+
 /** Spec §8.5: deleted or moved away. The task stays local, with an event saying so. */
 export function markLinkBroken(db: Ledger, link: VendorLinkRow, reason: string, at: string): void {
-    db.prepare(`UPDATE vendor_links SET broken_at = ? WHERE ${LINK_KEY}`).run(at, link.task_id, link.vendor);
+    db.prepare(`UPDATE vendor_links SET broken_at = ?, ${NO_INTENT} WHERE ${LINK_KEY}`).run(at, link.task_id, link.vendor);
     recordEvent(db, {
         taskId: link.task_id, kind: 'linked', source: SYNC_SOURCE,
         payload: { vendor: link.vendor, remoteId: link.remote_id, broken: true, reason },

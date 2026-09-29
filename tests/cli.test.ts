@@ -17,6 +17,10 @@ const LINGER_TEST_TIMEOUT_MS = 20000;
 const TIMEOUT_MS = 300;
 /** Longer than jest's own test timeout: a child that is not killed fails the test. */
 const HANG_MS = 30000;
+/** The child exits well before its timeout; the descendant it leaves behind holds the output pipes. */
+const PARENT_EXIT_MS = 300;
+const DESCENDANT_TIMEOUT_MS = 1500;
+const TIMEOUT_SLACK_MS = 2000;
 /** Long enough for cmd.exe to start node, which records its pid before hanging. */
 const BATCH_TIMEOUT_MS = 3000;
 const POLL_MS = 50;
@@ -133,6 +137,25 @@ describe('runCli', () => {
         expect(error.message).toContain(`timed out after ${TIMEOUT_MS} ms`);
         expect(Date.now() - started).toBeLessThan(HANG_MS);
     });
+
+    it('ends the call at its timeout even when the child exited and a descendant still holds its output', async () => {
+        const pidFile = path.join(dir, 'grandchild-pid.txt');
+        const grandchild = path.join(dir, 'grandchild.js');
+        fs.writeFileSync(grandchild, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, ${HANG_MS});`);
+        const parent = path.join(dir, 'exits-early.js');
+        fs.writeFileSync(parent, `require('child_process').spawn(process.execPath, [${JSON.stringify(grandchild)}], { stdio: 'inherit', detached: true }).unref();`
+            + ` setTimeout(() => process.exit(0), ${PARENT_EXIT_MS});`);
+        override('gh', parent);
+        const started = Date.now();
+        try {
+            const error = await runCli('gh', ['issue', 'list'], { timeoutMs: DESCENDANT_TIMEOUT_MS }).catch((e: unknown) => e) as CliError;
+            expect(error).toBeInstanceOf(CliError);
+            expect(error.timedOut).toBe(true);
+            expect(Date.now() - started).toBeLessThan(DESCENDANT_TIMEOUT_MS + TIMEOUT_SLACK_MS);
+        } finally {
+            if (fs.existsSync(pidFile)) try { process.kill(Number(fs.readFileSync(pidFile, 'utf8'))); } catch { /* already gone */ }
+        }
+    }, LINGER_TEST_TIMEOUT_MS);
 
     it('reports a missing override as not found instead of falling back to PATH', async () => {
         override('gh', path.join(dir, 'missing', 'gh.exe'));

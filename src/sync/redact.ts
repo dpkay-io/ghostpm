@@ -49,10 +49,13 @@ export function redactSecrets(text: string): Redaction {
             return `${edge}${REDACTED}`;
         });
     }
-    result = result.replace(KEY_VALUE, (match: string, key: string, value: string) => {
-        if (!looksSecret(value)) return match;
+    const keyValues = (span: string): string => span.replace(KEY_VALUE, (_match: string, key: string, value: string) => {
+        if (!looksSecret(value)) {
+            // Not itself a secret, but it may run on into the next assignment (`[redacted]&password=…`): look inside it too.
+            return `${key}${keyValues(value)}`;
+        }
         count++;
         return `${key}${REDACTED}`;
     });
-    return { text: result, count };
+    return { text: keyValues(result), count };
 }

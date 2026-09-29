@@ -219,23 +219,23 @@ function plan(command: string, args: CliArg[]): Invocation {
     return atFileInvocation(resolved, [], command, args);
 }
 
-/** Ends the child and stops waiting on pipes a grandchild of it may still hold. */
-function abandon(child: ChildProcess): void {
-    child.kill();
+/**
+ * A timed-out call: end the process tree while the child lives (on Windows killing cmd.exe alone leaves az.cmd's
+ * python running, free to finish a create after the retry), and stop reading the pipes either way: a descendant
+ * can hold them long after the child itself has exited.
+ */
+function stopTimedOut(child: ChildProcess): void {
+    if (child.exitCode === null && child.pid !== undefined) {
+        if (IS_WINDOWS) {
+            execFile(systemTool('taskkill.exe'), [...TASKKILL_TREE, String(child.pid)], { windowsHide: true, cwd: systemDir() }, error => {
+                if (error) child.kill();
+            });
+        } else {
+            child.kill();
+        }
+    }
     child.stdout?.destroy();
     child.stderr?.destroy();
-}
-
-/** On Windows the whole tree: killing cmd.exe alone leaves az.cmd's python running, free to finish a create after the retry. */
-function killTree(child: ChildProcess): void {
-    if (child.exitCode !== null || child.pid === undefined) return;
-    if (!IS_WINDOWS) {
-        abandon(child);
-        return;
-    }
-    execFile(systemTool('taskkill.exe'), [...TASKKILL_TREE, String(child.pid)], { windowsHide: true, cwd: systemDir() }, error => {
-        if (error) abandon(child);
-    });
 }
 
 function toCliError(command: string, error: ExecFileException, stderr: string): CliError {
@@ -255,6 +255,7 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         return;
     }
     const argDir = invocation.argDir;
+    let finished = false;
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
     const child = execFile(invocation.file, invocation.args, {
@@ -265,18 +266,22 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         cwd: invocation.cwd,
         env: invocation.env,
     }, (error, stdout, stderr) => {
+        finished = true;
         if (timer !== undefined) clearTimeout(timer);
         // Best effort: a process that inherited the folder as its cwd can keep it busy on Windows.
         if (argDir !== null) try { fs.rmSync(argDir, { recursive: true, force: true }); } catch { /* left behind */ }
-        if (error && timedOut) reject(new CliError(`${command} timed out after ${options.timeoutMs} ms`, null, String(stderr), false, false, true));
-        else if (error) reject(toCliError(command, error, String(stderr)));
+        if (timedOut) return;   // already rejected
+        if (error) reject(toCliError(command, error, String(stderr)));
         else resolve(String(stdout).trim());
     });
-    if (options.timeoutMs !== undefined) {
+    const timeoutMs = options.timeoutMs;
+    if (timeoutMs !== undefined && !finished) {
+        // The call ends here whatever the processes do: the lease's safety rests on this bound.
         timer = setTimeout(() => {
             timedOut = true;
-            killTree(child);
-        }, options.timeoutMs);
+            stopTimedOut(child);
+            reject(new CliError(`${command} timed out after ${timeoutMs} ms`, null, '', false, false, true));
+        }, timeoutMs);
     }
     // A child that never started closes its pipe; the callback above reports why.
     child.stdin?.on('error', () => undefined);

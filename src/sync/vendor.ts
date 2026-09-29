@@ -3,6 +3,18 @@ import { Phase } from '../ledger/types';
 /** Every vendor CLI call is killed after this: well inside the sync lease's 60 s TTL (lease.ts), so a hung gh/az cannot outlive the lease. */
 export const VENDOR_CALL_TIMEOUT_MS = 45 * 1000;
 
+/**
+ * Idempotency marker, hidden at the end of a created item's body or a comment: a retry looks for it to tell
+ * whether its earlier attempt landed. Never part of what a task shows locally.
+ */
+const MARKER_OPEN = '<!-- ghostpm:';
+const MARKER_CLOSE = ' -->';
+export const MARKER_NONCE_BYTES = 8;
+const HEX_PER_BYTE = 2;
+export const idempotencyMarker = (nonce: string): string => `${MARKER_OPEN}${nonce}${MARKER_CLOSE}`;
+const MARKERS = new RegExp(`\\s*${MARKER_OPEN}[0-9a-f]{${MARKER_NONCE_BYTES * HEX_PER_BYTE}}${MARKER_CLOSE}`, 'g');
+export const stripMarkers = (text: string): string => text.replace(MARKERS, '');
+
 /** One shape for a GitHub issue and an Azure Boards work item. */
 export interface RemoteItem {
     remoteId: string;

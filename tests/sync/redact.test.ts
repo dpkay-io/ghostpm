@@ -66,6 +66,18 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets('password=aaaaaaaaaaa1 and token=bbbbbbbbbbb2').count).toBe(2);
     });
 
+    it.each([
+        ['a URL query', `https://api.example.com/?access_token=${GITHUB_TOKEN}&password=hunter2hunter2`, 'https://api.example.com/?access_token=[redacted]&password=[redacted]'],
+        ['a comma-joined header', `token=${GITHUB_TOKEN},client_secret=Zx8Qv3LmNp7Rt2Wy`, 'token=[redacted],client_secret=[redacted]'],
+        ['a semicolon-joined env line', `GITHUB_TOKEN=${GITHUB_TOKEN};DB_PASSWORD=hunter2hunter2`, 'GITHUB_TOKEN=[redacted];DB_PASSWORD=[redacted]'],
+    ])('never lets an earlier redaction shield the next secret in %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 2 });
+    });
+
+    it('still redacts a whole secret that holds & ; or ,', () => {
+        expect(redactSecrets('password=abc&def;ghi,12345')).toEqual({ text: `password=${REDACTED}`, count: 1 });
+    });
+
     it('never matches its own placeholder again', () => {
         const once = redactSecrets(`token=${GITHUB_TOKEN}`).text;
         expect(redactSecrets(once)).toEqual({ text: once, count: 0 });

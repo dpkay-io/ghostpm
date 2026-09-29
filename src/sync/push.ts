@@ -3,7 +3,8 @@ import { Runner } from '../cli';
 import { Ledger, nowIso, write } from '../ledger/db';
 import { recordEvent } from '../ledger/events';
 import {
-    CloseDuplicatePayload, CommentPayload, OP_CREATE, OutboxOp, OutboxRow, STATUS_FAILED, hasActiveCreate, projectTask,
+    AttemptPayload, CloseDuplicatePayload, CommentPayload, OP_CLOSE_DUPLICATE, OP_CREATE, OP_SYNC_STATE, OutboxOp, OutboxRow, STATUS_FAILED,
+    dropUnpushed, hasActiveCreate, projectTask,
 } from '../ledger/projection';
 import {
     readSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, setSyncPause,
@@ -15,9 +16,11 @@ import { getWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { acquireLease } from './lease';
 import { DEFER_MS, claimNext, completeRow, deferRow, failRow, holdsClaim, releaseRow, retryRow, setRowPayload } from './outbox';
-import { applyRemoteItem, markLinkBroken, recordIntent, recordOwnPush } from './reconcile';
+import { applyRemoteItem, clearIntent, markLinkBroken, recordIntent, recordOwnPush } from './reconcile';
 import { redactSecrets } from './redact';
-import { DesiredState, GoneError, PermanentError, RemoteItem, SyncPausedError, VendorAdapter, linkStateOf } from './vendor';
+import {
+    DesiredState, GoneError, MARKER_NONCE_BYTES, PermanentError, RemoteItem, SyncPausedError, VendorAdapter, idempotencyMarker, linkStateOf,
+} from './vendor';
 
 /** Wraps the runner an adapter makes its CLI calls through, so every single call is checked first. */
 export type RunGuard = (run: Runner) => Runner;
@@ -46,17 +49,9 @@ export const emptyPushSummary = (): PushSummary =>
 
 const NOT_SYNCABLE = 'The task or its workspace no longer syncs.';
 const NO_VENDOR_ITEM = 'The task has no vendor item and none is being created.';
-const NONCE_BYTES = 8;
 const MARKER_SEPARATOR = '\n\n';
-
-/** Hidden in a created item's body or a comment: a retry finds it to tell whether its earlier attempt landed. */
-export const idempotencyMarker = (nonce: string): string => `<!-- ghostpm:${nonce} -->`;
-
-/** What a create or comment row carries once first tried: its marker's nonce, and for a create the title that attempt sent. */
-interface Attempted {
-    nonce?: string;
-    title?: string;
-}
+/** The ops that write a push intent before their vendor call. */
+const RECORDS_INTENT: ReadonlySet<OutboxOp> = new Set<OutboxOp>([OP_SYNC_STATE, OP_CLOSE_DUPLICATE]);
 
 /** The lease ran out or another runner took it: stop at once, writing nothing (§8.1: one sync runner). */
 class LeaseLostError extends Error {}
@@ -80,7 +75,7 @@ interface PushContext extends Claim {
 
 const defaultBody = (task: TaskRow): string => `Tracked by GhostPM as ${formatTaskId(task.id)}.`;
 const withMarker = (text: string, nonce: string): string => `${text}${MARKER_SEPARATOR}${idempotencyMarker(nonce)}`;
-const newNonce = (): string => randomBytes(NONCE_BYTES).toString('hex');
+const newNonce = (): string => randomBytes(MARKER_NONCE_BYTES).toString('hex');
 
 /** Post-claim writes answer false once the row is another holder's. */
 function held(landed: boolean): void {
@@ -134,17 +129,24 @@ function requireLink(ctx: PushContext): LinkCheck {
 }
 
 async function pushCreate(ctx: PushContext): Promise<Outcome> {
-    // Never create twice, nor for work already done or dropped (plan Ruling 87): a re-armed create can outlive its task's phase.
-    if (getVendorLink(ctx.db, ctx.task.id) !== undefined || CLOSED_PHASES.has(ctx.task.phase)) return 'skipped';
+    if (getVendorLink(ctx.db, ctx.task.id) !== undefined) return 'skipped';   // never create twice
+    const earlier = JSON.parse(ctx.row.payload ?? '{}') as AttemptPayload;
+    // Plan Ruling 87: nothing is created for work already done or dropped (a re-armed create can outlive its task's
+    // phase). An attempt that may have landed is still looked for, so its item is linked and then closed, not orphaned.
+    const closed = CLOSED_PHASES.has(ctx.task.phase);
+    if (closed && earlier.nonce === undefined) return 'skipped';
     const desired = desiredOf(ctx, ctx.task);
-    const earlier = JSON.parse(ctx.row.payload ?? '{}') as Attempted;
     let sent = earlier.title ?? desired.title;
     // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
     let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
+    if (item === null && closed) {
+        write(ctx.db, () => dropUnpushed(ctx.db, ctx.task.id));   // its comments can never reach the vendor either
+        return 'skipped';
+    }
     if (item === null) {
         const nonce = earlier.nonce ?? newNonce();
         sent = desired.title;
-        const attempt: Attempted = { nonce, title: sent };
+        const attempt: AttemptPayload = { nonce, title: sent };
         held(setRowPayload(ctx.db, ctx.row.id, ctx.deps.holder, attempt));
         const body = scrub(ctx, ctx.task.body !== null && ctx.task.body.trim().length > 0 ? ctx.task.body : defaultBody(ctx.task));
         item = await leased(ctx).create(desired, withMarker(body, nonce));
@@ -199,7 +201,7 @@ async function pushSyncState(ctx: PushContext): Promise<Outcome> {
 async function pushComment(ctx: PushContext): Promise<Outcome> {
     const check = requireLink(ctx);
     if ('outcome' in check) return check.outcome;
-    const payload = JSON.parse(ctx.row.payload ?? '{}') as CommentPayload & Attempted;
+    const payload = JSON.parse(ctx.row.payload ?? '{}') as CommentPayload & AttemptPayload;
     // An earlier attempt may have posted it and failed after: never post it twice.
     const posted = payload.nonce !== undefined
         && await leased(ctx).hasComment(check.link.remote_id, idempotencyMarker(payload.nonce));
@@ -260,12 +262,23 @@ function onFailure(db: Ledger, deps: PushDeps, row: OutboxRow, workspace: Worksp
         summary.broken++;
         return;
     }
+    // A push that ends here without landing leaves no intent behind: a person's later edit to the same state is theirs.
+    const endIntent = (): void => {
+        if (RECORDS_INTENT.has(row.op)) clearIntent(db, row.task_id);
+    };
     if (error instanceof PermanentError) {
-        held(failRow(db, row.id, deps.holder, message));
+        write(db, () => {
+            held(failRow(db, row.id, deps.holder, message));
+            endIntent();
+        });
         summary.failed++;
         return;
     }
-    const status = retryRow(db, row, deps.holder, message, readSetting(db, null, SETTING_MAX_PUSH_ATTEMPTS), deps.now());
+    const status = write(db, () => {
+        const next = retryRow(db, row, deps.holder, message, readSetting(db, null, SETTING_MAX_PUSH_ATTEMPTS), deps.now());
+        if (next === STATUS_FAILED) endIntent();
+        return next;
+    });
     if (status === null) throw new ClaimLostError();
     if (status === STATUS_FAILED) summary.failed++;
     else summary.retried++;

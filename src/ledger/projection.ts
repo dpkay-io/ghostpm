@@ -34,6 +34,13 @@ export interface OutboxRow {
 
 export interface CommentPayload { text: string }
 export interface CloseDuplicatePayload { of: string }
+/** What a create or comment row carries once tried: its retry marker's nonce, and for a create the title that attempt sent. */
+export interface AttemptPayload {
+    nonce?: string;
+    title?: string;
+}
+/** json_extract path of AttemptPayload.nonce. */
+const ATTEMPT_NONCE_PATH = '$.nonce';
 
 /**
  * What asked for the projection (spec §8.2):
@@ -110,10 +117,15 @@ function upsertSyncState(db: Ledger, taskId: number, at: string): void {
 
 const policyOf = (db: Ledger, task: TaskRow): SyncPolicy => readSetting(db, task.workspace_id, SETTING_SYNC_POLICY);
 
-/** Nothing of a task closed before its create was taken ever reaches the vendor: drop what waits. */
-function dropUnpushed(db: Ledger, taskId: number): void {
-    db.prepare('DELETE FROM outbox WHERE task_id = ? AND op IN (?, ?) AND status = ?')
-        .run(taskId, OP_CREATE, OP_COMMENT, STATUS_PENDING);
+/**
+ * Nothing of a task closed before its create was taken ever reaches the vendor: drop what waits. A create
+ * that was already tried stays (its attempt may have landed): the pusher only looks for what it made.
+ */
+export function dropUnpushed(db: Ledger, taskId: number): void {
+    db.prepare(`
+        DELETE FROM outbox WHERE task_id = ? AND status = ?
+          AND (op = ? OR (op = ? AND json_extract(payload, ?) IS NULL))`)
+        .run(taskId, STATUS_PENDING, OP_COMMENT, OP_CREATE, ATTEMPT_NONCE_PATH);
 }
 
 /** Queues what a vendor should now show for `task`. Plain statements: call inside write(). */

@@ -234,7 +234,8 @@ describe('pushing the outbox', () => {
         change(task.id, { phase: 'done' });
         rearmFailed(ledger.db, Date.now());
         expect((await push()).skipped).toBe(1);
-        expect(vendor.calls).toEqual([]);
+        // The failed attempt carried a marker, so only a look for what it might have made; never a create.
+        expect(vendor.calls.map(call => call.op)).toEqual(['findCreated']);
         expect(getVendorLink(ledger.db, task.id)).toBeUndefined();
         expect(statuses(task.id)).toEqual(['create:done']);
     });
@@ -484,7 +485,7 @@ describe('pushing the outbox', () => {
         change(task.id, { title: 'Renamed' });
         jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new GoneError('Issue #1 is no longer in acme/widgets'));
         expect((await push()).broken).toBe(1);
-        expect(getVendorLink(ledger.db, task.id)!.broken_at).not.toBeNull();
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ broken_at: expect.any(String), intent_title: null });
         expect(statuses(task.id)).toEqual(['create:done', 'sync_state:done']);
     });
 
@@ -522,6 +523,92 @@ describe('pushing the outbox', () => {
         } finally {
             upgraded.close();
         }
+    });
+
+    it("forgets a refused push's intent, so a person's later edit to that same title is still theirs", async () => {
+        const task = track('A');
+        await push();
+        change(task.id, { title: 'B' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new PermanentError('HTTP 422: refused'));
+        expect((await push()).failed).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBeNull();
+        vendor.humanEdit('1', { title: 'C' });
+        change(task.id, { comment: 'x' });
+        await push();
+        vendor.humanEdit('1', { title: 'B' });                  // a person, back to the title our push never set
+        change(task.id, { comment: 'y' });
+        await push();
+        expect(getTask(ledger.db, task.id)!.title).toBe('B');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, 'vendor', 'vendor']);
+    });
+
+    it("forgets a pending push's intent once a person's edit is applied over it", async () => {
+        const task = track('A');
+        await push();
+        change(task.id, { title: 'B' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new Error('HTTP 502'));   // never landed; retries later
+        expect((await push()).retried).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBe('B');
+        vendor.humanEdit('1', { title: 'C' });
+        change(task.id, { comment: 'x' });
+        await push();
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBeNull();
+        vendor.humanEdit('1', { title: 'B' });
+        change(task.id, { comment: 'y' });
+        await push();
+        expect(getTask(ledger.db, task.id)!.title).toBe('B');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, 'vendor', 'vendor']);
+    });
+
+    it("forgets a push's intent when its retries run out", async () => {
+        setSetting(ledger.db, SETTING_MAX_PUSH_ATTEMPTS, 1);
+        const task = track();
+        await push();
+        change(task.id, { title: 'Renamed' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new Error('HTTP 502'));
+        expect((await push()).failed).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBeNull();
+    });
+
+    it('keeps retry markers out of the body shown locally', async () => {
+        const task = track();
+        await push();
+        vendor.humanEdit('1', { assignee: 'someone' });
+        change(task.id, { comment: 'progress' });
+        await push();
+        expect(vendor.items.get('1')!.body).toMatch(MARKER);
+        expect(getTask(ledger.db, task.id)).toMatchObject({ body: `Tracked by GhostPM as T${task.id}.`, assignee: 'someone' });
+    });
+
+    it('links and closes the item a create made before its task was closed', async () => {
+        const task = track();
+        vendor.failAfterApply = new Error('gh timed out after 45000 ms');   // landed, answer lost
+        expect((await push()).retried).toBe(1);
+        change(task.id, { phase: 'done' });
+        expect(outboxRows(ledger.db, task.id).find(row => row.op === 'create')).toMatchObject({ status: 'pending' });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(vendor.items.get('1')!.state).toBe('closed:completed');
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_id: '1', remote_state: 'closed:completed' });
+        expect(vendor.calls.filter(call => call.op === 'create')).toHaveLength(1);
+    });
+
+    it('only looks for, never makes, the item of a task closed before its create landed', async () => {
+        const task = track();
+        vendor.failNext = new Error('HTTP 502');   // failed before anything was made
+        expect((await push()).retried).toBe(1);
+        change(task.id, { phase: 'done' });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        expect((await push()).skipped).toBe(1);
+
+        expect(vendor.calls.map(call => call.op)).toEqual(['findCreated']);
+        expect(vendor.items.size).toBe(0);
+        expect(getVendorLink(ledger.db, task.id)).toBeUndefined();
+        expect(statuses(task.id)).toEqual(['create:done']);
     });
 
     it('marks the link broken when a comment finds the item gone', async () => {
