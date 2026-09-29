@@ -206,11 +206,11 @@ describe('GitHubAdapter retry safety', () => {
         expect(item).toMatchObject({ remoteId: '77', url: `https://github.com/${repo}/issues/77`, title: 'Fix it', state: 'open', labels: ['ghostpm:planned'] });
     });
 
-    it('posts a comment once and resolves when only the re-fetch fails', async () => {
+    it('posts a comment once and resolves null when only the re-fetch fails', async () => {
         const repo = freshRepo();
         const gh = fakeGh({ 'issue view': new Error('network down') });
         const item = await new GitHubAdapter(repo, gh.run).comment('12', 'hello');
-        expect(item.remoteId).toBe('12');
+        expect(item).toBeNull();
         expect(gh.calls.filter(call => call.args[0] === 'issue' && call.args[1] === 'comment')).toHaveLength(1);
     });
 });

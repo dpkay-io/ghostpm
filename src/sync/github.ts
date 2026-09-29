@@ -217,14 +217,11 @@ export class GitHubAdapter implements VendorAdapter {
         return this.mustFetch(link.remoteId);
     }
 
-    async comment(remoteId: string, text: string): Promise<RemoteItem> {
+    async comment(remoteId: string, text: string): Promise<RemoteItem | null> {
         await this.gh(['issue', 'comment', remoteId, ...this.repoArgs(), '--body-file', STDIN_FILE], text, true);
         // Posted: a failed re-fetch must not read as a failed comment, or a retry posts it twice.
-        return (await this.mustFetch(remoteId).catch(() => null)) ?? {
-            remoteId, url: null, title: '', body: null, state: OPEN, labels: [], assignee: null, milestone: null, updatedAt: new Date().toISOString(),
-        };
+        return this.mustFetch(remoteId).catch(() => null);
     }
-
     async closeDuplicate(remoteId: string, ofRemoteId: string): Promise<RemoteItem> {
         await this.gh(['issue', 'close', remoteId, ...this.repoArgs(), '--reason', DUPLICATE, '--duplicate-of', ofRemoteId], undefined, true);
         return this.mustFetch(remoteId);

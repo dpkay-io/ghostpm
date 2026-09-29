@@ -29,7 +29,8 @@ export interface LinkState {
 export interface VendorAdapter {
     create(desired: DesiredState, body: string): Promise<RemoteItem>;
     syncState(link: LinkState, desired: DesiredState): Promise<RemoteItem>;
-    comment(remoteId: string, text: string): Promise<RemoteItem>;
+    /** null: the comment was posted but the item could not be re-read. Callers must not update any baseline from null. */
+    comment(remoteId: string, text: string): Promise<RemoteItem | null>;
     closeDuplicate(remoteId: string, ofRemoteId: string): Promise<RemoteItem>;
     /** Items changed at or after `since` in every state, oldest change first; at most `limit` where the vendor pages. */
     listChangedSince(since: string, limit: number): Promise<RemoteItem[]>;
