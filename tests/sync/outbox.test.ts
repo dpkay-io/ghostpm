@@ -76,13 +76,13 @@ describe('outbox queue mechanics', () => {
 
     it('retries with backoff, then gives up after the last attempt', () => {
         const id = insert('comment', 'claimed');
-        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 502', 3, T0)).toBe(true);
+        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 502', 3, T0)).toBe('pending');
         expect(row(id)).toMatchObject({ status: 'pending', attempts: 1, error: 'HTTP 502', next_attempt_at: iso(T0 + PUSH_BACKOFF_BASE_MS), claimed_by: null });
         claimedBy(id, HOLDER);
-        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 502', 3, T0)).toBe(true);
+        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 502', 3, T0)).toBe('pending');
         expect(row(id).status).toBe('pending');
         claimedBy(id, HOLDER);
-        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 503', 3, T0)).toBe(true);
+        expect(retryRow(ledger.db, row(id), HOLDER, 'HTTP 503', 3, T0)).toBe('failed');
         expect(row(id)).toMatchObject({ status: 'failed', attempts: 3, error: 'HTTP 503' });
     });
 
@@ -133,7 +133,7 @@ describe('outbox queue mechanics', () => {
         expect(claimNext(ledger.db, second, later)?.id).toBe(id);
         expect(completeRow(ledger.db, id, second)).toBe(true);
 
-        expect(retryRow(ledger.db, stale, first, 'HTTP 502', 8, later)).toBe(false);
+        expect(retryRow(ledger.db, stale, first, 'HTTP 502', 8, later)).toBeNull();
         expect(failRow(ledger.db, id, first, 'late')).toBe(false);
         expect(completeRow(ledger.db, id, first)).toBe(false);
         expect(deferRow(ledger.db, stale, first, later)).toBe(false);
@@ -144,9 +144,9 @@ describe('outbox queue mechanics', () => {
     it('counts attempts from the ledger, not from the caller copy of the row', () => {
         const id = insert('comment', 'claimed');
         const copy = row(id);
-        expect(retryRow(ledger.db, copy, HOLDER, 'one', 8, T0)).toBe(true);
+        expect(retryRow(ledger.db, copy, HOLDER, 'one', 8, T0)).toBe('pending');
         claimedBy(id, HOLDER);
-        expect(retryRow(ledger.db, copy, HOLDER, 'two', 8, T0)).toBe(true);
+        expect(retryRow(ledger.db, copy, HOLDER, 'two', 8, T0)).toBe('pending');
         expect(row(id).attempts).toBe(2);
     });
 

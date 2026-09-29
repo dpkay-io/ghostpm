@@ -1,6 +1,6 @@
 import { Ledger, SqlParam, Where, write } from '../ledger/db';
 import {
-    OP_CREATE, OP_SYNC_STATE, OutboxRow, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
+    OP_CREATE, OP_SYNC_STATE, OutboxRow, OutboxStatus, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
 } from '../ledger/projection';
 import { SETTING_SYNC_PAUSED } from '../ledger/settings';
 import { SYNC_LEASE } from './lease';
@@ -94,20 +94,22 @@ export function releaseRow(db: Ledger, row: OutboxRow, holder: string): boolean 
 
 /**
  * Transient failure: back off (spec §8.8); `failed` once `maxAttempts` is reached. The count comes
- * from the ledger, not the caller's copy of the row. False when the claim is no longer `holder`'s.
+ * from the ledger, not the caller's copy of the row. The resulting status, or null when the claim is no longer `holder`'s.
  */
-export function retryRow(db: Ledger, row: OutboxRow, holder: string, error: string, maxAttempts: number, now: number): boolean {
+export function retryRow(db: Ledger, row: OutboxRow, holder: string, error: string, maxAttempts: number, now: number): OutboxStatus | null {
     return write(db, () => {
         const held = db.prepare(`SELECT attempts FROM outbox WHERE id = ? AND ${HELD}`)
             .get(row.id, STATUS_CLAIMED, holder) as { attempts: number } | undefined;
-        if (held === undefined) return false;
+        if (held === undefined) return null;
         const attempts = held.attempts + 1;
         if (attempts >= maxAttempts) {
-            return db.prepare(`UPDATE outbox SET status = ?, attempts = attempts + 1, error = ? WHERE id = ? AND ${HELD}`)
+            const failed = db.prepare(`UPDATE outbox SET status = ?, attempts = attempts + 1, error = ? WHERE id = ? AND ${HELD}`)
                 .run(STATUS_FAILED, error, row.id, STATUS_CLAIMED, holder).changes === 1;
+            return failed ? STATUS_FAILED : null;
         }
-        return returnToPending(db, row, holder, ', attempts = attempts + 1, error = ?, next_attempt_at = ?',
+        const pending = returnToPending(db, row, holder, ', attempts = attempts + 1, error = ?, next_attempt_at = ?',
             [error, iso(now + backoffMs(attempts))]);
+        return pending ? STATUS_PENDING : null;
     });
 }
 
