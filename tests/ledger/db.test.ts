@@ -7,6 +7,8 @@ import { removeTempDir } from '../temp-dir';
 
 const EXPECTED_TABLES = ['events', 'leases', 'outbox', 'sessions', 'settings', 'tasks', 'vendor_links', 'workspaces'];
 const SPEC_BUSY_TIMEOUT_MS = 5000;
+const FIRST_SCHEMA_VERSION = 1;
+const EPOCH = '1970-01-01T00:00:00.000Z';
 
 describe('ledger db', () => {
     let dir: string;
@@ -118,5 +120,77 @@ describe('ledger db', () => {
         const where = new Where().add('workspace_id = ?', 3).in('phase', ['planned', 'done']);
         expect(`${where}`).toBe(' WHERE workspace_id = ? AND phase IN (?, ?)');
         expect(where.params).toEqual([3, 'planned', 'done']);
+    });
+
+    it('upgrades a populated version-1 ledger while an older process still reads it', () => {
+        const file = ledgerPath();
+        const older = new Database(file);
+        older.pragma(`busy_timeout = ${SPEC_BUSY_TIMEOUT_MS}`);
+        older.pragma('journal_mode = WAL');
+        migrate(older, FIRST_SCHEMA_VERSION);
+        older.exec(`
+            INSERT INTO workspaces (id, path) VALUES (1, 'ws');
+            INSERT INTO tasks (id, title, phase, workspace_id, origin, created_at, updated_at)
+                VALUES (1, 'Kept', 'planned', 1, 'local', 't', 't'), (2, 'Also kept', 'planned', 1, 'local', 't', 't');
+            INSERT INTO outbox (id, task_id, op, status) VALUES (1, 1, 'sync_state', 'pending'), (2, 1, 'sync_state', 'pending');
+            INSERT INTO vendor_links (task_id, vendor, remote_id) VALUES (1, 'github', '7');
+        `);
+        // An open statement holds a read snapshot, like a session still running the old build.
+        const reading = older.prepare('SELECT id FROM tasks ORDER BY id').iterate();
+        reading.next();
+
+        const db = openLedger(file);
+        try {
+            expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+            expect(db.prepare('SELECT title FROM tasks ORDER BY id').all()).toEqual([{ title: 'Kept' }, { title: 'Also kept' }]);
+            // v1 never enforced one pending sync_state per task: the newest survives.
+            expect(db.prepare('SELECT id, next_attempt_at FROM outbox').all()).toEqual([{ id: 2, next_attempt_at: EPOCH }]);
+            expect(db.prepare('SELECT remote_title, broken_at FROM vendor_links').get()).toEqual({ remote_title: null, broken_at: null });
+            // The older connection finishes what it was reading.
+            expect(Array.from(reading)).toEqual([{ id: 2 }]);
+        } finally {
+            db.close();
+            older.close();
+        }
+    });
+
+    it('allows one pending sync_state per task, beside any number in flight', () => {
+        const db = openLedger();
+        try {
+            const insert = db.prepare('INSERT INTO outbox (task_id, op, status, next_attempt_at) VALUES (1, ?, ?, ?)');
+            insert.run('sync_state', 'claimed', EPOCH);
+            insert.run('sync_state', 'pending', EPOCH);
+            insert.run('comment', 'pending', EPOCH);
+            insert.run('comment', 'pending', EPOCH);
+            expect(() => insert.run('sync_state', 'pending', EPOCH)).toThrow(/UNIQUE constraint failed/);
+        } finally {
+            db.close();
+        }
+    });
+
+    it('answers the claim query from an index', () => {
+        const db = openLedger();
+        try {
+            const plan = db.prepare(
+                'EXPLAIN QUERY PLAN SELECT id FROM outbox WHERE status = ? AND next_attempt_at <= ? ORDER BY id LIMIT 1'
+            ).all('pending', EPOCH) as { detail: string }[];
+            expect(plan.map(step => step.detail).join('\n')).toContain('outbox_due');
+        } finally {
+            db.close();
+        }
+    });
+
+    it('closes its handle when it refuses a newer ledger', () => {
+        const bumped = openLedger();
+        bumped.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+        bumped.close();
+        const closeSpy = jest.spyOn(Database.prototype, 'close');
+        try {
+            expect(() => openLedger()).toThrow(/newer than this build/);
+            // A leaked handle keeps the file locked on Windows until the process exits.
+            expect(closeSpy).toHaveBeenCalledTimes(1);
+        } finally {
+            closeSpy.mockRestore();
+        }
     });
 });

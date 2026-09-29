@@ -78,4 +78,8 @@ export interface VendorLinkRow {
     labels: string | null;
     remote_updated_at: string | null;
     last_pushed_rev: number | null;
+    /** Last title seen on, or pushed to, the vendor: the human-wins baseline (spec §8.6). */
+    remote_title: string | null;
+    /** Set when the vendor item was deleted or moved away; the task stays local (spec §8.5). */
+    broken_at: string | null;
 }

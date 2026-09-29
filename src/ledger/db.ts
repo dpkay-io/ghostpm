@@ -9,7 +9,11 @@ export type Ledger = Database.Database;
 export const LEDGER_FILE = 'ledger.db';
 export const BUSY_TIMEOUT_MS = 5000;
 
-/** One entry per schema version. Never edit a shipped entry; append a new one. */
+/**
+ * One entry per schema version. Never edit a shipped entry; append a new one.
+ * Literals inside an entry are frozen with it on purpose: renaming a constant later must
+ * not rewrite what an old ledger was migrated with.
+ */
 const MIGRATIONS: readonly string[] = [
     `
     CREATE TABLE workspaces (
@@ -91,6 +95,18 @@ const MIGRATIONS: readonly string[] = [
         value TEXT NOT NULL
     );
     `,
+    // 2 (Phase 3, Sync v2): one pending desired state per task, the claim index, and the
+    // vendor-side baseline (last title seen) plus a marker for items deleted or moved away.
+    `
+    DELETE FROM outbox
+    WHERE op = 'sync_state' AND status = 'pending'
+      AND id NOT IN (SELECT MAX(id) FROM outbox WHERE op = 'sync_state' AND status = 'pending' GROUP BY task_id);
+    CREATE UNIQUE INDEX outbox_one_pending_sync_state ON outbox (task_id) WHERE op = 'sync_state' AND status = 'pending';
+    UPDATE outbox SET next_attempt_at = '1970-01-01T00:00:00.000Z' WHERE next_attempt_at IS NULL;
+    CREATE INDEX outbox_due ON outbox (status, next_attempt_at);
+    ALTER TABLE vendor_links ADD COLUMN remote_title TEXT;
+    ALTER TABLE vendor_links ADD COLUMN broken_at TEXT;
+    `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
@@ -131,7 +147,8 @@ export function write<T>(db: Ledger, fn: () => T): T {
     return db.transaction(fn).immediate();
 }
 
-export function migrate(db: Ledger): void {
+/** Brings the ledger up to `targetVersion` (normally the newest). Forward only. */
+export function migrate(db: Ledger, targetVersion: number = SCHEMA_VERSION): void {
     // Read outside any transaction first: the common case (already current) then needs
     // no write lock at all, which matters when this runs on every hook invocation.
     const initialVersion = db.pragma('user_version', { simple: true }) as number;
@@ -140,12 +157,12 @@ export function migrate(db: Ledger): void {
             `Ledger at ${db.name} is schema version ${initialVersion}, newer than this build's ${SCHEMA_VERSION}. Update GhostPM before opening it.`
         );
     }
-    if (initialVersion === SCHEMA_VERSION) return;
+    if (initialVersion >= targetVersion) return;
 
     // Re-reading the version inside the lock makes concurrent first opens safe.
     const applyNext = (): boolean => {
         const version = db.pragma('user_version', { simple: true }) as number;
-        if (version >= SCHEMA_VERSION) return false;
+        if (version >= targetVersion) return false;
         db.exec(MIGRATIONS[version]);
         db.pragma(`user_version = ${version + 1}`);
         return true;
@@ -177,8 +194,14 @@ function openDatabase(filePath: string): Ledger {
 export function openLedger(filePath: string = ledgerPath()): Ledger {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const db = openDatabase(filePath);
-    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
-    db.pragma('journal_mode = WAL');
-    migrate(db);
+    try {
+        db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+        db.pragma('journal_mode = WAL');
+        migrate(db);
+    } catch (error) {
+        // A refused ledger must not stay locked by this process (Windows keeps open files locked).
+        db.close();
+        throw error;
+    }
     return db;
 }
