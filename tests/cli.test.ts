@@ -9,12 +9,16 @@ const HOSTILE = 'a&b | "q" %PATH% ^ <x> (p)\nsecond line';
 const HOSTILE_FRAGMENTS = ['&b', '"q"', '%PATH%', '^', '<x>', '(p)', 'second line'];
 const NON_ASCII = 'Déjà vu — ✓ 日本 😀';
 const AUTH_EXIT = 4;
+const LINGER_TEST_TIMEOUT_MS = 20000;
+const MSI_AZ_SCRIPT = '@IF EXIST "%~dp0\\..\\python.exe" (\r\n  SET AZ_INSTALLER=MSI\r\n  "%~dp0\\..\\python.exe" -IBm azure.cli %*\r\n)\r\n';
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
 /** Prints what it received: argv (expanding @file the way az does) and stdin. */
 const ECHO_SOURCE = `
 const fs = require('fs');
-const args = process.argv.slice(2).map(arg => arg.startsWith('@') ? fs.readFileSync(arg.slice(1), 'utf8') : arg);
+const expand = arg => arg.startsWith('@') ? fs.readFileSync(arg.slice(1), 'utf8') : arg;
+// az 2.85 expands @file twice (azure.cli.core, then knack on the file content), and no further.
+const args = process.argv.slice(2).map(arg => expand(expand(arg)));
 let stdin = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { stdin += chunk; });
@@ -95,6 +99,14 @@ describe('runCli', () => {
         expect(result.args).toEqual(['--title', `@${secret}`]);
     });
 
+    it('refuses a plain az value that az would read as a file, on every path', async () => {
+        override('az', echo);
+        for (const plain of ['@notes.txt', 'System.History=@.env']) {
+            const error = await runCli('az', ['--fields', plain]).catch((e: unknown) => e) as CliError;
+            expect(error.refused).toBe(true);
+        }
+    });
+
     it('resolves a relative override once, against the working folder', async () => {
         process.chdir(dir);
         override('gh', 'echo.js');
@@ -113,7 +125,7 @@ describe('runCli', () => {
         const error = await runCli(planted, []).catch((e: unknown) => e) as CliError;
         expect(error.notFound).toBe(true);
         expect(fs.existsSync(marker)).toBe(false);
-        const systemDir = path.join(process.env.SystemRoot || 'C:\Windows', 'System32');
+        const systemDir = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
         expect(looked.mock.calls[0][0]).toBe(path.join(systemDir, 'where.exe'));
         expect((looked.mock.calls[0][2] as { cwd?: string }).cwd).toBe(systemDir);
     });
@@ -150,15 +162,15 @@ describe('runCli', () => {
             const spawner = path.join(dir, 'spawner.js');
             fs.writeFileSync(spawner, `require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, ${lingerMs})'], { detached: true, stdio: 'ignore' }).unref();`);
             const busyAz = path.join(dir, 'busy-az.cmd');
-            fs.writeFileSync(busyAz, `@"${process.execPath}" "${spawner}" %*
-`);
+            fs.writeFileSync(busyAz, `@"${process.execPath}" "${spawner}" %*\r\n`);
             override('az', busyAz);
             const spawned = jest.spyOn(child_process, 'execFile');
             await expect(runCli('az', ['--title', freeText('x')])).resolves.toBe('');
             const argDir = (spawned.mock.calls[0][2] as { cwd: string }).cwd;
             await new Promise(resolve => setTimeout(resolve, lingerMs * 2));
             removeTempDir(argDir);
-        });
+            expect(fs.existsSync(argDir)).toBe(false);
+        }, LINGER_TEST_TIMEOUT_MS);
 
         itOnWindows('runs an override given as a relative path by its absolute path', async () => {
             process.chdir(dir);
@@ -181,12 +193,14 @@ describe('runCli', () => {
             fs.mkdirSync(wbin, { recursive: true });
             const msiAz = path.join(wbin, 'az.cmd');
             const python = path.join(dir, 'msi', 'python.exe');
-            fs.writeFileSync(msiAz, '@rem msi\r\n');
+            fs.writeFileSync(msiAz, MSI_AZ_SCRIPT);
             fs.writeFileSync(python, '');
             override('az', msiAz);
             let atFileContent = '';
             const spawned = jest.spyOn(child_process, 'execFile').mockImplementation(((...call: any[]) => {
-                atFileContent = fs.readFileSync(call[1].find((a: string) => a.startsWith('@')).slice(1), 'utf8');
+                const pointer = fs.readFileSync(call[1].find((a: string) => a.startsWith('@')).slice(1), 'utf8');
+                expect(pointer.startsWith('@')).toBe(true);
+                atFileContent = fs.readFileSync(pointer.slice(1), 'utf8');
                 call[call.length - 1](null, 'ok', '');
                 return { stdin: { on: () => undefined, end: () => undefined } };
             }) as any);
@@ -199,7 +213,22 @@ describe('runCli', () => {
             expect(atFileContent).toBe(HOSTILE);
             expect(options.env.AZ_INSTALLER).toBe('MSI');
             expect(options.windowsVerbatimArguments).toBe(false);
-            expect(options.cwd).toBeUndefined();
+            expect(options.cwd).toBe(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'));
+        });
+
+        itOnWindows('does not treat a launcher that is not the MSI script as MSI, even next to a python.exe', async () => {
+            const bin = path.join(dir, 'pip', 'Scripts');
+            fs.mkdirSync(bin, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'pip', 'python.exe'), '');
+            const pipAz = path.join(bin, 'az.bat');
+            fs.writeFileSync(pipAz, '@"%~dp0..\\python.exe" -m azure.cli %*\r\n');
+            override('az', pipAz);
+            const spawned = jest.spyOn(child_process, 'execFile').mockImplementation(((...call: any[]) => {
+                call[call.length - 1](null, '', '');
+                return { stdin: { on: () => undefined, end: () => undefined } };
+            }) as any);
+            await runCli('az', ['version']);
+            expect(path.basename(spawned.mock.calls[0][0]).toLowerCase()).toBe('cmd.exe');
         });
 
         itOnWindows('falls back to cmd.exe when there is no python.exe next to the batch file', async () => {

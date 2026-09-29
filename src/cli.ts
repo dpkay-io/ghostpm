@@ -10,7 +10,7 @@ const BATCH_EXTS = new Set(['.cmd', '.bat']);
 /** An override ending in .js runs under this node: an argv-safe stand-in for a CLI on Windows. */
 const NODE_SCRIPT_EXT = '.js';
 const SYSTEM32_SEGMENTS = ['System32'];
-const DEFAULT_SYSTEM_ROOT = 'C:\Windows';
+const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
 /** Windows tools are run by absolute path from System32: a copy planted in the working folder must never win. */
 const systemTool = (name: string): string => path.join(process.env.SystemRoot || DEFAULT_SYSTEM_ROOT, ...SYSTEM32_SEGMENTS, name);
 const systemDir = (): string => path.dirname(systemTool('where.exe'));
@@ -23,10 +23,15 @@ const UNSAFE_IN_QUOTES = /["%!\r\n]/;
 const ARG_DIR_PREFIX = 'ghostpm-args-';
 const argFile = (index: number): string => `arg${index}.txt`;
 const AT_FILE_PREFIX = '@';
+/** A plain (non-free-text) az value that az would read as a file: leading @, or `name=@file` (az splits on = and expands the value). */
+const AT_FILE_VALUE = /^@|=@/;
+const pointerFile = (index: number): string => `arg${index}.ref.txt`;
 /** An MSI az.cmd is `"%~dp0..python.exe" -IBm azure.cli %*` with AZ_INSTALLER=MSI; -X utf8 makes stdout UTF-8 instead of the ANSI code page. */
 const MSI_PYTHON_RELATIVE = ['..', 'python.exe'];
 const MSI_PYTHON_ARGS = ['-X', 'utf8', '-IBm', 'azure.cli'];
 const MSI_COMMAND = 'az';
+/** What the MSI az.cmd contains; anything else next to a python.exe (a pip az.bat, say) is not the MSI launcher. */
+const MSI_SCRIPT_MARKERS = [/SET\s+AZ_INSTALLER=MSI/i, /-IBm\s+azure\.cli/i];
 const MSI_ENV = { AZ_INSTALLER: 'MSI' };
 /** Commands that read `@<file>` as that file's contents (azure.cli.core does it for every command). */
 const AT_FILE_COMMANDS: ReadonlySet<string> = new Set(['az']);
@@ -99,8 +104,12 @@ interface Invocation {
     argDir: string | null;
 }
 
-/** Writes each FreeText to a UTF-8 file in a fresh folder; `at(index, file)` renders the token. */
-function writeArgFiles(args: CliArg[], at: (index: number, dir: string) => string): { tokens: string[]; argDir: string | null } {
+/**
+ * az 2.85 expands `@<file>` twice (azure.cli.core reads the argv value, then knack expands the file's content again when it
+ * starts with @; a third level stays literal, verified offline). So each FreeText goes into a UTF-8 file B, argv carries
+ * @A and file A holds @B: the text itself is never at the start of an expanded value. `ref(name, dir)` renders a path.
+ */
+function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => string): { tokens: string[]; argDir: string | null } {
     let argDir: string | null = null;
     const tokens: string[] = [];
     for (let index = 0; index < args.length; index++) {
@@ -111,25 +120,28 @@ function writeArgFiles(args: CliArg[], at: (index: number, dir: string) => strin
         }
         if (argDir === null) argDir = fs.mkdtempSync(path.join(os.tmpdir(), ARG_DIR_PREFIX));
         fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
-        tokens.push(at(index, argDir));
+        fs.writeFileSync(path.join(argDir, pointerFile(index)), `${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`, 'utf8');
+        tokens.push(`${AT_FILE_PREFIX}${ref(pointerFile(index), argDir)}`);
     }
     return { tokens, argDir };
 }
 
-/** az expands a leading @ in ANY value itself, so its free text always travels through a file, on every path. */
-function atFileInvocation(file: string, prefix: string[], command: string, args: CliArg[], env?: NodeJS.ProcessEnv): Invocation {
+/** Free text for az travels through argument files on every path; other commands get it as plain argv. */
+function atFileInvocation(file: string, prefix: string[], command: string, args: CliArg[], extra: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Invocation {
     const { tokens, argDir } = writeArgFiles(
         AT_FILE_COMMANDS.has(command) ? args : args.map(textOf),
-        (index, dir) => `${AT_FILE_PREFIX}${path.join(dir, argFile(index))}`,
+        (name, dir) => path.join(dir, name),
     );
-    // No cwd: a child that inherits it (az's telemetry uploader) must not hold the argument folder.
-    return { file, args: [...prefix, ...tokens], verbatim: false, argDir, env };
+    // Without a cwd of its own, a child that inherits it (az's telemetry uploader) must not hold the argument folder.
+    return { file, args: [...prefix, ...tokens], verbatim: false, argDir, ...extra };
 }
 
 /** The MSI az.cmd's own python.exe, when this az.cmd sits in an MSI layout. */
 function msiPython(resolved: string): string | undefined {
     const python = path.resolve(path.dirname(resolved), ...MSI_PYTHON_RELATIVE);
-    return fs.existsSync(python) ? python : undefined;
+    if (!fs.existsSync(python)) return undefined;
+    const script = fs.readFileSync(resolved, 'utf8');
+    return MSI_SCRIPT_MARKERS.every(marker => marker.test(script)) ? python : undefined;
 }
 
 /** Spec §8.9 and Appendix A S1: nothing GhostPM does not control is ever parsed by cmd.exe. */
@@ -145,7 +157,7 @@ function batchInvocation(command: string, resolved: string, args: CliArg[]): Inv
         }
     }
     // Relative to the child's working directory, so no temp path reaches cmd.exe either.
-    const { tokens, argDir } = writeArgFiles(args, index => `${AT_FILE_PREFIX}${argFile(index)}`);
+    const { tokens, argDir } = writeArgFiles(args, name => name);
     return {
         file: process.env.ComSpec || systemTool('cmd.exe'),
         args: [...CMD_SWITCHES, `""${resolved}" ${tokens.join(' ')}"`],
@@ -156,12 +168,16 @@ function batchInvocation(command: string, resolved: string, args: CliArg[]): Inv
 }
 
 function plan(command: string, args: CliArg[]): Invocation {
+    if (AT_FILE_COMMANDS.has(command)) {
+        const plain = args.find(arg => typeof arg === 'string' && AT_FILE_VALUE.test(arg));
+        if (plain !== undefined) throw refuse(`refusing to pass ${JSON.stringify(plain)} to ${command}: it would be read as a file`);
+    }
     const resolved = resolveCommand(command);
     const ext = path.extname(resolved).toLowerCase();
     if (ext === NODE_SCRIPT_EXT) return atFileInvocation(process.execPath, [resolved], command, args);
     if (IS_WINDOWS && BATCH_EXTS.has(ext)) {
         const python = command === MSI_COMMAND ? msiPython(resolved) : undefined;
-        if (python !== undefined) return atFileInvocation(python, MSI_PYTHON_ARGS, command, args, { ...process.env, ...MSI_ENV });
+        if (python !== undefined) return atFileInvocation(python, MSI_PYTHON_ARGS, command, args, { cwd: systemDir(), env: { ...process.env, ...MSI_ENV } });
         return batchInvocation(command, resolved, args);
     }
     return atFileInvocation(resolved, [], command, args);
