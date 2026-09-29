@@ -8,6 +8,8 @@ import { chainStatusline, userSettingsPath } from './plugin-setup';
 interface SetupOptions {
     global?: boolean;
     silent?: boolean;
+    /** Opt-in: chaining rewrites a statusline the user already chose, so it stays off. */
+    statusline?: boolean;
 }
 
 const CLAUDE_DIR = '.claude';
@@ -43,11 +45,13 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
     const gitRoot = findGitRoot();
     const settingsPath = userSettingsPath();
 
-    const db = openLedger(ledgerPath());
-    try {
-        chainStatusline(db, settingsPath);
-    } finally {
-        db.close();
+    if (options.statusline) {
+        const db = openLedger(ledgerPath());
+        try {
+            chainStatusline(db, settingsPath);
+        } finally {
+            db.close();
+        }
     }
 
     const target = skillDir(options, gitRoot);
@@ -55,8 +59,10 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 
     if (options.silent) return;
 
-    console.log('Statusline chained:');
-    console.log(`  + ${settingsPath}`);
+    if (options.statusline) {
+        console.log('Statusline chained:');
+        console.log(`  + ${settingsPath}`);
+    }
     if (target) {
         console.log('Skill installed:');
         console.log(`  + ${target}`);

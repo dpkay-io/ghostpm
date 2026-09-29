@@ -70,16 +70,25 @@ describe('setup', () => {
         }
     });
 
-    it('keeps the statusline the user already had working', async () => {
+    it('leaves the statusline alone by default', async () => {
+        // Chaining rewrites a statusline the user picked themselves, so it is opt-in.
         writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
         await setup({ silent: true });
 
-        expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
+        expect(readJson(userSettingsPath).statusLine.command).toBe(PREVIOUS_STATUSLINE);
     });
 
-    it('shows the active task when no statusline was configured', async () => {
+    it('creates no settings file when it has nothing to write', async () => {
         await setup({ silent: true });
+
+        expect(fs.existsSync(userSettingsPath)).toBe(false);
+    });
+
+    it('chains the statusline only when asked for it', async () => {
+        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
+
+        await setup({ silent: true, statusline: true });
 
         expect(readJson(userSettingsPath).statusLine.command).toContain(STATUSLINE_COMMAND);
     });
@@ -108,8 +117,8 @@ describe('setup', () => {
     it('is safe to run twice', async () => {
         writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
-        await setup({ silent: true });
-        await setup({ silent: true });
+        await setup({ silent: true, statusline: true });
+        await setup({ silent: true, statusline: true });
 
         // Still chained once, and the original is still recoverable rather than lost
         // behind a second layer of ghostpm.

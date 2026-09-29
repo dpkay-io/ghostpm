@@ -12,8 +12,10 @@ Usage: ghostpm <command>
 
 Commands:
   init              Initialize project + auto-register MCP server
-  setup             Register MCP server with Claude Code / Claude Desktop
-  setup --global    Register in global Claude Code settings
+  setup             Install the skill (statusline untouched)
+  setup --global    Install the skill for every project
+  setup --statusline    Also show the active task in the statusline (off by default)
+  setup --restore   Put the statusline back the way it was
   tasks             List cached tasks
   sync              Force sync with remote
   status            Show sync status and config
@@ -136,7 +138,10 @@ async function main() {
                 break;
             }
             const { setup } = await import('./setup');
-            await setup({ global: flags.includes('--global') });
+            await setup({
+                global: flags.includes('--global'),
+                statusline: flags.includes('--statusline'),
+            });
             break;
         }
 

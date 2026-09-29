@@ -1,8 +1,6 @@
 import * as fs from 'fs';
-import { STATUSLINE_COMMAND } from './plugin-setup';
 
 export const FINDING_STALE_REGISTRATION = 'stale_registration';
-export const FINDING_STATUSLINE_UNCHAINED = 'statusline_unchained';
 
 /** The bare binary name a registration uses when it launches the global install. */
 const GLOBAL_BINARY = 'ghostpm';
@@ -25,7 +23,6 @@ export interface DiagnosisProbe {
 
 interface Settings {
     mcpServers?: { [name: string]: { command?: unknown } };
-    statusLine?: { command?: unknown };
 }
 
 function readSettings(settingsPath: string): Settings {
@@ -51,24 +48,11 @@ function staleRegistration(settings: Settings, probe: DiagnosisProbe): Finding |
     };
 }
 
-function unchainedStatusline(settings: Settings): Finding | null {
-    const configured = settings.statusLine?.command;
-    if (typeof configured !== 'string' || configured.length === 0) return null;
-    if (configured.indexOf(STATUSLINE_COMMAND) >= 0) return null;
-    return {
-        code: FINDING_STATUSLINE_UNCHAINED,
-        message: `Statusline runs "${configured}" directly, so the active task is not shown.`,
-        fix: `Chain it: run ${STATUSLINE_COMMAND}, which runs "${configured}" and appends the active task.`,
-    };
-}
-
 /** Read-only by design: safe to run before deciding anything. */
 export function diagnose(probe: DiagnosisProbe): Finding[] {
     const settings = readSettings(probe.settingsPath);
     const findings: Finding[] = [];
     const stale = staleRegistration(settings, probe);
     if (stale !== null) findings.push(stale);
-    const statusline = unchainedStatusline(settings);
-    if (statusline !== null) findings.push(statusline);
     return findings;
 }

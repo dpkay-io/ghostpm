@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { removeTempDir } from './temp-dir';
-import { diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_STATUSLINE_UNCHAINED } from '../src/doctor';
+import { diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION } from '../src/doctor';
 
 const PLUGIN_ARGS = ['${CLAUDE_PLUGIN_ROOT}/dist/cli-main.js', 'serve'];
 
@@ -60,20 +60,6 @@ describe('diagnose', () => {
         writeSettings({ mcpServers: { ghostpm: { command: 'node', args: PLUGIN_ARGS } } });
 
         expect(codesFrom(probe())).not.toContain(FINDING_STALE_REGISTRATION);
-    });
-
-    it('reports an unchained statusline, and stops reporting it once chained', () => {
-        writeSettings({ statusLine: { type: 'command', command: 'claude-ticker' } });
-        expect(codesFrom(probe())).toContain(FINDING_STATUSLINE_UNCHAINED);
-
-        writeSettings({ statusLine: { type: 'command', command: 'ghostpm statusline' } });
-        expect(codesFrom(probe())).not.toContain(FINDING_STATUSLINE_UNCHAINED);
-    });
-
-    it('says nothing about a statusline that was never configured', () => {
-        writeSettings({ mcpServers: {} });
-
-        expect(codesFrom(probe())).not.toContain(FINDING_STATUSLINE_UNCHAINED);
     });
 
     it('changes nothing on disk', () => {
