@@ -21,6 +21,7 @@ Commands:
   status            Show sync status and config
   dashboard         Show all workspaces and task status
   unregister [path] Remove a workspace from the dashboard
+  bootstrap         Build the native SQLite addon into the ghostpm home
   serve             Start MCP server (used by MCP clients)
   help              Show this help
 
@@ -83,6 +84,12 @@ async function main() {
                     console.log(`  fix: ${finding.fix}`);
                 });
             }
+            break;
+        }
+
+        case 'bootstrap': {
+            const { bootstrapBinding } = await import('./bootstrap');
+            console.log(`Native addon ready at ${bootstrapBinding()}`);
             break;
         }
 

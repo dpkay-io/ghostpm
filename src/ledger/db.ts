@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { bootstrappedBindingPath, isMissingBinding } from './binding';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGhostpmHome } from '../registry';
@@ -152,9 +153,30 @@ export function migrate(db: Ledger): void {
     while (write(db, applyNext)) { /* one schema version per transaction */ }
 }
 
+/**
+ * Carries the fix in the message on purpose. Hooks swallow their errors so a session is
+ * never blocked, which means this text is often the only trace a user will ever see.
+ */
+export const MISSING_BINDING_HELP =
+    'GhostPM cannot load SQLite: its native addon was never compiled. A Claude Code plugin '
+    + 'install runs `npm ci --ignore-scripts`, which skips the step that builds it. '
+    + 'Run `ghostpm bootstrap` to build it into the ghostpm home.';
+
+/** Falls back to a bootstrapped addon before giving up, so one build survives every update. */
+function openDatabase(filePath: string): Ledger {
+    try {
+        return new Database(filePath);
+    } catch (error) {
+        if (!isMissingBinding(error)) throw error;
+        const bootstrapped = bootstrappedBindingPath();
+        if (!fs.existsSync(bootstrapped)) throw new Error(MISSING_BINDING_HELP);
+        return new Database(filePath, { nativeBinding: bootstrapped });
+    }
+}
+
 export function openLedger(filePath: string = ledgerPath()): Ledger {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const db = new Database(filePath);
+    const db = openDatabase(filePath);
     db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     db.pragma('journal_mode = WAL');
     migrate(db);
