@@ -3,6 +3,7 @@ import { readPayload } from './hook/payload';
 import { buildOutput } from './hook/output';
 import { logHookError } from './hook/log';
 import { handle } from './hook/handlers';
+import { recoverFromMissingBinding } from './hook/recover';
 
 /** A hook must never block a session, so every path exits 0. */
 const EXIT_OK = 0;
@@ -17,6 +18,7 @@ function main(): void {
             context = handle(payload);
         } catch (error) {
             logHookError(error);
+            context = recoverFromMissingBinding(payload.event, error);
         }
         process.stdout.write(buildOutput(payload.event, context));
         process.exit(EXIT_OK);
