@@ -1,6 +1,6 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
 import { GitHubAdapter, githubPhaseOf, GH_LOGGED_OUT, GH_MISSING } from '../../src/sync/github';
-import { SyncPausedError } from '../../src/sync/vendor';
+import { GoneError, SyncPausedError } from '../../src/sync/vendor';
 import { Phase } from '../../src/ledger/types';
 
 interface Call { command: string; args: CliArg[]; input?: string }
@@ -138,7 +138,7 @@ describe('GitHubAdapter', () => {
         const repo = freshRepo();
         const gone = new CliError('gh failed (exit 1)', 1, 'GraphQL: Could not resolve to an issue or pull request with the number of 12.', false, false);
         expect(await new GitHubAdapter(repo, fakeGh({ 'issue view': gone }).run).fetch('12')).toBeNull();
-        const moved = fakeGh({ 'issue view': issueJson(repo, { url: 'https://github.com/elsewhere/other/issues/3' }) });
+        const moved = fakeGh({ 'issue view': issueJson(repo, { url: 'https://github.com/elsewhere/other/issues/3' }), 'repo view': JSON.stringify({ nameWithOwner: repo }) });
         expect(await new GitHubAdapter(repo, moved.run).fetch('12')).toBeNull();
     });
 
@@ -160,12 +160,12 @@ describe('GitHubAdapter', () => {
 
     it('reports when a PR of this repo merged, and ignores PRs of other repos', async () => {
         const repo = freshRepo();
-        const gh = fakeGh({ 'pr view': JSON.stringify({ state: 'MERGED', mergedAt: '2026-09-21T08:00:00Z' }) });
+        const gh = fakeGh({ 'pr view': JSON.stringify({ state: 'MERGED', mergedAt: '2026-09-21T08:00:00Z' }), 'repo view': JSON.stringify({ nameWithOwner: repo }) });
         const adapter = new GitHubAdapter(repo, gh.run);
         expect(await adapter.mergedAt(`https://github.com/${repo}/pull/7`)).toBe('2026-09-21T08:00:00Z');
         expect(gh.calls[0].args).toEqual(['pr', 'view', '7', '--repo', freeText(repo), '--json', 'state,mergedAt']);
         expect(await adapter.mergedAt('https://github.com/elsewhere/other/pull/7')).toBeNull();
-        expect(gh.calls).toHaveLength(1);
+        expect(gh.calls.map(call => call.args[0])).toEqual(['pr', 'repo']);
     });
 
     it('reads the current user', async () => {
@@ -187,5 +187,117 @@ describe('githubPhaseOf', () => {
         ['open', ['ghostpm:done'], 'planned', 'planned'],
     ] as [string, string[], Phase, Phase][])('%s with %j over local %s reads as %s', (state, labels, local, expected) => {
         expect(githubPhaseOf(state, labels, local)).toBe(expected);
+    });
+});
+
+const cliFailure = (stderr: string, exitCode = 1): CliError => new CliError(`gh failed (exit ${exitCode})`, exitCode, stderr, false, false);
+const pausedBy = async (promise: Promise<unknown>): Promise<SyncPausedError> => {
+    const thrown = await promise.catch((e: unknown) => e);
+    expect(thrown).toBeInstanceOf(SyncPausedError);
+    return thrown as SyncPausedError;
+};
+const verbsOf = (calls: Call[]): string[] => calls.map(call => `${call.args[0]} ${call.args[1]}`);
+
+describe('GitHubAdapter retry safety', () => {
+    it('still returns the new issue when the fetch after create fails', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue create': `https://github.com/${repo}/issues/77\n`, 'issue view': new Error('network down') });
+        const item = await new GitHubAdapter(repo, gh.run).create({ title: 'Fix it', phase: 'planned' }, 'body');
+        expect(item).toMatchObject({ remoteId: '77', url: `https://github.com/${repo}/issues/77`, title: 'Fix it', state: 'open', labels: ['ghostpm:planned'] });
+    });
+
+    it('posts a comment once and resolves when only the re-fetch fails', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': new Error('network down') });
+        const item = await new GitHubAdapter(repo, gh.run).comment('12', 'hello');
+        expect(item.remoteId).toBe('12');
+        expect(gh.calls.filter(call => call.args[0] === 'issue' && call.args[1] === 'comment')).toHaveLength(1);
+    });
+});
+
+describe('GitHubAdapter closed to closed', () => {
+    const move = async (state: string, phase: Phase): Promise<Call[]> => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { state: 'CLOSED' }) });
+        await new GitHubAdapter(repo, gh.run).syncState({ remoteId: '12', state, labels: [] }, { title: 'Login fix', phase });
+        return gh.calls;
+    };
+
+    it('reopens, then closes with the new reason for done to dropped', async () => {
+        const calls = await move('closed:completed', 'dropped');
+        expect(verbsOf(calls)).toEqual(['issue reopen', 'issue edit', 'issue close', 'issue view']);
+        expect(calls[2].args.slice(-2)).toEqual(['--reason', freeText('not planned')]);
+    });
+
+    it('reopens, then closes with the new reason for dropped to done', async () => {
+        const calls = await move('closed:not_planned', 'done');
+        expect(verbsOf(calls)).toEqual(['issue reopen', 'issue edit', 'issue close', 'issue view']);
+        expect(calls[2].args.slice(-2)).toEqual(['--reason', freeText('completed')]);
+    });
+
+    it('does not reopen or close when the reason already matches', async () => {
+        expect(verbsOf(await move('closed:completed', 'done'))).toEqual(['issue edit', 'issue view']);
+        expect(verbsOf(await move('closed:not_planned', 'dropped'))).toEqual(['issue edit', 'issue view']);
+    });
+});
+
+describe('GitHubAdapter not found', () => {
+    const notFound = cliFailure('HTTP 404: Not Found (https://api.github.com/repos/acme/x/labels)');
+
+    it('pauses naming the repo when the label, create or list call answers 404', async () => {
+        for (const replies of [{ 'label create': notFound }, { 'issue create': notFound }] as { [words: string]: Reply }[]) {
+            const repo = freshRepo();
+            const paused = await pausedBy(new GitHubAdapter(repo, fakeGh(replies).run).create({ title: 'T', phase: 'planned' }, 'b'));
+            expect(paused.reason).toContain(repo);
+        }
+        const repo = freshRepo();
+        const paused = await pausedBy(new GitHubAdapter(repo, fakeGh({ 'issue list': notFound }).run).listChangedSince('2026-09-20T10:00:00Z', 10));
+        expect(paused.reason).toContain(repo);
+    });
+
+    it('treats a 404 or 410 on an issue-level call as that item being gone', async () => {
+        const repo = freshRepo();
+        expect(await new GitHubAdapter(repo, fakeGh({ 'issue view': notFound }).run).fetch('12')).toBeNull();
+        const gone = await new GitHubAdapter(repo, fakeGh({ 'issue comment': cliFailure('HTTP 410: Gone') }).run).comment('12', 'x').catch((e: unknown) => e);
+        expect(gone).toBeInstanceOf(GoneError);
+    });
+});
+
+describe('GitHubAdapter renamed repo', () => {
+    it('owns issues under the repo canonical name, resolved once', async () => {
+        const repo = freshRepo();
+        const renamed = `acme/renamed-${repo}`;
+        const gh = fakeGh({ 'issue view': issueJson(repo, { url: `https://github.com/${renamed}/issues/12` }), 'repo view': JSON.stringify({ nameWithOwner: renamed }) });
+        const adapter = new GitHubAdapter(repo, gh.run);
+        expect(await adapter.fetch('12')).not.toBeNull();
+        expect(await adapter.fetch('12')).not.toBeNull();
+        expect(gh.calls.filter(call => call.args[0] === 'repo')).toHaveLength(1);
+        expect(gh.calls.find(call => call.args[0] === 'repo')?.args).toEqual(['repo', 'view', repo, '--json', 'nameWithOwner']);
+    });
+
+    it('still treats an issue from an unrelated repo as moved', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { url: 'https://github.com/elsewhere/other/issues/12' }), 'repo view': JSON.stringify({ nameWithOwner: `acme/renamed-${repo}` }) });
+        expect(await new GitHubAdapter(repo, gh.run).fetch('12')).toBeNull();
+    });
+});
+
+describe('GitHubAdapter auth pause', () => {
+    const pauseReason = async (stderr: string): Promise<string> => (await pausedBy(new GitHubAdapter(freshRepo(), fakeGh({ 'api user': cliFailure(stderr) }).run).currentUser())).reason;
+
+    it('pauses on HTTP 401, bad credentials or a gh auth login hint', async () => {
+        expect(await pauseReason('HTTP 401: Bad credentials (https://api.github.com/user)')).toBe(GH_LOGGED_OUT);
+        expect(await pauseReason('Bad credentials')).toBe(GH_LOGGED_OUT);
+        expect(await pauseReason('try running: gh auth login')).toBe(GH_LOGGED_OUT);
+    });
+
+    it('pauses on a 403 that names a missing scope, with the fix from the message', async () => {
+        expect(await pauseReason('HTTP 403: missing required scopes [repo]. To request it, run: gh auth refresh -s repo')).toContain('`gh auth refresh -s repo`');
+        expect(await pauseReason('HTTP 403: token is missing a scope')).toContain('`gh auth refresh`');
+    });
+
+    it('leaves a plain 403 as an ordinary error', async () => {
+        const thrown = await new GitHubAdapter(freshRepo(), fakeGh({ 'api user': cliFailure('HTTP 403: API rate limit exceeded') }).run).currentUser().catch((e: unknown) => e);
+        expect(thrown).toBeInstanceOf(CliError);
     });
 });
