@@ -107,6 +107,12 @@ function upsertSyncState(db: Ledger, taskId: number, at: string): void {
 
 const policyOf = (db: Ledger, task: TaskRow): SyncPolicy => readSetting(db, task.workspace_id, SETTING_SYNC_POLICY);
 
+/** Nothing of a task closed before its create was taken ever reaches the vendor: drop what waits. */
+function dropUnpushed(db: Ledger, taskId: number): void {
+    db.prepare('DELETE FROM outbox WHERE task_id = ? AND op IN (?, ?) AND status = ?')
+        .run(taskId, OP_CREATE, OP_COMMENT, STATUS_PENDING);
+}
+
 /** Queues what a vendor should now show for `task`. Plain statements: call inside write(). */
 export function projectTask(db: Ledger, task: TaskRow, trigger: ProjectionTrigger, at: string): ProjectionResult {
     if (!isSyncable(db, task)) return 'no_vendor';
@@ -118,6 +124,10 @@ export function projectTask(db: Ledger, task: TaskRow, trigger: ProjectionTrigge
         if (!mayCreate(policy, trigger, task)) return 'not_allowed';
         insertRow(db, task.id, OP_CREATE, null, at);
         return 'create_queued';
+    }
+    if (reach === 'create_pending' && CLOSED_PHASES.has(task.phase)) {
+        dropUnpushed(db, task.id);
+        return 'nothing';
     }
     // A create not yet taken pushes the task as it is then; one already on its way does not.
     if (reach === 'create_pending' || !syncs(trigger)) return 'nothing';

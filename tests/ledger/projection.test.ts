@@ -169,10 +169,25 @@ describe('queueing vendor projections', () => {
     });
 
     it('never creates a vendor item for a task merged away before it was pushed', () => {
-        const duplicate = createTask(ledger.db, { title: 'Local dup', phase: 'planned', workspaceId, origin: 'local', source: SOURCE });
+        const duplicate = track('Local dup');
         const kept = track('Kept');
+        expect(ops(duplicate.id)).toEqual(['create:pending']);
         mergeTask(ledger.db, { fromRef: `T${duplicate.id}`, intoRef: `T${kept.id}`, workspaceId, source: SOURCE, sessionId: SESSION_ID });
         expect(ops(duplicate.id)).toEqual([]);
+    });
+
+    it('queues nothing for a task dropped before its create was pushed', () => {
+        const task = track();
+        updateTask(ledger.db, task.id, { comment: 'note' }, HUMAN);
+        updateTask(ledger.db, task.id, { phase: 'dropped' }, HUMAN);
+        expect(ops(task.id)).toEqual([]);
+    });
+
+    it('leaves a claimed create for the pusher when the task is dropped', () => {
+        const task = track();
+        markClaimed(task.id, 'create');
+        updateTask(ledger.db, task.id, { phase: 'dropped' }, HUMAN);
+        expect(ops(task.id)).toEqual(['create:claimed', 'sync_state:pending', 'comment:pending']);
     });
 
     it('queues nothing for a task whose vendor item is gone', () => {
