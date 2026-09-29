@@ -8,7 +8,10 @@ const END = '(?![A-Za-z0-9])';
 /** Prose (`token: expiration bug`, `key = value`): a value is a secret only when this long with a digit in it. */
 const SECRET_VALUE_MIN_LENGTH = 12;
 const HAS_DIGIT = /\d/;
-/** An assignment (`key=value`, `key="value"`, nothing between `=` and the value): any value this long is a secret. */
+/**
+ * An assignment: `key=value` or `key="value"` (nothing between `=` and the value), or a quoted key and a colon
+ * (`"password": "…"`, pasted JSON/YAML config). Any value this long is a secret.
+ */
 const ASSIGNED_SECRET_MIN_LENGTH = 8;
 const ASSIGNMENT = '=';
 
@@ -31,12 +34,25 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
     /()(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$))/g,
 ];
 
+const IDENTIFIER_CHAR = /[A-Za-z0-9_-]/;
+const QUOTES = `"'`;
 /**
- * `password=…`, `"api_key": "…"`, `DB_PASSWORD=…`, `client_secret: …`. Groups: 1 the key, 2 the separator,
- * 3 the space after it, 4 an opening quote (all kept), 5 the value.
+ * `password=…`, `"api_key": "…"`, `DB_PASSWORD=…`, `client_secret: …`. Groups, all kept but the last: 1 the edge,
+ * 2 the key's opening quote, 3 the key, 4 its closing quote, 5 space, 6 the separator, 7 space, 8 the value's quote, 9 the value.
  */
 const KEY_VALUE = new RegExp(
-    `(${EDGE_CHAR}["']?(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_-]*["']?\\s*)([:=])(\\s*)(["']?)([^\\s"']+)`, 'gi');
+    `(${EDGE_CHAR})(["']?)((?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_-]*)(["']?)(\\s*)([:=])(\\s*)(["']?)([^\\s"']+)`, 'gi');
+
+/**
+ * Whether the key holding the keyword opens with a quote: `"password"`, or `"client_secret"` where the match starts at the
+ * `_` before `secret`. Walks back over that one identifier only, so the scan stays linear.
+ */
+function keyQuoted(text: string, matchAt: number, edge: string, open: string): boolean {
+    if (open.length > 0) return true;
+    let at = matchAt + edge.length - 1;
+    while (at >= 0 && IDENTIFIER_CHAR.test(text[at])) at--;
+    return at >= 0 && QUOTES.indexOf(text[at]) >= 0;
+}
 
 /** A token pattern ran first, so `[redacted]` is never looked at again. */
 const looksSecret = (value: string, assigned: boolean): boolean =>
@@ -58,15 +74,18 @@ export function redactSecrets(text: string): Redaction {
             return `${edge}${REDACTED}`;
         });
     }
-    const keyValues = (span: string): string => span.replace(KEY_VALUE,
-        (_match: string, key: string, separator: string, space: string, quote: string, value: string) => {
-            const kept = `${key}${separator}${space}${quote}`;
-            if (!looksSecret(value, separator === ASSIGNMENT && space.length === 0)) {
-                // Not itself a secret, but it may run on into the next assignment (`[redacted]&password=…`): look inside it too.
-                return `${kept}${keyValues(value)}`;
-            }
-            count++;
-            return `${kept}${REDACTED}`;
-        });
+    const keyValues = (span: string): string => span.replace(KEY_VALUE, (
+        _match: string, edge: string, open: string, key: string, close: string, before: string,
+        separator: string, after: string, quote: string, value: string, matchAt: number,
+    ) => {
+        const kept = `${edge}${open}${key}${close}${before}${separator}${after}${quote}`;
+        const assigned = separator === ASSIGNMENT ? after.length === 0 : close.length > 0 && keyQuoted(span, matchAt, edge, open);
+        if (!looksSecret(value, assigned)) {
+            // Not itself a secret, but it may run on into the next assignment (`[redacted]&password=…`): look inside it too.
+            return `${kept}${keyValues(value)}`;
+        }
+        count++;
+        return `${kept}${REDACTED}`;
+    });
     return { text: keyValues(result), count };
 }

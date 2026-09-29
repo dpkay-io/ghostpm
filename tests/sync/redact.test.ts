@@ -5,7 +5,10 @@ const ADO_PAT_52 = Array.from({ length: 52 }, (_, i) => BASE32[(i * 7) % BASE32.
 /** The 84-character Azure DevOps PAT shape: `AZDO` at 76-79 (per Microsoft's announcement; unverified against a real PAT). */
 const ADO_PAT_84 = `${'A'.repeat(52)}${'b'.repeat(24)}AZDO${'c'.repeat(4)}`;
 const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
-const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+/** 100 KB of `a_`: a scan that restarts at every character takes ~17 s on it (measured); a linear one a few ms. */
+const IDENTIFIER_RUN_PAIRS = 50000;
+const LINEAR_BOUND_MS = 1000;
+const JWT ='eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
 
 describe('redactSecrets (spec §8.9)', () => {
     // [kind, text, the secret that must be gone]
@@ -84,7 +87,24 @@ describe('redactSecrets (spec §8.9)', () => {
     });
 
     it.each([
+        ['"password":"correcthorse"', '"password":"[redacted]"'],
+        ['"client_secret": "abcdefghij"', '"client_secret": "[redacted]"'],
+        ["'api_key': 'abcdefgh'", "'api_key': '[redacted]'"],
+    ])('reads a quoted key and a colon as an assignment (pasted config): %s', (text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it('redacts both secrets of a pretty-printed JSON object', () => {
+        const json = '{\n  "user": "octocat",\n  "password": "correcthorse",\n  "client_secret": "abcdefghij"\n}';
+        expect(redactSecrets(json)).toEqual({
+            text: '{\n  "user": "octocat",\n  "password": "[redacted]",\n  "client_secret": "[redacted]"\n}',
+            count: 2,
+        });
+    });
+
+    it.each([
         'password=hunter',
+        'password: correcthorse',
         'token = expiration bug',
         'secret = rotateweekly',
     ])('leaves a short assigned value, or prose written with spaces, alone: %s', text => {
@@ -93,6 +113,12 @@ describe('redactSecrets (spec §8.9)', () => {
 
     it('still redacts a whole secret that holds & ; or ,', () => {
         expect(redactSecrets('password=abc&def;ghi,12345')).toEqual({ text: `password=${REDACTED}`, count: 1 });
+    });
+
+    it('stays linear on a long run of identifier characters (a quadratic pattern takes seconds here)', () => {
+        const started = Date.now();
+        redactSecrets(`${'a_'.repeat(IDENTIFIER_RUN_PAIRS)}password`);
+        expect(Date.now() - started).toBeLessThan(LINEAR_BOUND_MS);
     });
 
     it('never matches its own placeholder again', () => {
