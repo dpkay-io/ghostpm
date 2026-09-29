@@ -5,9 +5,12 @@ const EDGE_CHAR = '(?:^|[^A-Za-z0-9])';
 const EDGE = `(${EDGE_CHAR})`;
 /** Right edge of a token: no letter or digit follows. */
 const END = '(?![A-Za-z0-9])';
-/** A key=value value this long with a digit in it is a secret; shorter or digit-free text is prose ("token: expiration bug"). */
+/** Prose (`token: expiration bug`, `key = value`): a value is a secret only when this long with a digit in it. */
 const SECRET_VALUE_MIN_LENGTH = 12;
 const HAS_DIGIT = /\d/;
+/** An assignment (`key=value`, `key="value"`, nothing between `=` and the value): any value this long is a secret. */
+const ASSIGNED_SECRET_MIN_LENGTH = 8;
+const ASSIGNMENT = '=';
 
 /**
  * Spec §8.9: common token shapes, replaced before anything leaves the machine. Group 1 is kept
@@ -28,12 +31,18 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
     /()(-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$))/g,
 ];
 
-/** `password=…`, `"api_key": "…"`, `DB_PASSWORD=…`, `client_secret: …`: group 1 (the key and separator) is kept. */
-const KEY_VALUE = new RegExp(`(${EDGE_CHAR}["']?(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_-]*["']?\\s*[:=]\\s*["']?)([^\\s"']+)`, 'gi');
+/**
+ * `password=…`, `"api_key": "…"`, `DB_PASSWORD=…`, `client_secret: …`. Groups: 1 the key, 2 the separator,
+ * 3 the space after it, 4 an opening quote (all kept), 5 the value.
+ */
+const KEY_VALUE = new RegExp(
+    `(${EDGE_CHAR}["']?(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_-]*["']?\\s*)([:=])(\\s*)(["']?)([^\\s"']+)`, 'gi');
 
-/** A token pattern ran first, so `[redacted]` is never looked at again; otherwise long and not a plain word. */
-const looksSecret = (value: string): boolean =>
-    value.indexOf(REDACTED) < 0 && value.length >= SECRET_VALUE_MIN_LENGTH && HAS_DIGIT.test(value);
+/** A token pattern ran first, so `[redacted]` is never looked at again. */
+const looksSecret = (value: string, assigned: boolean): boolean =>
+    value.indexOf(REDACTED) < 0 && (assigned
+        ? value.length >= ASSIGNED_SECRET_MIN_LENGTH
+        : value.length >= SECRET_VALUE_MIN_LENGTH && HAS_DIGIT.test(value));
 
 export interface Redaction {
     text: string;
@@ -49,13 +58,15 @@ export function redactSecrets(text: string): Redaction {
             return `${edge}${REDACTED}`;
         });
     }
-    const keyValues = (span: string): string => span.replace(KEY_VALUE, (_match: string, key: string, value: string) => {
-        if (!looksSecret(value)) {
-            // Not itself a secret, but it may run on into the next assignment (`[redacted]&password=…`): look inside it too.
-            return `${key}${keyValues(value)}`;
-        }
-        count++;
-        return `${key}${REDACTED}`;
-    });
+    const keyValues = (span: string): string => span.replace(KEY_VALUE,
+        (_match: string, key: string, separator: string, space: string, quote: string, value: string) => {
+            const kept = `${key}${separator}${space}${quote}`;
+            if (!looksSecret(value, separator === ASSIGNMENT && space.length === 0)) {
+                // Not itself a secret, but it may run on into the next assignment (`[redacted]&password=…`): look inside it too.
+                return `${kept}${keyValues(value)}`;
+            }
+            count++;
+            return `${kept}${REDACTED}`;
+        });
     return { text: keyValues(result), count };
 }

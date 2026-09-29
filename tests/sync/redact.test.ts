@@ -74,6 +74,23 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(text)).toEqual({ text: redacted, count: 2 });
     });
 
+    it.each([
+        ['password=correcthorsebatterystaple', 'password=[redacted]'],
+        ['client_secret=abcdefghijkl', 'client_secret=[redacted]'],
+        ['DB_PASSWORD="hunter-hunter"', 'DB_PASSWORD="[redacted]"'],
+        ["api_key='abcdefgh'", "api_key='[redacted]'"],
+    ])('redacts any assigned value of 8 or more characters, digits or not: %s', (text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        'password=hunter',
+        'token = expiration bug',
+        'secret = rotateweekly',
+    ])('leaves a short assigned value, or prose written with spaces, alone: %s', text => {
+        expect(redactSecrets(text)).toEqual({ text, count: 0 });
+    });
+
     it('still redacts a whole secret that holds & ; or ,', () => {
         expect(redactSecrets('password=abc&def;ghi,12345')).toEqual({ text: `password=${REDACTED}`, count: 1 });
     });
