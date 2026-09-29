@@ -9,7 +9,11 @@ const WIN_EXECUTABLE_EXTS = new Set(['.exe', '.cmd', '.bat', '.com']);
 const BATCH_EXTS = new Set(['.cmd', '.bat']);
 /** An override ending in .js runs under this node: an argv-safe stand-in for a CLI on Windows. */
 const NODE_SCRIPT_EXT = '.js';
-const DEFAULT_COMSPEC = 'cmd.exe';
+const SYSTEM32_SEGMENTS = ['System32'];
+const DEFAULT_SYSTEM_ROOT = 'C:\Windows';
+/** Windows tools are run by absolute path from System32: a copy planted in the working folder must never win. */
+const systemTool = (name: string): string => path.join(process.env.SystemRoot || DEFAULT_SYSTEM_ROOT, ...SYSTEM32_SEGMENTS, name);
+const systemDir = (): string => path.dirname(systemTool('where.exe'));
 /** No AutoRun, no delayed expansion, strip the outer quotes, run. */
 const CMD_SWITCHES = ['/d', '/v:off', '/s', '/c'];
 /** What cmd.exe passes through untouched: no quotes, metacharacters, whitespace or leading @. */
@@ -19,6 +23,11 @@ const UNSAFE_IN_QUOTES = /["%!\r\n]/;
 const ARG_DIR_PREFIX = 'ghostpm-args-';
 const argFile = (index: number): string => `arg${index}.txt`;
 const AT_FILE_PREFIX = '@';
+/** An MSI az.cmd is `"%~dp0..python.exe" -IBm azure.cli %*` with AZ_INSTALLER=MSI; -X utf8 makes stdout UTF-8 instead of the ANSI code page. */
+const MSI_PYTHON_RELATIVE = ['..', 'python.exe'];
+const MSI_PYTHON_ARGS = ['-X', 'utf8', '-IBm', 'azure.cli'];
+const MSI_COMMAND = 'az';
+const MSI_ENV = { AZ_INSTALLER: 'MSI' };
 /** Commands that read `@<file>` as that file's contents (azure.cli.core does it for every command). */
 const AT_FILE_COMMANDS: ReadonlySet<string> = new Set(['az']);
 const NOT_FOUND_TEXT = /is not recognized as an internal or external command|The system cannot find the path specified/i;
@@ -62,20 +71,22 @@ function resolveCommand(command: string): string {
     const envName = COMMAND_OVERRIDE_ENV[command];
     const override = envName === undefined ? undefined : process.env[envName];
     if (override) {
-        if (!fs.existsSync(override)) throw missing(command, override);
-        return override;
+        // Resolved now, so cmd.exe cannot search PATH or its own cwd for a relative override.
+        const absolute = path.resolve(override);
+        if (!fs.existsSync(absolute)) throw missing(command, absolute);
+        return absolute;
     }
     if (!IS_WINDOWS) return command;
     const cached = resolvedCommands.get(command);
     if (cached !== undefined) return cached;
     try {
-        const lines = execFileSync('where.exe', [command], { encoding: 'utf8', windowsHide: true }).trim().split(LINE_BREAK);
+        const lines = execFileSync(systemTool('where.exe'), [command], { encoding: 'utf8', windowsHide: true, cwd: systemDir() }).trim().split(LINE_BREAK);
         const resolved = lines.find(line => WIN_EXECUTABLE_EXTS.has(path.extname(line).toLowerCase())) || lines[0];
         resolvedCommands.set(command, resolved);
         return resolved;
     } catch {
-        // Not on PATH (yet): let the spawn report it, and look again next time.
-        return command;
+        // Not on PATH (yet): look again next time. Never fall back to the bare name.
+        throw new CliError(`${command} was not found on PATH`, null, '', true, false);
     }
 }
 
@@ -84,7 +95,41 @@ interface Invocation {
     args: string[];
     cwd?: string;
     verbatim: boolean;
+    env?: NodeJS.ProcessEnv;
     argDir: string | null;
+}
+
+/** Writes each FreeText to a UTF-8 file in a fresh folder; `at(index, file)` renders the token. */
+function writeArgFiles(args: CliArg[], at: (index: number, dir: string) => string): { tokens: string[]; argDir: string | null } {
+    let argDir: string | null = null;
+    const tokens: string[] = [];
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (typeof arg === 'string') {
+            tokens.push(arg);
+            continue;
+        }
+        if (argDir === null) argDir = fs.mkdtempSync(path.join(os.tmpdir(), ARG_DIR_PREFIX));
+        fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
+        tokens.push(at(index, argDir));
+    }
+    return { tokens, argDir };
+}
+
+/** az expands a leading @ in ANY value itself, so its free text always travels through a file, on every path. */
+function atFileInvocation(file: string, prefix: string[], command: string, args: CliArg[], env?: NodeJS.ProcessEnv): Invocation {
+    const { tokens, argDir } = writeArgFiles(
+        AT_FILE_COMMANDS.has(command) ? args : args.map(textOf),
+        (index, dir) => `${AT_FILE_PREFIX}${path.join(dir, argFile(index))}`,
+    );
+    // No cwd: a child that inherits it (az's telemetry uploader) must not hold the argument folder.
+    return { file, args: [...prefix, ...tokens], verbatim: false, argDir, env };
+}
+
+/** The MSI az.cmd's own python.exe, when this az.cmd sits in an MSI layout. */
+function msiPython(resolved: string): string | undefined {
+    const python = path.resolve(path.dirname(resolved), ...MSI_PYTHON_RELATIVE);
+    return fs.existsSync(python) ? python : undefined;
 }
 
 /** Spec §8.9 and Appendix A S1: nothing GhostPM does not control is ever parsed by cmd.exe. */
@@ -99,21 +144,10 @@ function batchInvocation(command: string, resolved: string, args: CliArg[]): Inv
             throw refuse(`${command} resolves to the batch file ${resolved}, which cannot take text safely; point ${COMMAND_OVERRIDE_ENV[command] ?? 'it'} at an executable`);
         }
     }
-    let argDir: string | null = null;
-    const tokens: string[] = [];
-    for (let index = 0; index < args.length; index++) {
-        const arg = args[index];
-        if (typeof arg === 'string') {
-            tokens.push(arg);
-            continue;
-        }
-        if (argDir === null) argDir = fs.mkdtempSync(path.join(os.tmpdir(), ARG_DIR_PREFIX));
-        fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
-        // Relative to the child's working directory, so no temp path reaches cmd.exe either.
-        tokens.push(`${AT_FILE_PREFIX}${argFile(index)}`);
-    }
+    // Relative to the child's working directory, so no temp path reaches cmd.exe either.
+    const { tokens, argDir } = writeArgFiles(args, index => `${AT_FILE_PREFIX}${argFile(index)}`);
     return {
-        file: process.env.ComSpec || DEFAULT_COMSPEC,
+        file: process.env.ComSpec || systemTool('cmd.exe'),
         args: [...CMD_SWITCHES, `""${resolved}" ${tokens.join(' ')}"`],
         cwd: argDir ?? undefined,
         verbatim: true,
@@ -124,11 +158,13 @@ function batchInvocation(command: string, resolved: string, args: CliArg[]): Inv
 function plan(command: string, args: CliArg[]): Invocation {
     const resolved = resolveCommand(command);
     const ext = path.extname(resolved).toLowerCase();
-    if (ext === NODE_SCRIPT_EXT) {
-        return { file: process.execPath, args: [resolved, ...args.map(textOf)], verbatim: false, argDir: null };
+    if (ext === NODE_SCRIPT_EXT) return atFileInvocation(process.execPath, [resolved], command, args);
+    if (IS_WINDOWS && BATCH_EXTS.has(ext)) {
+        const python = command === MSI_COMMAND ? msiPython(resolved) : undefined;
+        if (python !== undefined) return atFileInvocation(python, MSI_PYTHON_ARGS, command, args, { ...process.env, ...MSI_ENV });
+        return batchInvocation(command, resolved, args);
     }
-    if (IS_WINDOWS && BATCH_EXTS.has(ext)) return batchInvocation(command, resolved, args);
-    return { file: resolved, args: args.map(textOf), verbatim: false, argDir: null };
+    return atFileInvocation(resolved, [], command, args);
 }
 
 function toCliError(command: string, error: ExecFileException, stderr: string): CliError {
@@ -154,8 +190,10 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         windowsHide: true,
         windowsVerbatimArguments: invocation.verbatim,
         cwd: invocation.cwd,
+        env: invocation.env,
     }, (error, stdout, stderr) => {
-        if (argDir !== null) fs.rmSync(argDir, { recursive: true, force: true });
+        // Best effort: a process that inherited the folder as its cwd can keep it busy on Windows.
+        if (argDir !== null) try { fs.rmSync(argDir, { recursive: true, force: true }); } catch { /* left behind */ }
         if (error) reject(toCliError(command, error, String(stderr)));
         else resolve(String(stdout).trim());
     });
