@@ -52,7 +52,11 @@ export interface FreeText { readonly freeText: string }
 export type CliArg = string | FreeText;
 export const freeText = (text: string): FreeText => ({ freeText: text });
 
-export interface RunOptions { input?: string }
+export interface RunOptions {
+    input?: string;
+    /** Kill the command once it has run this long; the call then rejects with a CliError marked timedOut. */
+    timeoutMs?: number;
+}
 export type Runner = (command: string, args: CliArg[], options?: RunOptions) => Promise<string>;
 
 export class CliError extends Error {
@@ -64,6 +68,8 @@ export class CliError extends Error {
         readonly notFound: boolean,
         /** GhostPM refused to run it rather than let cmd.exe parse the arguments. */
         readonly refused: boolean,
+        /** Killed for running past RunOptions.timeoutMs. */
+        readonly timedOut: boolean = false,
     ) {
         super(message);
         this.name = 'CliError';
@@ -211,7 +217,9 @@ function plan(command: string, args: CliArg[]): Invocation {
     return atFileInvocation(resolved, [], command, args);
 }
 
-function toCliError(command: string, error: ExecFileException, stderr: string): CliError {
+function toCliError(command: string, error: ExecFileException, stderr: string, timeoutMs: number | undefined): CliError {
+    // Only execFile's own kill sets `killed`, and with no AbortSignal passed that kill is the timeout.
+    if (error.killed === true) return new CliError(`${command} timed out after ${timeoutMs} ms`, null, stderr, false, false, true);
     const exitCode = typeof error.code === 'number' ? error.code : null;
     const notFound = error.code === NOT_FOUND_CODE || NOT_FOUND_TEXT.test(stderr);
     const detail = stderr.trim().split(LINE_BREAK)[0] || error.message;
@@ -235,10 +243,11 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         windowsVerbatimArguments: invocation.verbatim,
         cwd: invocation.cwd,
         env: invocation.env,
+        timeout: options.timeoutMs,
     }, (error, stdout, stderr) => {
         // Best effort: a process that inherited the folder as its cwd can keep it busy on Windows.
         if (argDir !== null) try { fs.rmSync(argDir, { recursive: true, force: true }); } catch { /* left behind */ }
-        if (error) reject(toCliError(command, error, String(stderr)));
+        if (error) reject(toCliError(command, error, String(stderr), options.timeoutMs));
         else resolve(String(stdout).trim());
     });
     // A child that never started closes its pipe; the callback above reports why.

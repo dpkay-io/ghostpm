@@ -1,6 +1,6 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
 import { AzureAdapter, isLossyCopy, AZ_LOGGED_OUT, AZ_MISSING } from '../../src/sync/azure';
-import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
+import { GoneError, PermanentError, SyncPausedError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
 import { PhaseStateMap } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 
@@ -250,6 +250,19 @@ describe('AzureAdapter', () => {
         expect(isLossyCopy('Fix login ', 'Fix login ✓')).toBe(true);
         expect(isLossyCopy('Fix login!', 'Fix login')).toBe(false);
         expect(isLossyCopy('Fix', 'Fix login')).toBe(false);
+    });
+});
+
+describe('AzureAdapter call timeout', () => {
+    it('bounds every az call by the vendor timeout', async () => {
+        const timeouts: (number | undefined)[] = [];
+        const run: Runner = async (_command, args, options) => {
+            timeouts.push(options?.timeoutMs);
+            return args[0] === 'account' ? 'octo@acme.test' : workItem();
+        };
+        await adapter(run).currentUser();
+        await adapter(run).fetch('42');
+        expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS, VENDOR_CALL_TIMEOUT_MS]);
     });
 });
 

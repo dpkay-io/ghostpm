@@ -1,5 +1,8 @@
 import { Phase } from '../ledger/types';
 
+/** Every vendor CLI call is killed after this: well inside the sync lease's 60 s TTL (lease.ts), so a hung gh/az cannot outlive the lease. */
+export const VENDOR_CALL_TIMEOUT_MS = 45 * 1000;
+
 /** One shape for a GitHub issue and an Azure Boards work item. */
 export interface RemoteItem {
     remoteId: string;

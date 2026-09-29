@@ -1,8 +1,10 @@
-import { CliArg, CliError, Runner, freeText, runCli } from '../cli';
+import { CliArg, CliError, RunOptions, Runner, freeText, runCli } from '../cli';
 import { PhaseStateMap } from '../ledger/settings';
 import { vendorStateToPhase } from '../ledger/legacy-import';
 import { PHASES, Phase } from '../ledger/types';
-import { DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VendorAdapter, linkStateOf } from './vendor';
+import {
+    DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf,
+} from './vendor';
 
 const AZ = 'az';
 const JSON_OUTPUT: CliArg[] = ['-o', 'json'];
@@ -34,6 +36,7 @@ const ASCII_LIMIT = 0x80;
 /** What az's first pass strips from the end of a one-level argument file (`rstrip(os.linesep)`), and the batch fallback's ANSI decode leaves for a character it could not encode. */
 const TRAILING_LINE_BREAKS = /[\r\n]+$/;
 const REPLACEMENT_CHAR = '�';
+const TIMED: RunOptions = { timeoutMs: VENDOR_CALL_TIMEOUT_MS };
 
 export const AZ_MISSING = 'Azure CLI (az) was not found. Install it, or set GHOSTPM_AZ to its path, then run `ghostpm sync`.';
 export const AZ_LOGGED_OUT = 'Azure CLI is not logged in to Azure DevOps. Run `az login` (or `az devops login`), then `ghostpm sync`.';
@@ -92,7 +95,7 @@ export class AzureAdapter implements VendorAdapter {
 
     private async azText(args: CliArg[], itemLevel = false): Promise<string> {
         try {
-            return await this.run(AZ, [...args, ...JSON_OUTPUT]);
+            return await this.run(AZ, [...args, ...JSON_OUTPUT], TIMED);
         } catch (error) {
             throw classify(error, itemLevel, this.project, this.workItemType);
         }
@@ -214,7 +217,7 @@ export class AzureAdapter implements VendorAdapter {
 
     async currentUser(): Promise<string> {
         try {
-            return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'])).trim();
+            return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'], TIMED)).trim();
         } catch (error) {
             throw classify(error, false, this.project, this.workItemType);
         }

@@ -1,6 +1,7 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
 import { GitHubAdapter, githubPhaseOf, GH_LOGGED_OUT, GH_MISSING } from '../../src/sync/github';
-import { GoneError, SyncPausedError } from '../../src/sync/vendor';
+import { GoneError, SyncPausedError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
+import { LEASE_TTL_MS } from '../../src/sync/lease';
 import { Phase } from '../../src/ledger/types';
 
 interface Call { command: string; args: CliArg[]; input?: string }
@@ -299,5 +300,18 @@ describe('GitHubAdapter auth pause', () => {
     it('leaves a plain 403 as an ordinary error', async () => {
         const thrown = await new GitHubAdapter(freshRepo(), fakeGh({ 'api user': cliFailure('HTTP 403: API rate limit exceeded') }).run).currentUser().catch((e: unknown) => e);
         expect(thrown).toBeInstanceOf(CliError);
+    });
+});
+
+describe('GitHubAdapter call timeout', () => {
+    it('bounds every gh call by the vendor timeout, which ends inside the sync lease', async () => {
+        const timeouts: (number | undefined)[] = [];
+        const run: Runner = async (_command, _args, options) => {
+            timeouts.push(options?.timeoutMs);
+            return 'octocat';
+        };
+        await new GitHubAdapter(freshRepo(), run).currentUser();
+        expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS]);
+        expect(VENDOR_CALL_TIMEOUT_MS).toBeLessThan(LEASE_TTL_MS);
     });
 });

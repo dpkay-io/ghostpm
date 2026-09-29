@@ -1,0 +1,66 @@
+import { Ledger } from '../ledger/db';
+import { recordEvent } from '../ledger/events';
+import { dropPendingSyncState } from '../ledger/projection';
+import { updateTask } from '../ledger/tasks';
+import { SYNC_SOURCE, TaskRow, VENDOR_SOURCE, VendorLinkRow } from '../ledger/types';
+import { RemoteItem, VendorAdapter, parseLabels } from './vendor';
+
+/** What the vendor holds becomes the comparison point for the next pull (spec §8.6). */
+function writeBaseline(db: Ledger, link: VendorLinkRow, item: RemoteItem, title: string, lastPushedRev: number | null): void {
+    db.prepare(`
+        UPDATE vendor_links
+        SET remote_title = ?, remote_state = ?, labels = ?, remote_updated_at = ?, remote_url = COALESCE(?, remote_url),
+            broken_at = NULL, last_pushed_rev = COALESCE(?, last_pushed_rev)
+        WHERE task_id = ? AND vendor = ?`)
+        .run(title, item.state, JSON.stringify(item.labels), item.updatedAt, item.url, lastPushedRev, link.task_id, link.vendor);
+}
+
+const isNewer = (item: RemoteItem, link: VendorLinkRow): boolean =>
+    link.remote_updated_at === null || Date.parse(item.updatedAt) > Date.parse(link.remote_updated_at);
+
+/**
+ * Spec §8.6, human wins. `item` is what the vendor holds now. If it is newer than the
+ * baseline and its title or phase differs from what we last saw there, a person (or a bot:
+ * the spec's accepted limitation) edited it: apply that here as a human change, and drop
+ * the pending push only when the edit replaced both title and phase (Ruling: it may carry
+ * a local change the person did not touch). Then `item` becomes the baseline.
+ * Returns whether a human edit was applied. Plain statements: call inside write().
+ */
+export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRow, link: VendorLinkRow, item: RemoteItem): boolean {
+    let edited = false;
+    if (isNewer(item, link)) {
+        const titleChanged = !adapter.titlesMatch(item.title, link.remote_title ?? task.title);
+        const knownPhase = link.remote_state === null
+            ? task.phase
+            : adapter.phaseOf(link.remote_state, parseLabels(link.labels), task.phase);
+        const remotePhase = adapter.phaseOf(item.state, item.labels, task.phase);
+        const phaseChanged = remotePhase !== knownPhase && remotePhase !== task.phase;
+        if (titleChanged || phaseChanged) {
+            updateTask(db, task.id, {
+                title: titleChanged ? item.title : undefined,
+                phase: phaseChanged ? remotePhase : undefined,
+            }, { source: VENDOR_SOURCE, human: true });
+            if (titleChanged && phaseChanged) dropPendingSyncState(db, task.id);
+            edited = true;
+        }
+        // Vendor-owned fields: shown locally, never pushed.
+        db.prepare('UPDATE tasks SET body = ?, assignee = ?, milestone = ? WHERE id = ?')
+            .run(item.body, item.assignee, item.milestone, task.id);
+    }
+    writeBaseline(db, link, item, item.title, null);
+    return edited;
+}
+
+/** After our own push the vendor holds what we sent: record it as the baseline, not as an edit. */
+export function recordOwnPush(db: Ledger, link: VendorLinkRow, item: RemoteItem, pushedTitle: string, rev: number | null): void {
+    writeBaseline(db, link, item, pushedTitle, rev);
+}
+
+/** Spec §8.5: deleted or moved away. The task stays local, with an event saying so. */
+export function markLinkBroken(db: Ledger, link: VendorLinkRow, reason: string, at: string): void {
+    db.prepare('UPDATE vendor_links SET broken_at = ? WHERE task_id = ? AND vendor = ?').run(at, link.task_id, link.vendor);
+    recordEvent(db, {
+        taskId: link.task_id, kind: 'linked', source: SYNC_SOURCE,
+        payload: { vendor: link.vendor, remoteId: link.remote_id, broken: true, reason },
+    }, at);
+}

@@ -1,7 +1,7 @@
 import { CliArg, CliError, Runner, freeText, runCli } from '../cli';
 import { CLOSED_PHASES, Phase, isPhase } from '../ledger/types';
 import { REOPEN_PHASE } from '../ledger/work';
-import { DesiredState, GoneError, LinkState, RemoteItem, SyncPausedError, VendorAdapter, linkStateOf } from './vendor';
+import { DesiredState, GoneError, LinkState, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf } from './vendor';
 
 const GH = 'gh';
 export const PHASE_LABEL_PREFIX = 'ghostpm:';
@@ -117,7 +117,7 @@ export class GitHubAdapter implements VendorAdapter {
 
     private async gh(args: CliArg[], input?: string, itemLevel = false): Promise<string> {
         try {
-            return await this.run(GH, args, { input });
+            return await this.run(GH, args, { input, timeoutMs: VENDOR_CALL_TIMEOUT_MS });
         } catch (error) {
             throw classify(error, this.repo, itemLevel);
         }

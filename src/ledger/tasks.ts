@@ -47,6 +47,9 @@ export interface NewVendorLink {
     remoteState?: string | null;
     labels?: string | null;
     remoteUpdatedAt?: string | null;
+    /** The title last seen on, or sent to, the vendor (spec §8.6 baseline). */
+    remoteTitle?: string | null;
+    lastPushedRev?: number | null;
 }
 
 export function getTask(db: Ledger, id: number): TaskRow | undefined {
@@ -151,9 +154,12 @@ export function listTasks(db: Ledger, filter: TaskFilter = {}): TaskRow[] {
 
 export function insertVendorLink(db: Ledger, link: NewVendorLink): void {
     db.prepare(`
-        INSERT INTO vendor_links (task_id, vendor, remote_id, remote_url, remote_state, labels, remote_updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(link.taskId, link.vendor, link.remoteId, link.remoteUrl ?? null, link.remoteState ?? null, link.labels ?? null, link.remoteUpdatedAt ?? null);
+        INSERT INTO vendor_links (task_id, vendor, remote_id, remote_url, remote_state, labels, remote_updated_at, remote_title, last_pushed_rev)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+            link.taskId, link.vendor, link.remoteId, link.remoteUrl ?? null, link.remoteState ?? null, link.labels ?? null,
+            link.remoteUpdatedAt ?? null, link.remoteTitle ?? null, link.lastPushedRev ?? null,
+        );
 }
 
 export function getVendorLink(db: Ledger, taskId: number): VendorLinkRow | undefined {

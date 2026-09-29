@@ -14,6 +14,9 @@ const AUTH_EXIT = 4;
 const KNACK_ENCODING_ENV = 'GHOSTPM_TEST_KNACK_ENCODING';
 const ANSI_ENCODING = 'latin1';
 const LINGER_TEST_TIMEOUT_MS = 20000;
+const TIMEOUT_MS = 300;
+/** Longer than jest's own test timeout: a child that is not killed fails the test. */
+const HANG_MS = 30000;
 const MSI_AZ_SCRIPT = '@IF EXIST "%~dp0\\..\\python.exe" (\r\n  SET AZ_INSTALLER=MSI\r\n  "%~dp0\\..\\python.exe" -IBm azure.cli %*\r\n)\r\n';
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
@@ -99,6 +102,19 @@ describe('runCli', () => {
         expect(error).toBeInstanceOf(CliError);
         expect(error.exitCode).toBe(AUTH_EXIT);
         expect(error.stderr).toContain('gh auth login');
+        expect(error.timedOut).toBe(false);
+    });
+
+    it('kills a command that outlives its timeout and says it timed out', async () => {
+        const hang = path.join(dir, 'hang.js');
+        fs.writeFileSync(hang, `setTimeout(() => process.stdout.write('late'), ${HANG_MS});`);
+        override('gh', hang);
+        const started = Date.now();
+        const error = await runCli('gh', ['issue', 'list'], { timeoutMs: TIMEOUT_MS }).catch((e: unknown) => e) as CliError;
+        expect(error).toBeInstanceOf(CliError);
+        expect(error.timedOut).toBe(true);
+        expect(error.message).toContain(`timed out after ${TIMEOUT_MS} ms`);
+        expect(Date.now() - started).toBeLessThan(HANG_MS);
     });
 
     it('reports a missing override as not found instead of falling back to PATH', async () => {

@@ -22,6 +22,8 @@ export const NO_VENDOR: Vendor = 'none';
 export type Origin = 'local' | 'vendor';
 /** Event source for anything that came from GitHub or Azure DevOps. Never projected back. */
 export const VENDOR_SOURCE = 'vendor';
+/** Event source for what the sync engine records itself: links, broken links, merged-PR moves. */
+export const SYNC_SOURCE = 'sync';
 
 export const TASK_ID_PREFIX = 'T';
 export const formatTaskId = (id: number): string => `${TASK_ID_PREFIX}${id}`;
