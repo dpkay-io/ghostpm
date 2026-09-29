@@ -8,6 +8,11 @@ import { removeTempDir } from '../temp-dir';
 const EXPECTED_TABLES = ['events', 'leases', 'outbox', 'sessions', 'settings', 'tasks', 'vendor_links', 'workspaces'];
 const SPEC_BUSY_TIMEOUT_MS = 5000;
 const FIRST_SCHEMA_VERSION = 1;
+/** Shipped to this machine's live ledger before the push intent existed: never edited again. */
+const SYNC_V2_SCHEMA_VERSION = 2;
+const INTENT_COLUMNS = ['intent_title', 'intent_phase', 'intent_rev'];
+const columnsOf = (db: Database.Database, table: string): string[] =>
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(column => column.name);
 const EPOCH = '1970-01-01T00:00:00.000Z';
 
 describe('ledger db', () => {
@@ -152,6 +157,34 @@ describe('ledger db', () => {
         } finally {
             db.close();
             older.close();
+        }
+    });
+
+    it('upgrades a version-2 ledger to the push intent, keeping every vendor link', () => {
+        const file = ledgerPath();
+        const older = new Database(file);
+        migrate(older, SYNC_V2_SCHEMA_VERSION);
+        older.exec(`
+            INSERT INTO tasks (id, title, phase, workspace_id, origin, created_at, updated_at)
+                VALUES (1, 'Linked', 'planned', 1, 'local', 't', 't'), (2, 'Gone', 'done', 1, 'local', 't', 't');
+            INSERT INTO vendor_links (task_id, vendor, remote_id, remote_title, broken_at, last_pushed_rev)
+                VALUES (1, 'github', '7', 'Linked', NULL, 3), (2, 'github', '8', 'Gone', 'then', NULL);
+        `);
+        // What the original migration 2 made, as this machine's live ledger has it.
+        expect(columnsOf(older, 'vendor_links')).toEqual(expect.arrayContaining(['remote_title', 'broken_at']));
+        expect(columnsOf(older, 'vendor_links')).not.toEqual(expect.arrayContaining([INTENT_COLUMNS[0]]));
+        older.close();
+
+        const db = openLedger(file);
+        try {
+            expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+            expect(SCHEMA_VERSION).toBeGreaterThan(SYNC_V2_SCHEMA_VERSION);
+            expect(db.prepare(`SELECT task_id, remote_id, remote_title, broken_at, last_pushed_rev, ${INTENT_COLUMNS.join(', ')} FROM vendor_links ORDER BY task_id`).all()).toEqual([
+                { task_id: 1, remote_id: '7', remote_title: 'Linked', broken_at: null, last_pushed_rev: 3, intent_title: null, intent_phase: null, intent_rev: null },
+                { task_id: 2, remote_id: '8', remote_title: 'Gone', broken_at: 'then', last_pushed_rev: null, intent_title: null, intent_phase: null, intent_rev: null },
+            ]);
+        } finally {
+            db.close();
         }
     });
 

@@ -1,4 +1,8 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import Database from 'better-sqlite3';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from '../ledger/helpers';
+import { LEDGER_FILE, migrate, openLedger } from '../../src/ledger/db';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { getTask, getVendorLink, updateTask } from '../../src/ledger/tasks';
 import { startSession } from '../../src/ledger/sessions';
@@ -28,6 +32,8 @@ const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
 /** A column any insert into vendor_links trips over: a local write that fails after the vendor call succeeded. */
 const FAIL_LINK_INSERTS = "CREATE TRIGGER fail_link BEFORE INSERT ON vendor_links BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END";
 const ALLOW_LINK_INSERTS = 'DROP TRIGGER fail_link';
+/** The schema this machine's live ledger was at before the push intent: migration 2 as first shipped. */
+const SYNC_V2_SCHEMA_VERSION = 2;
 
 describe('pushing the outbox', () => {
     let ledger: TempLedger;
@@ -489,6 +495,33 @@ describe('pushing the outbox', () => {
         vendor.failNext = new SyncPausedError(GH_LOGGED_OUT);
         expect((await push()).paused).toEqual([`${workspace.path}: ${GH_LOGGED_OUT}`]);
         expect(outboxRows(ledger.db, task.id)[1]).toMatchObject({ op: 'comment', status: 'pending', attempts: 0 });
+    });
+
+    it('pushes from a ledger upgraded from version 2, where the push intent did not exist yet', async () => {
+        const file = path.join(ledger.dir, 'upgraded', LEDGER_FILE);
+        fs.mkdirSync(path.dirname(file));
+        const repo = clonedRepo(ledger.dir, 'upgraded-repo');
+        const item = vendor.seed({ title: 'Kept', labels: ['ghostpm:planned'] });
+        const at = new Date().toISOString();
+        const older = new Database(file);
+        migrate(older, SYNC_V2_SCHEMA_VERSION);
+        older.prepare("INSERT INTO workspaces (id, path, vendor) VALUES (1, ?, 'github')").run(repo);
+        older.prepare("INSERT INTO tasks (id, title, phase, workspace_id, origin, created_at, updated_at) VALUES (1, 'Kept', 'planned', 1, 'local', ?, ?)")
+            .run(at, at);
+        older.prepare(`INSERT INTO vendor_links (task_id, vendor, remote_id, remote_state, labels, remote_updated_at, remote_title, last_pushed_rev)
+            VALUES (1, 'github', ?, 'open', '["ghostpm:planned"]', ?, 'Kept', 0)`).run(item.remoteId, item.updatedAt);
+        older.close();
+
+        const upgraded = openLedger(file);
+        try {
+            setSetting(upgraded, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+            updateTask(upgraded, 1, { title: 'Renamed after the upgrade' }, { source: SOURCE, human: true });
+            expect((await pushDue(upgraded, deps)).pushed).toBe(1);
+            expect(vendor.items.get(item.remoteId)!.title).toBe('Renamed after the upgrade');
+            expect(getVendorLink(upgraded, 1)).toMatchObject({ remote_title: 'Renamed after the upgrade', last_pushed_rev: 1, intent_title: null });
+        } finally {
+            upgraded.close();
+        }
     });
 
     it('marks the link broken when a comment finds the item gone', async () => {

@@ -96,8 +96,7 @@ const MIGRATIONS: readonly string[] = [
     );
     `,
     // 2 (Phase 3, Sync v2): one pending desired state per task, the claim index, and the
-    // vendor-side baseline (last title seen) plus a marker for items deleted or moved away,
-    // and the push in flight (intent) so a push that landed unanswered is not read as a person's edit.
+    // vendor-side baseline (last title seen) plus a marker for items deleted or moved away.
     `
     DELETE FROM outbox
     WHERE op = 'sync_state' AND status = 'pending'
@@ -107,6 +106,10 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX outbox_due ON outbox (status, next_attempt_at);
     ALTER TABLE vendor_links ADD COLUMN remote_title TEXT;
     ALTER TABLE vendor_links ADD COLUMN broken_at TEXT;
+    `,
+    // 3 (Phase 3, Sync v2): the push in flight (intent), written just before the vendor call, so a
+    // push that landed without its answer being recorded is never read as a person's edit.
+    `
     ALTER TABLE vendor_links ADD COLUMN intent_title TEXT;
     ALTER TABLE vendor_links ADD COLUMN intent_phase TEXT;
     ALTER TABLE vendor_links ADD COLUMN intent_rev INTEGER;
