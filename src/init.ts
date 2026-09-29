@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import * as fs from 'fs';
 import * as path from 'path';
-import { runCli } from './cli';
+import { runCli, freeText } from './cli';
 
 export function findGitRoot(currentPath: string = process.cwd()): string | null {
     let dir = path.resolve(currentPath);
@@ -92,7 +92,7 @@ export async function sniffWorkflowStates(vendor: 'github' | 'azure_devops'): Pr
     } else if (vendor === 'azure_devops') {
         try {
             const wiql = "SELECT [System.State] FROM workitems";
-            const output = await runCli('az', ['boards', 'query', '--wiql', wiql, '--top', '100']);
+            const output = await runCli('az', ['boards', 'query', '--wiql', freeText(wiql), '--top', '100']);
             const result = JSON.parse(output || '[]');
             const items = Array.isArray(result) ? result : (result.items || []);
             
