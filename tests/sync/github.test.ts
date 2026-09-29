@@ -317,6 +317,12 @@ describe('GitHubAdapter retry lookups', () => {
         expect(await adapter.findCreated('<!-- ghostpm:ffffffffffffffff -->', 'Login fix')).toBeNull();
     });
 
+    it('never hands a marker back in a body it read', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': JSON.stringify(withBody(repo, 12, `Tracked by GhostPM as T1.\n\n${marker}`)) });
+        expect((await new GitHubAdapter(repo, gh.run).fetch('12'))!.body).toBe('Tracked by GhostPM as T1.');
+    });
+
     it('tells whether an earlier comment carrying the marker is on the issue', async () => {
         const repo = freshRepo();
         const gh = fakeGh({ 'issue view': JSON.stringify({ comments: [{ body: 'first' }, { body: `progress\n\n${marker}` }] }) });

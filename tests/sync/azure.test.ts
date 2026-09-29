@@ -271,6 +271,11 @@ describe('AzureAdapter retry lookups', () => {
         expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', "Fix 'x'")).toBeNull();
     });
 
+    it('never hands a marker back in a description it read', async () => {
+        const az = fakeAz({ 'boards work-item show': workItem({ 'System.Description': `Tracked by GhostPM as T1.\n\n${marker}` }) });
+        expect((await adapter(az.run).fetch('42'))!.body).toBe('Tracked by GhostPM as T1.');
+    });
+
     it("reads the latest System.History for an earlier comment's marker", async () => {
         const az = fakeAz({ 'boards work-item show': workItem({ 'System.History': `progress<br><br>${marker}` }) });
         expect(await adapter(az.run).hasComment('42', marker)).toBe(true);

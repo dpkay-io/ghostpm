@@ -12,14 +12,33 @@ const MARKER_CLOSE = ' -->';
 export const MARKER_NONCE_BYTES = 8;
 const HEX_PER_BYTE = 2;
 export const idempotencyMarker = (nonce: string): string => `${MARKER_OPEN}${nonce}${MARKER_CLOSE}`;
-const MARKERS = new RegExp(`\\s*${MARKER_OPEN}[0-9a-f]{${MARKER_NONCE_BYTES * HEX_PER_BYTE}}${MARKER_CLOSE}`, 'g');
-export const stripMarkers = (text: string): string => text.replace(MARKERS, '');
+/** No leading `\s*`: with /g that retries from every whitespace character, quadratic on a long run of it. */
+const MARKER = new RegExp(`${MARKER_OPEN}[0-9a-f]{${MARKER_NONCE_BYTES * HEX_PER_BYTE}}${MARKER_CLOSE}`, 'g');
+const WHITESPACE = /\s/;
+
+/**
+ * The text without our markers, and without the whitespace we put before each one. Linear: the backward trim
+ * never passes the text already kept.
+ */
+export function stripMarkers(text: string): string {
+    let kept = '';
+    let from = 0;
+    MARKER.lastIndex = 0;
+    for (let marker = MARKER.exec(text); marker !== null; marker = MARKER.exec(text)) {
+        let cut = marker.index;
+        while (cut > from && WHITESPACE.test(text[cut - 1])) cut--;
+        kept += text.slice(from, cut);
+        from = marker.index + marker[0].length;
+    }
+    return kept + text.slice(from);
+}
 
 /** One shape for a GitHub issue and an Azure Boards work item. */
 export interface RemoteItem {
     remoteId: string;
     url: string | null;
     title: string;
+    /** Without GhostPM's retry markers: adapters strip them as they read, so no ledger transaction ever has to. */
     body: string | null;
     /** Exactly what vendor_links.remote_state stores: GitHub `open`, `closed` or `closed:<reason>`; ADO System.State. */
     state: string;

@@ -5,9 +5,11 @@ const ADO_PAT_52 = Array.from({ length: 52 }, (_, i) => BASE32[(i * 7) % BASE32.
 /** The 84-character Azure DevOps PAT shape: `AZDO` at 76-79 (per Microsoft's announcement; unverified against a real PAT). */
 const ADO_PAT_84 = `${'A'.repeat(52)}${'b'.repeat(24)}AZDO${'c'.repeat(4)}`;
 const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
-/** 100 KB of `a_`: a scan that restarts at every character takes ~17 s on it (measured); a linear one a few ms. */
-const IDENTIFIER_RUN_PAIRS = 50000;
-const LINEAR_BOUND_MS = 1000;
+/** The recursive re-scan threw RangeError from about 2,000 links in a chain (measured). */
+const DEEP_CHAIN = 5000;
+const HOSTILE_BYTES = 1 << 20;
+/** Generous: a linear scan of 1 MB takes tens of ms; the quadratic patterns took 3-44 s on far less (measured). */
+const HOSTILE_BOUND_MS = 1000;
 const JWT ='eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
 
 describe('redactSecrets (spec §8.9)', () => {
@@ -115,10 +117,73 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets('password=abc&def;ghi,12345')).toEqual({ text: `password=${REDACTED}`, count: 1 });
     });
 
-    it('stays linear on a long run of identifier characters (a quadratic pattern takes seconds here)', () => {
-        const started = Date.now();
-        redactSecrets(`${'a_'.repeat(IDENTIFIER_RUN_PAIRS)}password`);
-        expect(Date.now() - started).toBeLessThan(LINEAR_BOUND_MS);
+    it.each([
+        ['a token, then a quoted password', `GITHUB_TOKEN=${GITHUB_TOKEN};DB_PASSWORD="hunter2hunter2"`],
+        ['a token, then `password: `', `GITHUB_TOKEN=${GITHUB_TOKEN};DB_PASSWORD: hunter2hunter2`],
+        ['a query token, then a quoted password', `?access_token=${GITHUB_TOKEN}&password="hunter2hunter2"`],
+        ['a short value, then `password: `', 'token=abc&password: hunter2hunter2'],
+        ['a short value, then a quoted password', 'token=abc&password="hunter2hunter2"'],
+        ['a short password, then a JSON key', 'password=abc,"api_key": "hunter2hunter2"'],
+    ])('never lets an earlier value hide a later secret: %s', (_kind, text) => {
+        const result = redactSecrets(text);
+        expect(result.text).not.toContain('hunter2hunter2');
+        expect(result.text).not.toContain(GITHUB_TOKEN);
+    });
+
+    it('still examines a key inside a quoted value it keeps', () => {
+        expect(redactSecrets('password = "see token=abcdefghij here"')).toEqual({ text: 'password = "see token=[redacted] here"', count: 1 });
+    });
+
+    it('redacts the secret after a short value, not the short value and the key', () => {
+        expect(redactSecrets('token=abc&password: hunter2hunter2')).toEqual({ text: 'token=abc&password: [redacted]', count: 1 });
+    });
+
+    it.each([
+        ['PASSWORD=Hunter22', 'PASSWORD=[redacted]'],
+        ["'api_key' : 'abcdefgh'", "'api_key' : '[redacted]'"],
+        ['"x-api-key": "abcdefgh"', '"x-api-key": "[redacted]"'],
+        ['"client_secret":abcdefgh', '"client_secret":[redacted]'],
+        ['export DB_PASSWORD=correcthorse', 'export DB_PASSWORD=[redacted]'],
+        ['my_password"="abcdefgh"', 'my_password"="[redacted]"'],
+        ['password="correct horse battery"', 'password="[redacted]"'],
+        ['x"password":"abcdefgh"', 'x"password":"[redacted]"'],
+        ['"password"\t:\t"abcdefgh"', '"password"\t:\t"[redacted]"'],
+    ])('redacts the assignment form %s', (text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        'token:abcdefgh',
+        'The "secret": to success',
+        '{"token": "short"}',
+        'password=[redacted]',
+        '"password": "[redacted]"',
+    ])('keeps %s', text => {
+        expect(redactSecrets(text)).toEqual({ text, count: 0 });
+    });
+
+    it.each([
+        ['token:', DEEP_CHAIN],
+        ['secret:', DEEP_CHAIN],
+        [`token=${GITHUB_TOKEN}&`, DEEP_CHAIN],
+    ])('returns, without recursing, on %s repeated thousands of times', (unit, times) => {
+        expect(() => redactSecrets(unit.repeat(times))).not.toThrow();
+        expect(redactSecrets(`token=${GITHUB_TOKEN}&`.repeat(times)).count).toBe(times);
+    });
+
+    it('scans 1 MB hostile inputs in linear time (each well under a second; the old regexes took seconds or threw)', () => {
+        const fill = (unit: string): string => unit.repeat(Math.ceil(HOSTILE_BYTES / unit.length));
+        const hostile = [
+            fill('_token'), fill('token:'), fill('token='), fill(`"'`), fill('=:'), fill('""""""token"""""":x '), fill('token '),
+            fill('password'), `"${fill('a_')}token":abcdefghij`, `token${' '.repeat(HOSTILE_BYTES)}x`, `${'a_'.repeat(HOSTILE_BYTES / 2)}password`,
+            fill('{"user": "octocat", "password": "correcthorse", "client_secret": "abcdefghij"}\n'),
+            fill('-----BEGIN PRIVATE KEY-----'), fill('_eyJaaaaa'),
+        ];
+        for (const text of hostile) {
+            const started = Date.now();
+            redactSecrets(text);
+            expect(Date.now() - started).toBeLessThan(HOSTILE_BOUND_MS);
+        }
     });
 
     it('never matches its own placeholder again', () => {

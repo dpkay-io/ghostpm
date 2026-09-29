@@ -3,7 +3,7 @@ import { recordEvent } from '../ledger/events';
 import { dropPendingSyncState } from '../ledger/projection';
 import { updateTask } from '../ledger/tasks';
 import { SYNC_SOURCE, TaskRow, VENDOR_SOURCE, VendorLinkRow } from '../ledger/types';
-import { DesiredState, RemoteItem, VendorAdapter, parseLabels, stripMarkers } from './vendor';
+import { DesiredState, RemoteItem, VendorAdapter, parseLabels } from './vendor';
 
 const LINK_KEY = 'task_id = ? AND vendor = ?';
 const NO_INTENT = 'intent_title = NULL, intent_phase = NULL, intent_rev = NULL';
@@ -65,9 +65,9 @@ export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRo
             edited = true;
         }
     }
-    // Vendor-owned fields: shown locally (without our retry markers), never pushed.
+    // Vendor-owned fields: shown locally, never pushed. The adapter already stripped our markers from the body.
     db.prepare('UPDATE tasks SET body = ?, assignee = ?, milestone = ? WHERE id = ?')
-        .run(item.body === null ? null : stripMarkers(item.body), item.assignee, item.milestone, task.id);
+        .run(item.body, item.assignee, item.milestone, task.id);
     // The intent ends with our push adopted, or with a person's edit applied over it (it can never be ours after that).
     if (ours) writeBaseline(db, link, item, link.intent_title!, link.intent_rev, true);
     else writeBaseline(db, link, item, item.title, null, edited);

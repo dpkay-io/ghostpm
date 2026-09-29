@@ -4,7 +4,10 @@ import { vendorStateToPhase } from '../ledger/legacy-import';
 import { PHASES, Phase } from '../ledger/types';
 import {
     DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf,
+    stripMarkers,
 } from './vendor';
+
+const nullableStrip = (text: string | null): string | null => (text === null ? null : stripMarkers(text));
 
 const AZ = 'az';
 const JSON_OUTPUT: CliArg[] = ['-o', 'json'];
@@ -131,7 +134,7 @@ export class AzureAdapter implements VendorAdapter {
             remoteId: String(raw.id),
             url: `${this.orgPrefix()}${encodeURIComponent(this.project)}/${EDIT_PATH}/${raw.id}`,
             title: text(FIELD.title) ?? '',
-            body: text(FIELD.description),
+            body: nullableStrip(text(FIELD.description)),
             state: text(FIELD.state) ?? '',
             labels: (text(FIELD.tags) ?? '').split(TAG_SEPARATOR).filter(tag => tag.length > 0),
             assignee: typeof assigned === 'string'

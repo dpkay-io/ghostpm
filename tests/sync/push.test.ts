@@ -34,6 +34,25 @@ const FAIL_LINK_INSERTS = "CREATE TRIGGER fail_link BEFORE INSERT ON vendor_link
 const ALLOW_LINK_INSERTS = 'DROP TRIGGER fail_link';
 /** The schema this machine's live ledger was at before the push intent: migration 2 as first shipped. */
 const SYNC_V2_SCHEMA_VERSION = 2;
+/** GitHub's longest issue body; all newlines, the old marker strip took ~7 s on it inside the merge write (measured). */
+const GITHUB_MAX_BODY = 65536;
+const HOSTILE_PUSH_BOUND_MS = 2000;
+const WRITE_LOCK_BOUND_MS = 250;
+
+/** The longest any ledger transaction ran while this is installed: how long another writer could have to wait. */
+function timeTransactions(db: Database.Database): () => number {
+    let longest = 0;
+    const transaction = db.transaction.bind(db);
+    jest.spyOn(db, 'transaction').mockImplementation(((fn: (...args: unknown[]) => unknown) => transaction((...args: unknown[]) => {
+        const started = Date.now();
+        try {
+            return fn(...args);
+        } finally {
+            longest = Math.max(longest, Date.now() - started);
+        }
+    })) as typeof db.transaction);
+    return () => longest;
+}
 
 describe('pushing the outbox', () => {
     let ledger: TempLedger;
@@ -609,6 +628,58 @@ describe('pushing the outbox', () => {
         expect(vendor.items.size).toBe(0);
         expect(getVendorLink(ledger.db, task.id)).toBeUndefined();
         expect(statuses(task.id)).toEqual(['create:done']);
+    });
+
+    it('gives a task reopened while its create lookup was out a fresh create, and pushes what waited for it', async () => {
+        const task = track();
+        vendor.failNext = new Error('HTTP 502');   // tried (so it carries a marker) before anything was made
+        await push();
+        change(task.id, { phase: 'done' });
+        const findCreated = vendor.findCreated.bind(vendor);
+        jest.spyOn(vendor, 'findCreated').mockImplementationOnce(async (marker, title) => {
+            const found = await findCreated(marker, title);
+            change(task.id, { phase: 'in_progress' });            // another session, while the lookup is out
+            change(task.id, { comment: 'note after reopening' });
+            return found;
+        });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+        await push();
+        skewMs += DEFER_MS + SLACK_MS;                           // what waited for the create comes due
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(vendor.items.get('1')).toMatchObject({ state: 'open', labels: ['ghostpm:in_progress'] });
+        expect(getVendorLink(ledger.db, task.id)?.remote_id).toBe('1');
+        expect(vendor.comments.get('1')!.some(text => text.startsWith('note after reopening'))).toBe(true);
+        expect(outboxRows(ledger.db, task.id).filter(row => row.status !== 'done')).toEqual([]);
+    });
+
+    it('ends the push intent when its row is skipped because sync was switched off', async () => {
+        const task = track();
+        await push();
+        change(task.id, { title: 'B' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new Error('HTTP 502'));
+        await push();
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBe('B');
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+        expect((await push()).skipped).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.intent_title).toBeNull();
+    });
+
+    it('never holds the ledger write lock over vendor text work, even for a 65,536-newline body', async () => {
+        const task = track();
+        await push();
+        vendor.humanEdit('1', { body: `${'\n'.repeat(GITHUB_MAX_BODY)}end\n\n<!-- ghostpm:0123456789abcdef -->` });
+        change(task.id, { title: 'B' });
+        const longestTransaction = timeTransactions(ledger.db);
+        const started = Date.now();
+
+        await push();
+
+        expect(Date.now() - started).toBeLessThan(HOSTILE_PUSH_BOUND_MS);
+        expect(longestTransaction()).toBeLessThan(WRITE_LOCK_BOUND_MS);   // another writer waits at most this long
+        expect(getTask(ledger.db, task.id)!.body).toBe(`${'\n'.repeat(GITHUB_MAX_BODY)}end`);
     });
 
     it('marks the link broken when a comment finds the item gone', async () => {

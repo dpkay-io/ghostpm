@@ -58,7 +58,8 @@ class LeaseLostError extends Error {}
 /** Another runner owns the row now: this runner records nothing for it and never retries it. */
 class ClaimLostError extends Error {}
 
-type Outcome = 'pushed' | 'skipped' | 'deferred' | 'no_item';
+/** `pushed` and `requeued`: the pusher completed the row itself. */
+type Outcome = 'pushed' | 'skipped' | 'requeued' | 'deferred' | 'no_item';
 
 interface Claim {
     db: Ledger;
@@ -140,8 +141,18 @@ async function pushCreate(ctx: PushContext): Promise<Outcome> {
     // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
     let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
     if (item === null && closed) {
-        write(ctx.db, () => dropUnpushed(ctx.db, ctx.task.id));   // its comments can never reach the vendor either
-        return 'skipped';
+        // The task may have reopened while the lookup was out: read it again, with the claim, in one write.
+        const stillClosed = write(ctx.db, () => {
+            held(holdsClaim(ctx.db, ctx.row.id, ctx.deps.holder));
+            const closedNow = CLOSED_PHASES.has(getTask(ctx.db, ctx.task.id)!.phase);
+            if (closedNow) dropUnpushed(ctx.db, ctx.task.id);   // its comments can never reach the vendor either
+            return closedNow;
+        });
+        if (stillClosed) return 'skipped';
+        // Reopened, and nothing landed: this create is stale. Only it ends here; the projection decides, by
+        // policy, what the reopened task needs (a fresh create its waiting comments and state then follow).
+        finish(ctx, () => projectTask(ctx.db, getTask(ctx.db, ctx.task.id)!, 'change', nowIso()));
+        return 'requeued';
     }
     if (item === null) {
         const nonce = earlier.nonce ?? newNonce();
@@ -180,21 +191,24 @@ async function pushSyncState(ctx: PushContext): Promise<Outcome> {
     if (current === null) throw new GoneError(`${formatTaskId(ctx.task.id)}: vendor item ${check.link.remote_id} is gone`);
     // Guarded before the merge is written; nothing awaits between it and the push, so it covers both.
     const adapter = leased(ctx);
-    const pushing = write(ctx.db, () => {
+    const merged = write(ctx.db, () => {
         held(holdsClaim(ctx.db, ctx.row.id, ctx.deps.holder));
         // Re-read: another session, or another runner, may have changed the task or its link while the fetch was out.
         const link = getVendorLink(ctx.db, ctx.task.id);
         if (link === undefined || link.remote_id !== check.link.remote_id) return null;
         applyRemoteItem(ctx.db, adapter, getTask(ctx.db, ctx.task.id)!, link, current);
-        const task = getTask(ctx.db, ctx.task.id)!;
-        const desired = desiredOf(ctx, task);
-        // Write-ahead: if the push lands but its answer is lost, the next read knows the result as ours.
-        recordIntent(ctx.db, link, desired, task.rev);
-        return { link, desired, rev: task.rev };
+        return { link, task: getTask(ctx.db, ctx.task.id)! };
     });
-    if (pushing === null) return 'skipped';
-    const item = await adapter.syncState(linkStateOf(current), pushing.desired);
-    finish(ctx, () => recordOwnPush(ctx.db, pushing.link, item, pushing.desired.title, pushing.rev));
+    if (merged === null) return 'skipped';
+    // Redaction runs on local text outside any transaction: the write lock is never held across text work.
+    const desired = desiredOf(ctx, merged.task);
+    // Write-ahead: if the push lands but its answer is lost, the next read knows the result as ours.
+    write(ctx.db, () => {
+        held(holdsClaim(ctx.db, ctx.row.id, ctx.deps.holder));
+        recordIntent(ctx.db, merged.link, desired, merged.task.rev);
+    });
+    const item = await adapter.syncState(linkStateOf(current), desired);
+    finish(ctx, () => recordOwnPush(ctx.db, merged.link, item, desired.title, merged.task.rev));
     return 'pushed';
 }
 
@@ -240,6 +254,19 @@ const PUSHERS: Record<OutboxOp, (ctx: PushContext) => Promise<Outcome>> = {
     close_duplicate: pushCloseDuplicate,
 };
 
+/** A row that ends without landing leaves no intent behind: a person's later edit to the same state is theirs. */
+function endIntent(db: Ledger, row: OutboxRow): void {
+    if (RECORDS_INTENT.has(row.op)) clearIntent(db, row.task_id);
+}
+
+/** Done with, nothing pushed (off, linked-only, closed, nothing left to push). */
+function completeSkipped(db: Ledger, deps: PushDeps, row: OutboxRow): void {
+    write(db, () => {
+        held(completeRow(db, row.id, deps.holder));
+        endIntent(db, row);
+    });
+}
+
 function onFailure(db: Ledger, deps: PushDeps, row: OutboxRow, workspace: WorkspaceRow, error: unknown, summary: PushSummary): void {
     const message = error instanceof Error ? error.message : String(error);
     appendLog(SYNC_LOG_FILE, `${formatTaskId(row.task_id)} ${row.op}: ${message}`);
@@ -262,21 +289,17 @@ function onFailure(db: Ledger, deps: PushDeps, row: OutboxRow, workspace: Worksp
         summary.broken++;
         return;
     }
-    // A push that ends here without landing leaves no intent behind: a person's later edit to the same state is theirs.
-    const endIntent = (): void => {
-        if (RECORDS_INTENT.has(row.op)) clearIntent(db, row.task_id);
-    };
     if (error instanceof PermanentError) {
         write(db, () => {
             held(failRow(db, row.id, deps.holder, message));
-            endIntent();
+            endIntent(db, row);
         });
         summary.failed++;
         return;
     }
     const status = write(db, () => {
         const next = retryRow(db, row, deps.holder, message, readSetting(db, null, SETTING_MAX_PUSH_ATTEMPTS), deps.now());
-        if (next === STATUS_FAILED) endIntent();
+        if (next === STATUS_FAILED) endIntent(db, row);
         return next;
     });
     if (status === null) throw new ClaimLostError();
@@ -296,7 +319,7 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
     // linked-only (which never creates, spec §8.2), are done with. Released, they would be claimed again at once.
     const policy = readSetting(db, workspace.id, SETTING_SYNC_POLICY);
     if (policy === SYNC_POLICY_OFF || (policy === SYNC_POLICY_LINKED_ONLY && row.op === OP_CREATE)) {
-        held(completeRow(db, row.id, deps.holder));
+        completeSkipped(db, deps, row);
         summary.skipped++;
         return;
     }
@@ -312,8 +335,10 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
     if (outcome === 'pushed') {
         summary.pushed++;
     } else if (outcome === 'skipped') {
-        held(completeRow(db, row.id, deps.holder));
+        completeSkipped(db, deps, row);
         summary.skipped++;
+    } else if (outcome === 'requeued') {
+        summary.skipped++;   // the pusher completed it, handing the task back to the projection
     } else if (outcome === 'deferred') {
         held(deferRow(db, row, deps.holder, deps.now() + DEFER_MS));
         summary.deferred++;

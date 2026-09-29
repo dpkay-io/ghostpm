@@ -1,7 +1,9 @@
 import { CliArg, CliError, Runner, freeText, runCli } from '../cli';
 import { CLOSED_PHASES, Phase, isPhase } from '../ledger/types';
 import { REOPEN_PHASE } from '../ledger/work';
-import { DesiredState, GoneError, LinkState, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf } from './vendor';
+import {
+    DesiredState, GoneError, LinkState, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf, stripMarkers,
+} from './vendor';
 
 const GH = 'gh';
 export const PHASE_LABEL_PREFIX = 'ghostpm:';
@@ -91,7 +93,7 @@ function toItem(issue: GhIssue): RemoteItem {
         remoteId: String(issue.number),
         url: issue.url ?? null,
         title: issue.title,
-        body: issue.body ?? null,
+        body: issue.body === undefined || issue.body === null ? null : stripMarkers(issue.body),
         state: state === CLOSED && reason.length > 0 ? `${state}${REASON_SEPARATOR}${reason}` : state,
         labels: (issue.labels ?? []).map(label => label.name),
         assignee: issue.assignees && issue.assignees.length > 0 ? issue.assignees[0].login : null,
@@ -191,7 +193,7 @@ export class GitHubAdapter implements VendorAdapter {
             return CLOSED_PHASES.has(desired.phase) ? await this.syncState(linkStateOf(item), desired) : item;
         } catch {
             return {
-                remoteId: created[1], url: printed.trim(), title: desired.title, body, state: OPEN,
+                remoteId: created[1], url: printed.trim(), title: desired.title, body: stripMarkers(body), state: OPEN,
                 labels: CLOSED_PHASES.has(desired.phase) ? [] : [phaseLabel(desired.phase)],
                 assignee: null, milestone: null, updatedAt: new Date().toISOString(),
             };
