@@ -30,8 +30,14 @@ const STATE_PHASE: Record<string, Phase> = {
 };
 const FALLBACK_PHASE: Phase = 'planned';
 
+/** The spec §11 state table without its fallback: undefined for a state it does not know. */
+export function knownStatePhase(state: string): Phase | undefined {
+    const key = state.trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(STATE_PHASE, key) ? STATE_PHASE[key] : undefined;
+}
+
 export function vendorStateToPhase(state: string): Phase {
-    return STATE_PHASE[state.trim().toLowerCase()] ?? FALLBACK_PHASE;
+    return knownStatePhase(state) ?? FALLBACK_PHASE;
 }
 
 export function claudeConfigPath(): string {

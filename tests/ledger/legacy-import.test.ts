@@ -10,7 +10,7 @@ import * as registry from '../../src/registry';
 import { getSetting, getWorkspaceSetting, SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 import {
-    importLegacyWorkspace, discoverLegacyRoots, runLegacyImportOnce, vendorStateToPhase,
+    importLegacyWorkspace, discoverLegacyRoots, runLegacyImportOnce, vendorStateToPhase, knownStatePhase,
     LEGACY_CONFIG_FILE, LEGACY_DB_FILE, LEGACY_IMPORT_SETTING,
 } from '../../src/ledger/legacy-import';
 
@@ -76,6 +76,14 @@ describe('legacy import', () => {
 
     it.each(STATE_CASES)('maps vendor state %s to phase %s', (state, phase) => {
         expect(vendorStateToPhase(state)).toBe(phase);
+    });
+
+    it('knows a state or says it does not, without falling back', () => {
+        expect(knownStatePhase(' Active ')).toBe('in_progress');
+        expect(knownStatePhase('To Do')).toBe('planned');
+        expect(knownStatePhase('something else')).toBeUndefined();
+        // Not a property lookup: inherited names are not states.
+        expect(knownStatePhase('constructor')).toBeUndefined();
     });
 
     it('imports tasks, vendor links, comments and metadata', () => {
