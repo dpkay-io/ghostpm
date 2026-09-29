@@ -23,6 +23,9 @@ const UNSAFE_IN_QUOTES = /["%!\r\n]/;
 const ARG_DIR_PREFIX = 'ghostpm-args-';
 const argFile = (index: number): string => `arg${index}.txt`;
 const AT_FILE_PREFIX = '@';
+const ARG_PATH_SPLIT = '=';
+const MAX_ASCII_CODE = 0x7f;
+const hasNonAscii = (text: string): boolean => Array.from(text).some(char => char.charCodeAt(0) > MAX_ASCII_CODE);
 /** A plain (non-free-text) az value that az would read as a file: leading @, or `name=@file` (az splits on = and expands the value). */
 const AT_FILE_VALUE = /^@|=@/;
 const pointerFile = (index: number): string => `arg${index}.ref.txt`;
@@ -105,11 +108,20 @@ interface Invocation {
 }
 
 /**
- * az 2.85 expands `@<file>` twice (azure.cli.core reads the argv value, then knack expands the file's content again when it
- * starts with @; a third level stays literal, verified offline). So each FreeText goes into a UTF-8 file B, argv carries
- * @A and file A holds @B: the text itself is never at the start of an expanded value. `ref(name, dir)` renders a path.
+ * az 2.85 expands `@<file>` in two passes: azure.cli.core reads the argv value as UTF-8, then knack expands the result again
+ * when it starts with @ (text mode, so the ANSI code page unless python runs with -X utf8; a third level stays literal,
+ * verified offline). Free text that does not start with @ is therefore one file, `@B`. Text that does start with @ goes
+ * through a pointer: argv `@A`, file A holds `@B`, so the text is never at the start of an expanded value; on a launcher
+ * without -X utf8 (`utf8Second` false) that second pass would garble non-ASCII, so such text is refused.
+ * `ref(name, dir)` renders a file path.
  */
-function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => string): { tokens: string[]; argDir: string | null } {
+function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => string, utf8Second: boolean): { tokens: string[]; argDir: string | null } {
+    const texts = args.filter((arg): arg is FreeText => typeof arg !== 'string').map(arg => arg.freeText);
+    if (texts.length > 0 && os.tmpdir().includes(ARG_PATH_SPLIT)) {
+        throw refuse(`the temporary folder ${os.tmpdir()} contains "${ARG_PATH_SPLIT}", which az would split an argument file path on`);
+    }
+    const lossy = utf8Second ? undefined : texts.find(text => text.startsWith(AT_FILE_PREFIX) && hasNonAscii(text));
+    if (lossy !== undefined) throw refuse(`refusing to pass ${JSON.stringify(lossy)} through this az launcher: text starting with @ and holding non-ASCII characters would be garbled`);
     let argDir: string | null = null;
     const tokens: string[] = [];
     for (let index = 0; index < args.length; index++) {
@@ -120,6 +132,10 @@ function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => strin
         }
         if (argDir === null) argDir = fs.mkdtempSync(path.join(os.tmpdir(), ARG_DIR_PREFIX));
         fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
+        if (!arg.freeText.startsWith(AT_FILE_PREFIX)) {
+            tokens.push(`${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`);
+            continue;
+        }
         fs.writeFileSync(path.join(argDir, pointerFile(index)), `${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`, 'utf8');
         tokens.push(`${AT_FILE_PREFIX}${ref(pointerFile(index), argDir)}`);
     }
@@ -131,6 +147,7 @@ function atFileInvocation(file: string, prefix: string[], command: string, args:
     const { tokens, argDir } = writeArgFiles(
         AT_FILE_COMMANDS.has(command) ? args : args.map(textOf),
         (name, dir) => path.join(dir, name),
+        true,
     );
     // Without a cwd of its own, a child that inherits it (az's telemetry uploader) must not hold the argument folder.
     return { file, args: [...prefix, ...tokens], verbatim: false, argDir, ...extra };
@@ -140,7 +157,12 @@ function atFileInvocation(file: string, prefix: string[], command: string, args:
 function msiPython(resolved: string): string | undefined {
     const python = path.resolve(path.dirname(resolved), ...MSI_PYTHON_RELATIVE);
     if (!fs.existsSync(python)) return undefined;
-    const script = fs.readFileSync(resolved, 'utf8');
+    let script: string;
+    try {
+        script = fs.readFileSync(resolved, 'utf8');
+    } catch (error) {
+        throw refuse(`cannot read ${resolved}: ${(error as Error).message}`);
+    }
     return MSI_SCRIPT_MARKERS.every(marker => marker.test(script)) ? python : undefined;
 }
 
@@ -157,7 +179,7 @@ function batchInvocation(command: string, resolved: string, args: CliArg[]): Inv
         }
     }
     // Relative to the child's working directory, so no temp path reaches cmd.exe either.
-    const { tokens, argDir } = writeArgFiles(args, name => name);
+    const { tokens, argDir } = writeArgFiles(args, name => name, false);
     return {
         file: process.env.ComSpec || systemTool('cmd.exe'),
         args: [...CMD_SWITCHES, `""${resolved}" ${tokens.join(' ')}"`],

@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import child_process = require('child_process');
+import osModule = require('os');
 import { runCli, freeText, CliError, COMMAND_OVERRIDE_ENV } from '../src/cli';
 import { removeTempDir } from './temp-dir';
 
@@ -9,6 +10,8 @@ const HOSTILE = 'a&b | "q" %PATH% ^ <x> (p)\nsecond line';
 const HOSTILE_FRAGMENTS = ['&b', '"q"', '%PATH%', '^', '<x>', '(p)', 'second line'];
 const NON_ASCII = 'Déjà vu — ✓ 日本 😀';
 const AUTH_EXIT = 4;
+const KNACK_ENCODING_ENV = 'GHOSTPM_TEST_KNACK_ENCODING';
+const ANSI_ENCODING = 'latin1';
 const LINGER_TEST_TIMEOUT_MS = 20000;
 const MSI_AZ_SCRIPT = '@IF EXIST "%~dp0\\..\\python.exe" (\r\n  SET AZ_INSTALLER=MSI\r\n  "%~dp0\\..\\python.exe" -IBm azure.cli %*\r\n)\r\n';
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
@@ -16,9 +19,10 @@ const itOnWindows = process.platform === 'win32' ? it : it.skip;
 /** Prints what it received: argv (expanding @file the way az does) and stdin. */
 const ECHO_SOURCE = `
 const fs = require('fs');
-const expand = arg => arg.startsWith('@') ? fs.readFileSync(arg.slice(1), 'utf8') : arg;
-// az 2.85 expands @file twice (azure.cli.core, then knack on the file content), and no further.
-const args = process.argv.slice(2).map(arg => expand(expand(arg)));
+const expand = (arg, encoding) => arg.startsWith('@') ? fs.readFileSync(arg.slice(1), encoding) : arg;
+// az 2.85 expands @file twice and no further: azure.cli.core reads UTF-8, then knack re-expands a result that starts with @,
+// in text mode (the ANSI code page on a launcher without -X utf8).
+const args = process.argv.slice(2).map(arg => expand(expand(arg, 'utf8'), process.env.${KNACK_ENCODING_ENV} || 'utf8'));
 let stdin = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { stdin += chunk; });
@@ -50,6 +54,7 @@ describe('runCli', () => {
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-cli-'));
         echo = path.join(dir, 'echo.js');
         fs.writeFileSync(echo, ECHO_SOURCE);
+        saved.set(KNACK_ENCODING_ENV, process.env[KNACK_ENCODING_ENV]);
         for (const command of Object.keys(COMMAND_OVERRIDE_ENV)) {
             const name = COMMAND_OVERRIDE_ENV[command]!;
             saved.set(name, process.env[name]);
@@ -99,6 +104,23 @@ describe('runCli', () => {
         expect(result.args).toEqual(['--title', `@${secret}`]);
     });
 
+    it('round-trips non-ASCII free text and a literal @file text for az on an executable-style launcher (UTF-8 knack pass)', async () => {
+        override('az', echo);
+        expect((await echoed('az', ['--title', freeText(NON_ASCII)])).args).toEqual(['--title', NON_ASCII]);
+        const secret = path.join(dir, 'secret-utf8.txt');
+        fs.writeFileSync(secret, 'SECRET CONTENT');
+        expect((await echoed('az', [freeText(`@${secret} ${NON_ASCII}`)])).args).toEqual([`@${secret} ${NON_ASCII}`]);
+    });
+
+    it('refuses to run az free text when the temporary folder path contains "="', async () => {
+        override('az', echo);
+        const oddTemp = path.join(dir, 'tmp=eq');
+        fs.mkdirSync(oddTemp);
+        jest.spyOn(osModule, 'tmpdir').mockReturnValue(oddTemp);
+        const error = await runCli('az', ['--title', freeText('x')]).catch((e: unknown) => e) as CliError;
+        expect(error.refused).toBe(true);
+    });
+
     it('refuses a plain az value that az would read as a file, on every path', async () => {
         override('az', echo);
         for (const plain of ['@notes.txt', 'System.History=@.env']) {
@@ -143,6 +165,21 @@ describe('runCli', () => {
             expect(result.args).toEqual(['boards', 'work-item', 'update', '--id', '42', '--title', HOSTILE]);
             const commandLine = (spawned.mock.calls[0][1] as string[]).join(' ');
             for (const fragment of HOSTILE_FRAGMENTS) expect(commandLine).not.toContain(fragment);
+        });
+
+        itOnWindows('round-trips non-ASCII text and literal @file text although the launcher reads the second pass as ANSI', async () => {
+            process.env[KNACK_ENCODING_ENV] = ANSI_ENCODING;
+            expect((await echoed('az', ['--title', freeText(NON_ASCII)])).args).toEqual(['--title', NON_ASCII]);
+            const secret = path.join(dir, 'secret-ansi.txt');
+            fs.writeFileSync(secret, 'SECRET CONTENT');
+            expect((await echoed('az', [freeText(`@${secret}`)])).args).toEqual([`@${secret}`]);
+        });
+
+        itOnWindows('refuses text that starts with @ and holds non-ASCII characters, which that launcher would garble', async () => {
+            const spawned = jest.spyOn(child_process, 'execFile');
+            const error = await runCli('az', [freeText(`@${NON_ASCII}`)]).catch((e: unknown) => e) as CliError;
+            expect(error.refused).toBe(true);
+            expect(spawned).not.toHaveBeenCalled();
         });
 
         itOnWindows('passes non-ASCII text through the argument file as UTF-8', async () => {
@@ -198,9 +235,7 @@ describe('runCli', () => {
             override('az', msiAz);
             let atFileContent = '';
             const spawned = jest.spyOn(child_process, 'execFile').mockImplementation(((...call: any[]) => {
-                const pointer = fs.readFileSync(call[1].find((a: string) => a.startsWith('@')).slice(1), 'utf8');
-                expect(pointer.startsWith('@')).toBe(true);
-                atFileContent = fs.readFileSync(pointer.slice(1), 'utf8');
+                atFileContent = fs.readFileSync(call[1].find((a: string) => a.startsWith('@')).slice(1), 'utf8');
                 call[call.length - 1](null, 'ok', '');
                 return { stdin: { on: () => undefined, end: () => undefined } };
             }) as any);
@@ -229,6 +264,16 @@ describe('runCli', () => {
             }) as any);
             await runCli('az', ['version']);
             expect(path.basename(spawned.mock.calls[0][0]).toLowerCase()).toBe('cmd.exe');
+        });
+
+        itOnWindows('reports an unreadable az.cmd as a refusal, not a raw fs error', async () => {
+            const wbin = path.join(dir, 'odd', 'wbin');
+            fs.mkdirSync(path.join(wbin, 'az.cmd'), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'odd', 'python.exe'), '');
+            override('az', path.join(wbin, 'az.cmd'));
+            const error = await runCli('az', ['version']).catch((e: unknown) => e) as CliError;
+            expect(error).toBeInstanceOf(CliError);
+            expect(error.refused).toBe(true);
         });
 
         itOnWindows('falls back to cmd.exe when there is no python.exe next to the batch file', async () => {
