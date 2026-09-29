@@ -1,23 +1,32 @@
+import { randomBytes } from 'crypto';
+import { Runner } from '../cli';
 import { Ledger, nowIso, write } from '../ledger/db';
 import { recordEvent } from '../ledger/events';
 import {
-    CloseDuplicatePayload, CommentPayload, OutboxOp, OutboxRow, STATUS_FAILED, hasActiveCreate, projectTask,
+    CloseDuplicatePayload, CommentPayload, OP_CREATE, OutboxOp, OutboxRow, STATUS_FAILED, hasActiveCreate, projectTask,
 } from '../ledger/projection';
-import { readSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_OFF, setSyncPause } from '../ledger/settings';
+import {
+    readSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, setSyncPause,
+} from '../ledger/settings';
 import { getTask, getVendorLink, insertVendorLink } from '../ledger/tasks';
 import { CLOSED_PHASES, NO_VENDOR, SYNC_SOURCE, TaskRow, VendorLinkRow, WorkspaceRow, formatTaskId } from '../ledger/types';
+import { MERGED_PHASE } from '../ledger/work';
 import { getWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { acquireLease } from './lease';
-import { DEFER_MS, claimNext, completeRow, deferRow, failRow, releaseRow, retryRow } from './outbox';
-import { applyRemoteItem, markLinkBroken, recordOwnPush } from './reconcile';
+import { DEFER_MS, claimNext, completeRow, deferRow, failRow, holdsClaim, releaseRow, retryRow, setRowPayload } from './outbox';
+import { applyRemoteItem, markLinkBroken, recordIntent, recordOwnPush } from './reconcile';
 import { redactSecrets } from './redact';
-import { DesiredState, GoneError, PermanentError, SyncPausedError, VendorAdapter, linkStateOf } from './vendor';
+import { DesiredState, GoneError, PermanentError, RemoteItem, SyncPausedError, VendorAdapter, linkStateOf } from './vendor';
+
+/** Wraps the runner an adapter makes its CLI calls through, so every single call is checked first. */
+export type RunGuard = (run: Runner) => Runner;
 
 export interface PushDeps {
     holder: string;
     now(): number;
-    adapterFor(workspace: WorkspaceRow): VendorAdapter;
+    /** Build the adapter on `guard(<its runner>)`: each CLI call then renews the lease and checks the claim before it spawns. */
+    adapterFor(workspace: WorkspaceRow, guard: RunGuard): VendorAdapter;
 }
 
 export interface PushSummary {
@@ -37,6 +46,17 @@ export const emptyPushSummary = (): PushSummary =>
 
 const NOT_SYNCABLE = 'The task or its workspace no longer syncs.';
 const NO_VENDOR_ITEM = 'The task has no vendor item and none is being created.';
+const NONCE_BYTES = 8;
+const MARKER_SEPARATOR = '\n\n';
+
+/** Hidden in a created item's body or a comment: a retry finds it to tell whether its earlier attempt landed. */
+export const idempotencyMarker = (nonce: string): string => `<!-- ghostpm:${nonce} -->`;
+
+/** What a create or comment row carries once first tried: its marker's nonce, and for a create the title that attempt sent. */
+interface Attempted {
+    nonce?: string;
+    title?: string;
+}
 
 /** The lease ran out or another runner took it: stop at once, writing nothing (§8.1: one sync runner). */
 class LeaseLostError extends Error {}
@@ -45,26 +65,42 @@ class ClaimLostError extends Error {}
 
 type Outcome = 'pushed' | 'skipped' | 'deferred' | 'no_item';
 
-interface PushContext {
+interface Claim {
     db: Ledger;
     deps: PushDeps;
-    adapter: VendorAdapter;
     row: OutboxRow;
+}
+
+interface PushContext extends Claim {
+    adapter: VendorAdapter;
     task: TaskRow;
     workspace: WorkspaceRow;
     summary: PushSummary;
 }
 
 const defaultBody = (task: TaskRow): string => `Tracked by GhostPM as ${formatTaskId(task.id)}.`;
+const withMarker = (text: string, nonce: string): string => `${text}${MARKER_SEPARATOR}${idempotencyMarker(nonce)}`;
+const newNonce = (): string => randomBytes(NONCE_BYTES).toString('hex');
 
 /** Post-claim writes answer false once the row is another holder's. */
 function held(landed: boolean): void {
     if (!landed) throw new ClaimLostError();
 }
 
-/** The adapter, after renewing the lease: each vendor call starts with a full TTL ahead of it, longer than the call's timeout. */
+/** Before every vendor call: renew the lease (each call then starts with a full TTL, longer than its timeout) and make sure the row is still ours. */
+function guard(claim: Claim): void {
+    if (!acquireLease(claim.db, claim.deps.holder, claim.deps.now())) throw new LeaseLostError();
+    held(holdsClaim(claim.db, claim.row.id, claim.deps.holder));
+}
+
+const guarded = (claim: Claim): RunGuard => run => async (command, args, options) => {
+    guard(claim);
+    return run(command, args, options);
+};
+
+/** The adapter, once guarded: covers adapters with no CLI runner of their own. */
 function leased(ctx: PushContext): VendorAdapter {
-    if (!acquireLease(ctx.db, ctx.deps.holder, ctx.deps.now())) throw new LeaseLostError();
+    guard(ctx);
     return ctx.adapter;
 }
 
@@ -101,20 +137,31 @@ async function pushCreate(ctx: PushContext): Promise<Outcome> {
     // Never create twice, nor for work already done or dropped (plan Ruling 87): a re-armed create can outlive its task's phase.
     if (getVendorLink(ctx.db, ctx.task.id) !== undefined || CLOSED_PHASES.has(ctx.task.phase)) return 'skipped';
     const desired = desiredOf(ctx, ctx.task);
-    const body = scrub(ctx, ctx.task.body !== null && ctx.task.body.trim().length > 0 ? ctx.task.body : defaultBody(ctx.task));
-    const item = await leased(ctx).create(desired, body);
-    // An adapter whose follow-up read or state move failed answers with the item as first created:
-    // it is linked all the same, and a sync_state moves it the rest of the way.
-    const landed = ctx.adapter.phaseOf(item.state, item.labels, desired.phase) === desired.phase;
+    const earlier = JSON.parse(ctx.row.payload ?? '{}') as Attempted;
+    let sent = earlier.title ?? desired.title;
+    // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
+    let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
+    if (item === null) {
+        const nonce = earlier.nonce ?? newNonce();
+        sent = desired.title;
+        const attempt: Attempted = { nonce, title: sent };
+        held(setRowPayload(ctx.db, ctx.row.id, ctx.deps.holder, attempt));
+        const body = scrub(ctx, ctx.task.body !== null && ctx.task.body.trim().length > 0 ? ctx.task.body : defaultBody(ctx.task));
+        item = await leased(ctx).create(desired, withMarker(body, nonce));
+    }
+    const created = item;
+    // An adapter whose follow-up read or state move failed answers with the item as first created, and an adopted
+    // item shows what its own attempt sent: either is linked all the same, and a sync_state moves it the rest of the way.
+    const landed = sent === desired.title && ctx.adapter.phaseOf(created.state, created.labels, desired.phase) === desired.phase;
     finish(ctx, () => {
         insertVendorLink(ctx.db, {
-            taskId: ctx.task.id, vendor: ctx.workspace.vendor, remoteId: item.remoteId, remoteUrl: item.url,
-            remoteState: item.state, labels: JSON.stringify(item.labels), remoteUpdatedAt: item.updatedAt,
-            remoteTitle: desired.title, lastPushedRev: landed ? ctx.task.rev : null,
+            taskId: ctx.task.id, vendor: ctx.workspace.vendor, remoteId: created.remoteId, remoteUrl: created.url,
+            remoteState: created.state, labels: JSON.stringify(created.labels), remoteUpdatedAt: created.updatedAt,
+            remoteTitle: sent, lastPushedRev: landed ? ctx.task.rev : null,
         });
         recordEvent(ctx.db, {
             taskId: ctx.task.id, kind: 'linked', source: SYNC_SOURCE,
-            payload: { vendor: ctx.workspace.vendor, remoteId: item.remoteId, url: item.url },
+            payload: { vendor: ctx.workspace.vendor, remoteId: created.remoteId, url: created.url },
         });
         if (!landed) projectTask(ctx.db, getTask(ctx.db, ctx.task.id)!, 'change', nowIso());
     });
@@ -129,28 +176,45 @@ async function pushSyncState(ctx: PushContext): Promise<Outcome> {
     // applied here rather than overwritten by this push (spec §8.6).
     const current = await leased(ctx).fetch(check.link.remote_id);
     if (current === null) throw new GoneError(`${formatTaskId(ctx.task.id)}: vendor item ${check.link.remote_id} is gone`);
-    // Renewed before the merge is written; nothing awaits between it and the push, so it covers both.
+    // Guarded before the merge is written; nothing awaits between it and the push, so it covers both.
     const adapter = leased(ctx);
-    const merged = write(ctx.db, () => {
-        // Re-read: another session may have changed the task while the fetch was out.
-        applyRemoteItem(ctx.db, adapter, getTask(ctx.db, ctx.task.id)!, check.link, current);
-        return getTask(ctx.db, ctx.task.id)!;
+    const pushing = write(ctx.db, () => {
+        held(holdsClaim(ctx.db, ctx.row.id, ctx.deps.holder));
+        // Re-read: another session, or another runner, may have changed the task or its link while the fetch was out.
+        const link = getVendorLink(ctx.db, ctx.task.id);
+        if (link === undefined || link.remote_id !== check.link.remote_id) return null;
+        applyRemoteItem(ctx.db, adapter, getTask(ctx.db, ctx.task.id)!, link, current);
+        const task = getTask(ctx.db, ctx.task.id)!;
+        const desired = desiredOf(ctx, task);
+        // Write-ahead: if the push lands but its answer is lost, the next read knows the result as ours.
+        recordIntent(ctx.db, link, desired, task.rev);
+        return { link, desired, rev: task.rev };
     });
-    const desired = desiredOf(ctx, merged);
-    const item = await adapter.syncState(linkStateOf(current), desired);
-    finish(ctx, () => recordOwnPush(ctx.db, check.link, item, desired.title, merged.rev));
+    if (pushing === null) return 'skipped';
+    const item = await adapter.syncState(linkStateOf(current), pushing.desired);
+    finish(ctx, () => recordOwnPush(ctx.db, pushing.link, item, pushing.desired.title, pushing.rev));
     return 'pushed';
 }
 
 async function pushComment(ctx: PushContext): Promise<Outcome> {
     const check = requireLink(ctx);
     if ('outcome' in check) return check.outcome;
-    const payload = JSON.parse(ctx.row.payload ?? '{}') as CommentPayload;
-    const item = await leased(ctx).comment(check.link.remote_id, scrub(ctx, payload.text));
+    const payload = JSON.parse(ctx.row.payload ?? '{}') as CommentPayload & Attempted;
+    // An earlier attempt may have posted it and failed after: never post it twice.
+    const posted = payload.nonce !== undefined
+        && await leased(ctx).hasComment(check.link.remote_id, idempotencyMarker(payload.nonce));
+    let item: RemoteItem | null = null;
+    if (!posted) {
+        const nonce = payload.nonce ?? newNonce();
+        if (payload.nonce === undefined) held(setRowPayload(ctx.db, ctx.row.id, ctx.deps.holder, { ...payload, nonce }));
+        item = await leased(ctx).comment(check.link.remote_id, withMarker(scrub(ctx, payload.text), nonce));
+    }
+    const answer = item;
     finish(ctx, () => {
         // null: posted but not re-read, so there is no baseline to take. Otherwise our comment changes
         // nothing that is compared, so anything else that moved is a person's.
-        if (item !== null) applyRemoteItem(ctx.db, ctx.adapter, getTask(ctx.db, ctx.task.id)!, check.link, item);
+        const link = getVendorLink(ctx.db, ctx.task.id);
+        if (answer !== null && link !== undefined) applyRemoteItem(ctx.db, ctx.adapter, getTask(ctx.db, ctx.task.id)!, link, answer);
     });
     return 'pushed';
 }
@@ -159,8 +223,11 @@ async function pushCloseDuplicate(ctx: PushContext): Promise<Outcome> {
     const check = requireLink(ctx);
     if ('outcome' in check) return check.outcome;
     const payload = JSON.parse(ctx.row.payload ?? '{}') as CloseDuplicatePayload;
-    const item = await leased(ctx).closeDuplicate(check.link.remote_id, payload.of);
-    finish(ctx, () => recordOwnPush(ctx.db, check.link, item, check.link.remote_title ?? item.title, null));
+    const title = check.link.remote_title ?? ctx.task.title;
+    const adapter = leased(ctx);
+    write(ctx.db, () => recordIntent(ctx.db, check.link, { title, phase: MERGED_PHASE }, null));
+    const item = await adapter.closeDuplicate(check.link.remote_id, payload.of);
+    finish(ctx, () => recordOwnPush(ctx.db, check.link, item, title, null));
     return 'pushed';
 }
 
@@ -212,15 +279,18 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
         summary.failed++;
         return;
     }
-    // Ruling: a row queued before its workspace was switched off is done with. Released, it would be claimed again at once.
-    if (readSetting(db, workspace.id, SETTING_SYNC_POLICY) === SYNC_POLICY_OFF) {
+    // Rulings: rows queued before the workspace was switched off, and creates queued before it went
+    // linked-only (which never creates, spec §8.2), are done with. Released, they would be claimed again at once.
+    const policy = readSetting(db, workspace.id, SETTING_SYNC_POLICY);
+    if (policy === SYNC_POLICY_OFF || (policy === SYNC_POLICY_LINKED_ONLY && row.op === OP_CREATE)) {
         held(completeRow(db, row.id, deps.holder));
         summary.skipped++;
         return;
     }
+    const claim: Claim = { db, deps, row };
     let outcome: Outcome;
     try {
-        outcome = await PUSHERS[row.op]({ db, deps, adapter: deps.adapterFor(workspace), row, task, workspace, summary });
+        outcome = await PUSHERS[row.op]({ ...claim, adapter: deps.adapterFor(workspace, guarded(claim)), task, workspace, summary });
     } catch (error) {
         if (error instanceof LeaseLostError || error instanceof ClaimLostError) throw error;
         onFailure(db, deps, row, workspace, error, summary);
@@ -245,9 +315,16 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
  * call, and stopping once it is lost. Never holds a transaction across a vendor call (spec §5).
  */
 export async function pushDue(db: Ledger, deps: PushDeps, summary: PushSummary = emptyPushSummary()): Promise<PushSummary> {
+    const handled = new Set<number>();
     while (acquireLease(db, deps.holder, deps.now())) {
         const row = claimNext(db, deps.holder, deps.now());
         if (row === undefined) break;
+        if (handled.has(row.id)) {
+            // Due again within this run: it waits for the next run instead of looping here.
+            releaseRow(db, row, deps.holder);
+            break;
+        }
+        handled.add(row.id);
         try {
             await pushRow(db, deps, row, summary);
         } catch (error) {

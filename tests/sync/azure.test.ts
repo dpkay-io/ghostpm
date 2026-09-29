@@ -253,6 +253,32 @@ describe('AzureAdapter', () => {
     });
 });
 
+describe('AzureAdapter retry lookups', () => {
+    const marker = '<!-- ghostpm:0123456789abcdef -->';
+
+    it('finds the work item an earlier create made: exact title, created by me, recently, marker in the description', async () => {
+        const listing = JSON.stringify([
+            JSON.parse(workItem({ 'System.Description': 'Same title, someone else' }, 41)),
+            JSON.parse(workItem({ 'System.Description': `Tracked by GhostPM as T1.\n\n${marker}` }, 42)),
+        ]);
+        const az = fakeAz({ 'boards query': listing });
+        expect((await adapter(az.run).findCreated(marker, "Fix 'x'"))?.remoteId).toBe('42');
+        const wiql = (az.calls[0].args[7] as { freeText: string }).freeText;
+        expect(wiql).toContain("[System.TeamProject] = 'Widgets ''Next'''");
+        expect(wiql).toContain("[System.Title] = 'Fix ''x'''");
+        expect(wiql).toContain('[System.CreatedBy] = @Me');
+        expect(wiql).toMatch(/\[System\.CreatedDate\] >= '\d{4}-\d{2}-\d{2}'/);
+        expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', "Fix 'x'")).toBeNull();
+    });
+
+    it("reads the latest System.History for an earlier comment's marker", async () => {
+        const az = fakeAz({ 'boards work-item show': workItem({ 'System.History': `progress<br><br>${marker}` }) });
+        expect(await adapter(az.run).hasComment('42', marker)).toBe(true);
+        expect(await adapter(az.run).hasComment('42', '<!-- ghostpm:ffffffffffffffff -->')).toBe(false);
+        expect(az.calls[0].args.slice(0, 3)).toEqual(['boards', 'work-item', 'show']);
+    });
+});
+
 describe('AzureAdapter call timeout', () => {
     it('bounds every az call by the vendor timeout', async () => {
         const timeouts: (number | undefined)[] = [];

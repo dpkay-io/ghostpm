@@ -5,14 +5,17 @@ import { startSession } from '../../src/ledger/sessions';
 import { trackWork, mergeTask } from '../../src/ledger/work';
 import { listEvents } from '../../src/ledger/events';
 import {
-    getSyncPause, setSetting, setWorkspaceSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_OFF,
+    getSyncPause, setSetting, setWorkspaceSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
+    SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF,
 } from '../../src/ledger/settings';
 import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
+import { CliArg, Runner } from '../../src/cli';
 import { emptyPushSummary, pushDue, PushDeps } from '../../src/sync/push';
-import { claimNext, rearmFailed, releaseStaleClaims, DEFER_MS, PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
-import { acquireLease, LEASE_TTL_MS } from '../../src/sync/lease';
-import { PermanentError, SyncPausedError } from '../../src/sync/vendor';
-import { GH_LOGGED_OUT } from '../../src/sync/github';
+import { recordOwnPush } from '../../src/sync/reconcile';
+import { rearmFailed, releaseStaleClaims, DEFER_MS, PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
+import { acquireLease, releaseLease, LEASE_TTL_MS } from '../../src/sync/lease';
+import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
+import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
 import { FakeVendor } from './fake-vendor';
 
 const SESSION_ID = 'push-session';
@@ -20,6 +23,11 @@ const SOURCE = 'mcp:test';
 const HOLDER = 'pid:push-test';
 const OTHER_HOLDER = 'pid:other-runner';
 const SLACK_MS = 5000;
+const MARKER = /<!-- ghostpm:[0-9a-f]{16} -->$/;
+const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
+/** A column any insert into vendor_links trips over: a local write that fails after the vendor call succeeded. */
+const FAIL_LINK_INSERTS = "CREATE TRIGGER fail_link BEFORE INSERT ON vendor_links BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END";
+const ALLOW_LINK_INSERTS = 'DROP TRIGGER fail_link';
 
 describe('pushing the outbox', () => {
     let ledger: TempLedger;
@@ -63,7 +71,8 @@ describe('pushing the outbox', () => {
     it('creates the vendor item and records the link, baseline and pushed revision', async () => {
         const task = track('Login fix');
         expect((await push()).pushed).toBe(1);
-        expect(vendor.calls).toEqual([{ op: 'create', remoteId: '1', title: 'Login fix', phase: 'planned', body: `Tracked by GhostPM as T${task.id}.` }]);
+        expect(vendor.calls).toEqual([{ op: 'create', remoteId: '1', title: 'Login fix', phase: 'planned', body: expect.stringMatching(MARKER) }]);
+        expect(vendor.calls[0].body!.startsWith(`Tracked by GhostPM as T${task.id}.\n\n`)).toBe(true);
         expect(getVendorLink(ledger.db, task.id)).toMatchObject({
             vendor: 'github', remote_id: '1', remote_title: 'Login fix', remote_state: 'open', labels: '["ghostpm:planned"]',
             last_pushed_rev: 0, remote_updated_at: vendor.items.get('1')!.updatedAt, broken_at: null,
@@ -264,7 +273,7 @@ describe('pushing the outbox', () => {
         expect(outboxRows(ledger.db, task.id).find(row => row.op === 'sync_state')).toMatchObject({ status: 'claimed', claimed_by: HOLDER });
     });
 
-    it('records nothing of a push whose row another runner took over while it was out', async () => {
+    it("never reads a push that landed after another runner took its row over as a person's edit", async () => {
         const task = track('Login fix');
         await push();
         change(task.id, { title: 'First rename' });
@@ -273,16 +282,222 @@ describe('pushing the outbox', () => {
 
         const inFlight = push();
         await settle();
+        change(task.id, { title: 'Second rename' });               // the user, while our push is out
         const later = laterRunnerNow();
-        acquireLease(ledger.db, OTHER_HOLDER, later);
+        acquireLease(ledger.db, OTHER_HOLDER, later);              // our lease ran out: another runner takes over
         releaseStaleClaims(ledger.db, later);
-        expect(claimNext(ledger.db, OTHER_HOLDER, later)).toMatchObject({ task_id: task.id, op: 'sync_state' });
         vendor.hold = null;
         release();
 
-        expect((await inFlight).pushed).toBe(0);
+        expect((await inFlight).pushed).toBe(0);                   // it landed, but the claim is gone: nothing recorded
         expect(vendor.items.get('1')!.title).toBe('First rename');
-        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'Login fix', last_pushed_rev: 0 });
-        expect(outboxRows(ledger.db, task.id).find(row => row.op === 'sync_state')).toMatchObject({ status: 'claimed', claimed_by: OTHER_HOLDER });
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'Login fix', last_pushed_rev: 0, intent_title: 'First rename' });
+
+        await pushDue(ledger.db, { holder: OTHER_HOLDER, now: () => later, adapterFor: () => vendor });
+
+        expect(vendor.items.get('1')!.title).toBe('Second rename');
+        expect(getTask(ledger.db, task.id)!.title).toBe('Second rename');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, SOURCE]);
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'Second rename', intent_title: null });
+    });
+
+    it("recognises its own push that landed although the call failed, and keeps the user's newer rename", async () => {
+        const task = track('A');
+        await push();
+        change(task.id, { title: 'B' });
+        vendor.failAfterApply = new Error('gh timed out after 45000 ms');   // the edit landed; its answer did not
+        expect((await push()).retried).toBe(1);
+        change(task.id, { title: 'C' });                                    // the user renames again before the retry
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(getTask(ledger.db, task.id)!.title).toBe('C');
+        expect(vendor.items.get('1')!.title).toBe('C');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, SOURCE]);
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'C', last_pushed_rev: getTask(ledger.db, task.id)!.rev, intent_title: null });
+    });
+
+    it('writes nothing of a fetch whose row another runner finished while it was out', async () => {
+        const task = track('Login fix');
+        await push();
+        vendor.humanEdit('1', { title: 'Person title' });
+        change(task.id, { phase: 'in_review' });
+        const fetch = vendor.fetch.bind(vendor);
+        let first = true;
+        jest.spyOn(vendor, 'fetch').mockImplementation(async remoteId => {
+            const snapshot = await fetch(remoteId);
+            if (first) {
+                first = false;
+                // Our fetch outlives the lease: another runner pushes the row, exits, and the user renames.
+                const later = laterRunnerNow();
+                acquireLease(ledger.db, OTHER_HOLDER, later);
+                releaseStaleClaims(ledger.db, later);
+                await pushDue(ledger.db, { holder: OTHER_HOLDER, now: () => later, adapterFor: () => vendor });
+                releaseLease(ledger.db, OTHER_HOLDER);
+                change(task.id, { title: 'Local rename' });
+            }
+            return snapshot;
+        });
+
+        await push();
+
+        expect(getTask(ledger.db, task.id)).toMatchObject({ title: 'Local rename', phase: 'in_review' });
+        expect(vendor.items.get('1')).toMatchObject({ title: 'Local rename', labels: ['ghostpm:in_review'] });
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual(['vendor', SOURCE]);
+        // One push by the other runner, one for the user's rename: none for the row we no longer held.
+        expect(vendor.calls.filter(call => call.op === 'syncState')).toHaveLength(2);
+    });
+
+    it('never lets an older answer replace a newer baseline', async () => {
+        const task = track();
+        await push();
+        const link = getVendorLink(ledger.db, task.id)!;
+        const older = { ...vendor.items.get('1')!, title: 'Stale', updatedAt: new Date(Date.parse(link.remote_updated_at!) - SLACK_MS).toISOString() };
+        recordOwnPush(ledger.db, link, older, 'Stale', link.last_pushed_rev);
+        expect(getVendorLink(ledger.db, task.id)).toEqual(link);
+    });
+
+    it('checks the lease before every CLI call an adapter makes, not once per adapter method', async () => {
+        const task = track();
+        const next = track('Waits for the next runner');
+        const repo = `acme/guarded-${Date.now()}`;
+        const spawned: string[] = [];
+        const gh: Runner = async (_command: string, args: CliArg[]) => {
+            const words = args.slice(0, 2).map(arg => (typeof arg === 'string' ? arg : arg.freeText)).join(' ');
+            spawned.push(words);
+            if (words !== 'issue create') return '';
+            acquireLease(ledger.db, OTHER_HOLDER, laterRunnerNow());   // a slow call outlived the lease
+            return `https://github.com/${repo}/issues/12\n`;
+        };
+        deps.adapterFor = (_workspace, guard) => new GitHubAdapter(repo, guard(gh));
+
+        await push();
+
+        expect(spawned).toEqual(['label create', 'issue create']);    // the follow-up read never started
+        expect(getVendorLink(ledger.db, task.id)?.remote_id).toBe('12');   // and the created issue is not lost
+        expect(outboxRows(ledger.db, next.id)).toMatchObject([{ op: 'create', status: 'pending' }]);
+    });
+
+    it('adopts the item a create made before it failed, instead of making a second one', async () => {
+        const task = track('Login fix');
+        vendor.failAfterApply = new Error('gh timed out after 45000 ms');
+        expect((await push()).retried).toBe(1);
+        change(task.id, { title: 'Renamed before the retry' });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(vendor.calls.map(call => call.op)).toEqual(['create', 'findCreated', 'fetch', 'syncState']);
+        expect(vendor.items.get('1')!.title).toBe('Renamed before the retry');
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_id: '1', remote_title: 'Renamed before the retry' });
+        expect(statuses(task.id)).toEqual(['create:done', 'sync_state:done']);
+    });
+
+    it('adopts the item on retry when the local write failed after a successful create', async () => {
+        const task = track();
+        ledger.db.exec(FAIL_LINK_INSERTS);
+        expect((await push()).retried).toBe(1);
+        ledger.db.exec(ALLOW_LINK_INSERTS);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        expect((await push()).pushed).toBe(1);
+
+        expect(vendor.items.size).toBe(1);
+        expect(vendor.calls.map(call => call.op)).toEqual(['create', 'findCreated']);
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_id: '1', last_pushed_rev: 0 });
+    });
+
+    it('never posts a comment twice when the first attempt landed but failed', async () => {
+        const task = track();
+        await push();
+        change(task.id, { comment: 'progress' });
+        vendor.failAfterApply = new Error('HTTP 502');
+        expect((await push()).retried).toBe(1);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        expect((await push()).pushed).toBe(1);
+
+        expect(vendor.comments.get('1')).toHaveLength(1);
+        expect(vendor.comments.get('1')![0]).toMatch(/^progress\n\n<!-- ghostpm:[0-9a-f]{16} -->$/);
+        expect(statuses(task.id)).toEqual(['create:done', 'comment:done']);
+    });
+
+    it('completes, never pushes, a create left from before the workspace went linked-only', async () => {
+        const task = track();
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+        expect(await push()).toMatchObject({ pushed: 0, skipped: 1 });
+        expect(vendor.calls).toEqual([]);
+        expect(statuses(task.id)).toEqual(['create:done']);
+    });
+
+    it('redacts secrets in a comment and in the created body', async () => {
+        const task = track();
+        ledger.db.prepare('UPDATE tasks SET body = ? WHERE id = ?').run(`Deploy with ${GITHUB_TOKEN}`, task.id);
+        await push();
+        change(task.id, { comment: `password=${GITHUB_TOKEN}` });
+        const summary = await push();
+
+        expect(summary.redacted).toBe(1);
+        expect(vendor.items.get('1')!.body).toMatch(/^Deploy with \[redacted\]\n\n<!-- ghostpm:/);
+        expect(vendor.comments.get('1')![0]).toMatch(/^password=\[redacted\]\n\n<!-- ghostpm:/);
+        expect(JSON.stringify(vendor.calls)).not.toContain(GITHUB_TOKEN);
+    });
+
+    it('pushes what the task is when the push goes out, though it changed during the pre-push read', async () => {
+        const task = track('Login fix');
+        await push();
+        change(task.id, { title: 'First' });
+        const fetch = vendor.fetch.bind(vendor);
+        jest.spyOn(vendor, 'fetch').mockImplementationOnce(async remoteId => {
+            const snapshot = await fetch(remoteId);
+            change(task.id, { title: 'Changed during the read' });
+            return snapshot;
+        });
+
+        await push();
+
+        expect(vendor.items.get('1')!.title).toBe('Changed during the read');
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'Changed during the read', last_pushed_rev: getTask(ledger.db, task.id)!.rev });
+        expect(vendor.calls.filter(call => call.op === 'syncState')).toHaveLength(1);
+    });
+
+    it('pauses the workspace when syncState finds the CLI logged out, keeping the row and its attempts', async () => {
+        const task = track();
+        await push();
+        change(task.id, { title: 'Renamed' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new SyncPausedError(GH_LOGGED_OUT));
+        expect((await push()).paused).toEqual([`${workspace.path}: ${GH_LOGGED_OUT}`]);
+        expect(outboxRows(ledger.db, task.id)[1]).toMatchObject({ op: 'sync_state', status: 'pending', attempts: 0 });
+    });
+
+    it('marks the link broken when syncState finds the item gone', async () => {
+        const task = track();
+        await push();
+        change(task.id, { title: 'Renamed' });
+        jest.spyOn(vendor, 'syncState').mockRejectedValueOnce(new GoneError('Issue #1 is no longer in acme/widgets'));
+        expect((await push()).broken).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.broken_at).not.toBeNull();
+        expect(statuses(task.id)).toEqual(['create:done', 'sync_state:done']);
+    });
+
+    it('pauses the workspace when a comment finds the CLI logged out, keeping the row and its attempts', async () => {
+        const task = track();
+        await push();
+        change(task.id, { comment: 'progress' });
+        vendor.failNext = new SyncPausedError(GH_LOGGED_OUT);
+        expect((await push()).paused).toEqual([`${workspace.path}: ${GH_LOGGED_OUT}`]);
+        expect(outboxRows(ledger.db, task.id)[1]).toMatchObject({ op: 'comment', status: 'pending', attempts: 0 });
+    });
+
+    it('marks the link broken when a comment finds the item gone', async () => {
+        const task = track();
+        await push();
+        change(task.id, { comment: 'progress' });
+        vendor.items.delete('1');
+        expect((await push()).broken).toBe(1);
+        expect(getVendorLink(ledger.db, task.id)!.broken_at).not.toBeNull();
+        expect(statuses(task.id)).toEqual(['create:done', 'comment:done']);
     });
 });

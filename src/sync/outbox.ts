@@ -72,6 +72,17 @@ export function releaseStaleClaims(db: Ledger, now: number): number {
     });
 }
 
+/** Whether `holder` still owns the claim on row `id`. */
+export function holdsClaim(db: Ledger, id: number, holder: string): boolean {
+    return db.prepare(`SELECT 1 FROM outbox WHERE id = ? AND ${HELD}`).get(id, STATUS_CLAIMED, holder) !== undefined;
+}
+
+/** Stores what a retry of this row must know (an idempotency marker); false when the claim is no longer `holder`'s. */
+export function setRowPayload(db: Ledger, id: number, holder: string, payload: unknown): boolean {
+    return db.prepare(`UPDATE outbox SET payload = ? WHERE id = ? AND ${HELD}`)
+        .run(JSON.stringify(payload), id, STATUS_CLAIMED, holder).changes === 1;
+}
+
 export function completeRow(db: Ledger, id: number, holder: string): boolean {
     return db.prepare(`UPDATE outbox SET status = ?, error = NULL WHERE id = ? AND ${HELD}`)
         .run(STATUS_DONE, id, STATUS_CLAIMED, holder).changes === 1;

@@ -8,6 +8,9 @@ export const PHASE_LABEL_PREFIX = 'ghostpm:';
 const ISSUE_FIELDS = 'number,title,body,state,stateReason,labels,assignees,milestone,updatedAt,url';
 const PR_FIELDS = 'state,mergedAt';
 const REPO_FIELDS = 'nameWithOwner';
+const COMMENT_FIELDS = 'comments';
+/** How many of the newest issues a retried create looks through for the one its earlier attempt made. */
+const ADOPT_SCAN_LIMIT = 30;
 const JSON_FLAG = '--json';
 const REPO_FLAG = '--repo';
 const STDIN_FILE = '-';
@@ -225,6 +228,18 @@ export class GitHubAdapter implements VendorAdapter {
     async closeDuplicate(remoteId: string, ofRemoteId: string): Promise<RemoteItem> {
         await this.gh(['issue', 'close', remoteId, ...this.repoArgs(), '--reason', DUPLICATE, '--duplicate-of', ofRemoteId], undefined, true);
         return this.mustFetch(remoteId);
+    }
+
+    /** A plain listing, newest first (no search: its index lags behind a create that just happened). */
+    async findCreated(marker: string, _title: string): Promise<RemoteItem | null> {
+        const output = await this.gh(['issue', 'list', ...this.repoArgs(), '--state', 'all', '--limit', String(ADOPT_SCAN_LIMIT), JSON_FLAG, ISSUE_FIELDS]);
+        const found = (JSON.parse(output || '[]') as GhIssue[]).find(issue => (issue.body ?? '').indexOf(marker) >= 0);
+        return found === undefined ? null : toItem(found);
+    }
+
+    async hasComment(remoteId: string, marker: string): Promise<boolean> {
+        const output = await this.gh(['issue', 'view', remoteId, ...this.repoArgs(), JSON_FLAG, COMMENT_FIELDS], undefined, true);
+        return ((JSON.parse(output) as { comments?: { body: string }[] }).comments ?? []).some(comment => comment.body.indexOf(marker) >= 0);
     }
 
     async listChangedSince(since: string, limit: number): Promise<RemoteItem[]> {

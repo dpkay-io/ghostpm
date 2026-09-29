@@ -88,4 +88,8 @@ export interface VendorLinkRow {
     remote_title: string | null;
     /** Set when the vendor item was deleted or moved away; the task stays local (spec §8.5). */
     broken_at: string | null;
+    /** The push in flight, written just before the vendor call: a newer vendor item matching it is ours, not a person's edit. */
+    intent_title: string | null;
+    intent_phase: Phase | null;
+    intent_rev: number | null;
 }

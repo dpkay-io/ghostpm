@@ -1,4 +1,4 @@
-import { execFile, execFileSync, ExecFileException } from 'child_process';
+import { ChildProcess, execFile, execFileSync, ExecFileException } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -14,6 +14,8 @@ const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
 /** Windows tools are run by absolute path from System32: a copy planted in the working folder must never win. */
 const systemTool = (name: string): string => path.join(process.env.SystemRoot || DEFAULT_SYSTEM_ROOT, ...SYSTEM32_SEGMENTS, name);
 const systemDir = (): string => path.dirname(systemTool('where.exe'));
+/** taskkill: the process tree (/T), forcibly (/F); the pid follows. */
+const TASKKILL_TREE = ['/T', '/F', '/PID'];
 /** No AutoRun, no delayed expansion, strip the outer quotes, run. */
 const CMD_SWITCHES = ['/d', '/v:off', '/s', '/c'];
 /** What cmd.exe passes through untouched: no quotes, metacharacters, whitespace or leading @. */
@@ -217,9 +219,26 @@ function plan(command: string, args: CliArg[]): Invocation {
     return atFileInvocation(resolved, [], command, args);
 }
 
-function toCliError(command: string, error: ExecFileException, stderr: string, timeoutMs: number | undefined): CliError {
-    // Only execFile's own kill sets `killed`, and with no AbortSignal passed that kill is the timeout.
-    if (error.killed === true) return new CliError(`${command} timed out after ${timeoutMs} ms`, null, stderr, false, false, true);
+/** Ends the child and stops waiting on pipes a grandchild of it may still hold. */
+function abandon(child: ChildProcess): void {
+    child.kill();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+}
+
+/** On Windows the whole tree: killing cmd.exe alone leaves az.cmd's python running, free to finish a create after the retry. */
+function killTree(child: ChildProcess): void {
+    if (child.exitCode !== null || child.pid === undefined) return;
+    if (!IS_WINDOWS) {
+        abandon(child);
+        return;
+    }
+    execFile(systemTool('taskkill.exe'), [...TASKKILL_TREE, String(child.pid)], { windowsHide: true, cwd: systemDir() }, error => {
+        if (error) abandon(child);
+    });
+}
+
+function toCliError(command: string, error: ExecFileException, stderr: string): CliError {
     const exitCode = typeof error.code === 'number' ? error.code : null;
     const notFound = error.code === NOT_FOUND_CODE || NOT_FOUND_TEXT.test(stderr);
     const detail = stderr.trim().split(LINE_BREAK)[0] || error.message;
@@ -236,6 +255,8 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         return;
     }
     const argDir = invocation.argDir;
+    let timedOut = false;
+    let timer: NodeJS.Timeout | undefined;
     const child = execFile(invocation.file, invocation.args, {
         encoding: 'utf8',
         maxBuffer: MAX_BUFFER,
@@ -243,13 +264,20 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
         windowsVerbatimArguments: invocation.verbatim,
         cwd: invocation.cwd,
         env: invocation.env,
-        timeout: options.timeoutMs,
     }, (error, stdout, stderr) => {
+        if (timer !== undefined) clearTimeout(timer);
         // Best effort: a process that inherited the folder as its cwd can keep it busy on Windows.
         if (argDir !== null) try { fs.rmSync(argDir, { recursive: true, force: true }); } catch { /* left behind */ }
-        if (error) reject(toCliError(command, error, String(stderr), options.timeoutMs));
+        if (error && timedOut) reject(new CliError(`${command} timed out after ${options.timeoutMs} ms`, null, String(stderr), false, false, true));
+        else if (error) reject(toCliError(command, error, String(stderr)));
         else resolve(String(stdout).trim());
     });
+    if (options.timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+            timedOut = true;
+            killTree(child);
+        }, options.timeoutMs);
+    }
     // A child that never started closes its pipe; the callback above reports why.
     child.stdin?.on('error', () => undefined);
     child.stdin?.end(options.input ?? '');

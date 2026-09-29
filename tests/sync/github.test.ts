@@ -303,6 +303,30 @@ describe('GitHubAdapter auth pause', () => {
     });
 });
 
+describe('GitHubAdapter retry lookups', () => {
+    const marker = '<!-- ghostpm:0123456789abcdef -->';
+    const withBody = (repo: string, number: number, body: string): unknown => ({ ...JSON.parse(issueJson(repo, { number })), body });
+
+    it('finds the issue an earlier create made by its marker, in a plain listing without search', async () => {
+        const repo = freshRepo();
+        const listing = JSON.stringify([withBody(repo, 13, 'Someone else'), withBody(repo, 12, `Tracked by GhostPM as T1.\n\n${marker}`)]);
+        const gh = fakeGh({ 'issue list': listing });
+        const adapter = new GitHubAdapter(repo, gh.run);
+        expect((await adapter.findCreated(marker, 'Login fix'))?.remoteId).toBe('12');
+        expect(gh.calls[0].args).toEqual(['issue', 'list', '--repo', freeText(repo), '--state', 'all', '--limit', '30', '--json', ISSUE_FIELDS]);
+        expect(await adapter.findCreated('<!-- ghostpm:ffffffffffffffff -->', 'Login fix')).toBeNull();
+    });
+
+    it('tells whether an earlier comment carrying the marker is on the issue', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': JSON.stringify({ comments: [{ body: 'first' }, { body: `progress\n\n${marker}` }] }) });
+        const adapter = new GitHubAdapter(repo, gh.run);
+        expect(await adapter.hasComment('12', marker)).toBe(true);
+        expect(await adapter.hasComment('12', '<!-- ghostpm:ffffffffffffffff -->')).toBe(false);
+        expect(gh.calls[0].args).toEqual(['issue', 'view', '12', '--repo', freeText(repo), '--json', 'comments']);
+    });
+});
+
 describe('GitHubAdapter call timeout', () => {
     it('bounds every gh call by the vendor timeout, which ends inside the sync lease', async () => {
         const timeouts: (number | undefined)[] = [];

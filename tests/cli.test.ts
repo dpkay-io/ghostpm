@@ -17,6 +17,23 @@ const LINGER_TEST_TIMEOUT_MS = 20000;
 const TIMEOUT_MS = 300;
 /** Longer than jest's own test timeout: a child that is not killed fails the test. */
 const HANG_MS = 30000;
+/** Long enough for cmd.exe to start node, which records its pid before hanging. */
+const BATCH_TIMEOUT_MS = 3000;
+const POLL_MS = 50;
+const isAlive = (pid: number): boolean => {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+};
+const diesWithin = async (pid: number, ms: number): Promise<boolean> => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise(resolve => setTimeout(resolve, POLL_MS))) {
+        if (!isAlive(pid)) return true;
+    }
+    return !isAlive(pid);
+};
 const MSI_AZ_SCRIPT = '@IF EXIST "%~dp0\\..\\python.exe" (\r\n  SET AZ_INSTALLER=MSI\r\n  "%~dp0\\..\\python.exe" -IBm azure.cli %*\r\n)\r\n';
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
@@ -251,6 +268,18 @@ describe('runCli', () => {
             await new Promise(resolve => setTimeout(resolve, lingerMs * 2));
             removeTempDir(argDir);
             expect(fs.existsSync(argDir)).toBe(false);
+        }, LINGER_TEST_TIMEOUT_MS);
+
+        itOnWindows("kills the whole tree on a timeout, so az.cmd's child cannot finish its work later", async () => {
+            const pidFile = path.join(dir, 'child-pid.txt');
+            const child = path.join(dir, 'hang-child.js');
+            fs.writeFileSync(child, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, ${HANG_MS});`);
+            const hangAz = path.join(dir, 'hang-az.cmd');
+            fs.writeFileSync(hangAz, `@"${process.execPath}" "${child}" %*\r\n`);
+            override('az', hangAz);
+            const error = await runCli('az', ['version'], { timeoutMs: BATCH_TIMEOUT_MS }).catch((e: unknown) => e) as CliError;
+            expect(error.timedOut).toBe(true);
+            expect(await diesWithin(Number(fs.readFileSync(pidFile, 'utf8')), BATCH_TIMEOUT_MS)).toBe(true);
         }, LINGER_TEST_TIMEOUT_MS);
 
         itOnWindows('runs an override given as a relative path by its absolute path', async () => {

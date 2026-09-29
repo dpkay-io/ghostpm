@@ -145,7 +145,8 @@ describe('ledger db', () => {
             expect(db.prepare('SELECT title FROM tasks ORDER BY id').all()).toEqual([{ title: 'Kept' }, { title: 'Also kept' }]);
             // v1 never enforced one pending sync_state per task: the newest survives.
             expect(db.prepare('SELECT id, next_attempt_at FROM outbox').all()).toEqual([{ id: 2, next_attempt_at: EPOCH }]);
-            expect(db.prepare('SELECT remote_title, broken_at FROM vendor_links').get()).toEqual({ remote_title: null, broken_at: null });
+            expect(db.prepare('SELECT remote_title, broken_at, intent_title, intent_phase, intent_rev FROM vendor_links').get())
+                .toEqual({ remote_title: null, broken_at: null, intent_title: null, intent_phase: null, intent_rev: null });
             // The older connection finishes what it was reading.
             expect(Array.from(reading)).toEqual([{ id: 2 }]);
         } finally {

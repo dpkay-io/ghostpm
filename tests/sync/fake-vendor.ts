@@ -27,8 +27,12 @@ export class FakeVendor implements VendorAdapter {
     /** PR url → merge time. */
     readonly prs = new Map<string, string>();
     user = 'octocat';
+    /** Comments posted, per item. */
+    readonly comments = new Map<string, string[]>();
     /** Thrown by the next vendor call, then cleared. */
     failNext: Error | null = null;
+    /** Thrown by the next write (create, syncState, comment, closeDuplicate) after it took effect, then cleared: the answer lost, the change made. */
+    failAfterApply: Error | null = null;
     /** While set, syncState waits on it: lets a test act while a push is out. */
     hold: Promise<void> | null = null;
     /** Compare titles the way the Azure DevOps adapter does. */
@@ -46,6 +50,14 @@ export class FakeVendor implements VendorAdapter {
         const failure = this.failNext;
         this.failNext = null;
         if (failure !== null) throw failure;
+    }
+
+    /** The write's answer, unless it is the one set to be lost. */
+    private answer<T>(result: T): T {
+        const failure = this.failAfterApply;
+        this.failAfterApply = null;
+        if (failure !== null) throw failure;
+        return result;
     }
 
     private item(remoteId: string): RemoteItem {
@@ -83,7 +95,7 @@ export class FakeVendor implements VendorAdapter {
         const item = this.seed({ title: desired.title, body });
         this.apply(this.item(item.remoteId), desired);
         this.calls.push({ op: 'create', remoteId: item.remoteId, title: desired.title, phase: desired.phase, body });
-        return copy(this.item(item.remoteId));
+        return this.answer(copy(this.item(item.remoteId)));
     }
 
     async syncState(link: LinkState, desired: DesiredState): Promise<RemoteItem> {
@@ -92,15 +104,16 @@ export class FakeVendor implements VendorAdapter {
         const item = this.item(link.remoteId);
         this.apply(item, desired);
         this.calls.push({ op: 'syncState', remoteId: link.remoteId, title: desired.title, phase: desired.phase });
-        return copy(item);
+        return this.answer(copy(item));
     }
 
     async comment(remoteId: string, text: string): Promise<RemoteItem | null> {
         this.guard();
         const item = this.item(remoteId);
         item.updatedAt = this.tick();
+        this.comments.set(remoteId, (this.comments.get(remoteId) ?? []).concat(text));
         this.calls.push({ op: 'comment', remoteId, text });
-        return copy(item);
+        return this.answer(copy(item));
     }
 
     async closeDuplicate(remoteId: string, ofRemoteId: string): Promise<RemoteItem> {
@@ -109,7 +122,20 @@ export class FakeVendor implements VendorAdapter {
         item.state = DUPLICATE_STATE;
         item.updatedAt = this.tick();
         this.calls.push({ op: 'closeDuplicate', remoteId, text: ofRemoteId });
-        return copy(item);
+        return this.answer(copy(item));
+    }
+
+    async findCreated(marker: string, title: string): Promise<RemoteItem | null> {
+        this.guard();
+        this.calls.push({ op: 'findCreated', title, text: marker });
+        const found = Array.from(this.items.values()).find(item => (item.body ?? '').indexOf(marker) >= 0);
+        return found === undefined ? null : copy(found);
+    }
+
+    async hasComment(remoteId: string, marker: string): Promise<boolean> {
+        this.guard();
+        this.calls.push({ op: 'hasComment', remoteId, text: marker });
+        return (this.comments.get(remoteId) ?? []).some(text => text.indexOf(marker) >= 0);
     }
 
     async listChangedSince(since: string, limit: number): Promise<RemoteItem[]> {

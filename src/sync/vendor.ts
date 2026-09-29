@@ -39,6 +39,13 @@ export interface VendorAdapter {
     listChangedSince(since: string, limit: number): Promise<RemoteItem[]>;
     /** null when the item was deleted or moved out of this repository or project. */
     fetch(remoteId: string): Promise<RemoteItem | null>;
+    /**
+     * The item an earlier attempt created, found by `marker` in its body among recent items; null if none.
+     * `title` is the title that attempt sent (Azure DevOps narrows by it).
+     */
+    findCreated(marker: string, title: string): Promise<RemoteItem | null>;
+    /** Whether an earlier attempt's comment carrying `marker` is on the item. */
+    hasComment(remoteId: string, marker: string): Promise<boolean>;
     /** When the pull request merged; null if it has not, or if it is not this repository's. */
     mergedAt(prUrl: string): Promise<string | null>;
     currentUser(): Promise<string>;

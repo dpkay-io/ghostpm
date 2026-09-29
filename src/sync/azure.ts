@@ -12,8 +12,13 @@ const ORG_FLAG = '--org';
 const FIELD = {
     id: 'System.Id', title: 'System.Title', state: 'System.State', assignedTo: 'System.AssignedTo',
     changed: 'System.ChangedDate', tags: 'System.Tags', iteration: 'System.IterationPath',
-    description: 'System.Description', project: 'System.TeamProject',
+    description: 'System.Description', project: 'System.TeamProject', history: 'System.History',
+    createdBy: 'System.CreatedBy', createdDate: 'System.CreatedDate',
 };
+/** WIQL's macro for the signed-in user. */
+const ME_MACRO = '@Me';
+/** How far back a retried create looks for the work item its earlier attempt made. */
+const ADOPT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const QUERY_FIELDS = [FIELD.id, FIELD.title, FIELD.state, FIELD.assignedTo, FIELD.changed, FIELD.tags, FIELD.iteration, FIELD.description, FIELD.project];
 /** WIQL compares dates, not times, unless the REST call asks for time precision, which az cannot. */
 const WIQL_DATE_LENGTH = 10;
@@ -37,6 +42,10 @@ const ASCII_LIMIT = 0x80;
 const TRAILING_LINE_BREAKS = /[\r\n]+$/;
 const REPLACEMENT_CHAR = '�';
 const TIMED: RunOptions = { timeoutMs: VENDOR_CALL_TIMEOUT_MS };
+
+const wiqlText = (text: string): string => `'${text.replace(WIQL_QUOTE, WIQL_ESCAPED_QUOTE)}'`;
+/** A WIQL date bound at or before `ms`, whatever time zone WIQL reads it in. */
+const wiqlDateFrom = (ms: number): string => wiqlText(new Date(ms - WIQL_LOOKBACK_MS).toISOString().slice(0, WIQL_DATE_LENGTH));
 
 export const AZ_MISSING = 'Azure CLI (az) was not found. Install it, or set GHOSTPM_AZ to its path, then run `ghostpm sync`.';
 export const AZ_LOGGED_OUT = 'Azure CLI is not logged in to Azure DevOps. Run `az login` (or `az devops login`), then `ghostpm sync`.';
@@ -181,22 +190,47 @@ export class AzureAdapter implements VendorAdapter {
         return this.update(remoteId, ['--state', freeText(state), '--discussion', freeText(`Duplicate of #${ofRemoteId}`)]);
     }
 
-    /** Every match, whatever `_limit` says: WIQL has no row limit and `az boards query` has no --top (az 2.85 help). */
-    async listChangedSince(since: string, _limit: number): Promise<RemoteItem[]> {
-        const project = this.project.replace(WIQL_QUOTE, WIQL_ESCAPED_QUOTE);
+    /** This project's work items matching every condition. */
+    private async query(conditions: string[], orderBy: string): Promise<AzWorkItem[]> {
         const wiql = `SELECT ${QUERY_FIELDS.map(field => `[${field}]`).join(', ')} FROM workitems`
-            + ` WHERE [${FIELD.project}] = '${project}' AND [${FIELD.changed}] >= '${new Date(Date.parse(since) - WIQL_LOOKBACK_MS).toISOString().slice(0, WIQL_DATE_LENGTH)}'`
-            + ` ORDER BY [${FIELD.changed}] ASC`;
+            + ` WHERE ${[`[${FIELD.project}] = ${wiqlText(this.project)}`, ...conditions].join(' AND ')}`
+            + ` ORDER BY ${orderBy}`;
         const result = await this.az<AzWorkItem[] | { items?: AzWorkItem[] }>([
             'boards', 'query', ...this.orgArgs(), '--project', freeText(this.project), '--wiql', freeText(wiql),
         ]);
-        return (Array.isArray(result) ? result : result.items ?? []).map(item => this.toItem(item));
+        return Array.isArray(result) ? result : result.items ?? [];
+    }
+
+    private show(remoteId: string): Promise<AzWorkItem> {
+        return this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
+    }
+
+    /** Every match, whatever `_limit` says: WIQL has no row limit and `az boards query` has no --top (az 2.85 help). */
+    async listChangedSince(since: string, _limit: number): Promise<RemoteItem[]> {
+        const items = await this.query([`[${FIELD.changed}] >= ${wiqlDateFrom(Date.parse(since))}`], `[${FIELD.changed}] ASC`);
+        return items.map(item => this.toItem(item));
+    }
+
+    /** Narrowed by exact title, creator and creation date, then confirmed by the marker in the description. */
+    async findCreated(marker: string, title: string): Promise<RemoteItem | null> {
+        const items = await this.query([
+            `[${FIELD.title}] = ${wiqlText(title)}`,
+            `[${FIELD.createdBy}] = ${ME_MACRO}`,
+            `[${FIELD.createdDate}] >= ${wiqlDateFrom(Date.now() - ADOPT_LOOKBACK_MS)}`,
+        ], `[${FIELD.createdDate}] DESC`);
+        const found = items.find(item => String(item.fields?.[FIELD.description] ?? '').indexOf(marker) >= 0);
+        return found === undefined ? null : this.toItem(found);
+    }
+
+    /** The latest System.History entry: a comment posted since hides an earlier one (a rare duplicate, never a loss). */
+    async hasComment(remoteId: string, marker: string): Promise<boolean> {
+        return String((await this.show(remoteId)).fields?.[FIELD.history] ?? '').indexOf(marker) >= 0;
     }
 
     async fetch(remoteId: string): Promise<RemoteItem | null> {
         let raw: AzWorkItem;
         try {
-            raw = await this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
+            raw = await this.show(remoteId);
         } catch (error) {
             if (error instanceof GoneError) return null;
             throw error;
