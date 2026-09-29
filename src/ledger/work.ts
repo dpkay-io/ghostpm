@@ -17,6 +17,7 @@ const PLAN_PHASE: Phase = 'planned';
 const WORK_PHASE: Phase = 'in_progress';
 const REVIEW_PHASE: Phase = 'in_review';
 const PARENT_SEGMENT = '..';
+const OUTSIDE_PREFIX = PARENT_SEGMENT + path.sep;
 
 /**
  * Spec §7.3: evidence moves a phase forward only, never out of done/dropped, and never on
@@ -143,17 +144,21 @@ export interface EvidenceInput {
     prUrls: string[];
 }
 
-function isPlanFile(root: string, cwd: string, file: string, globs: readonly string[]): boolean {
+/** The path relative to the workspace root, or null when the file lives outside it. */
+function relativeToRoot(root: string, cwd: string, file: string): string | null {
     const relative = path.relative(root, path.resolve(cwd, file));
-    if (relative.startsWith(PARENT_SEGMENT) || path.isAbsolute(relative)) return false;
-    return matchesAnyGlob(relative, globs);
+    const outside = relative === PARENT_SEGMENT || relative.startsWith(OUTSIDE_PREFIX) || path.isAbsolute(relative);
+    return outside ? null : relative;
 }
 
-/** Spec §7.3 table, strongest evidence first. */
-function evidencePhase(input: EvidenceInput, isPlan: (file: string) => boolean): Phase | null {
+/**
+ * Spec §7.3 table, strongest evidence first. Files outside the workspace (Claude Code's
+ * plan mode writes to ~/.claude/plans) are progress, never phase evidence.
+ */
+function evidencePhase(input: EvidenceInput, insideFiles: readonly string[], isPlan: (relative: string) => boolean): Phase | null {
     if (input.prUrls.length > 0) return REVIEW_PHASE;
-    if (input.committed || input.files.some(file => !isPlan(file))) return WORK_PHASE;
-    return input.files.length > 0 ? PLAN_PHASE : null;
+    if (input.committed || insideFiles.some(file => !isPlan(file))) return WORK_PHASE;
+    return insideFiles.length > 0 ? PLAN_PHASE : null;
 }
 
 /** One tool batch's evidence, and the phase it proves, as one transaction. */
@@ -169,7 +174,8 @@ export function recordEvidence(db: Ledger, input: EvidenceInput): TaskRow {
 
         const root = getWorkspace(db, input.workspaceId)?.path ?? input.cwd;
         const globs = readSetting(db, input.workspaceId, SETTING_PLAN_GLOBS);
-        const target = evidencePhase(input, file => isPlanFile(root, input.cwd, file, globs));
+        const insideFiles = input.files.flatMap(file => relativeToRoot(root, input.cwd, file) ?? []);
+        const target = evidencePhase(input, insideFiles, relative => matchesAnyGlob(relative, globs));
         if (target !== null) {
             advancePhase(db, task, target, { source: input.source, sessionId: input.sessionId, human: false }, at);
         }

@@ -1,9 +1,10 @@
 import { tempLedger, TempLedger, eventKinds } from './helpers';
 import { write } from '../../src/ledger/db';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
+import * as path from 'path';
 import { createTask, getTask, updateTask } from '../../src/ledger/tasks';
 import { startSession, getSession } from '../../src/ledger/sessions';
-import { trackWork, TrackWorkInput, REOPEN_PHASE, advancePhase } from '../../src/ledger/work';
+import { trackWork, TrackWorkInput, REOPEN_PHASE, advancePhase, recordEvidence } from '../../src/ledger/work';
 import { Intent, Phase } from '../../src/ledger/types';
 
 const SESSION_ID = 'session-1';
@@ -118,5 +119,47 @@ describe('advancePhase', () => {
         expect(advance(review.id, 'in_progress', now)).toBe(false);
         expect(advance(dropped.id, 'done', now)).toBe(false);
         expect(eventKinds(ledger.db, review.id)).toEqual(['created']);
+    });
+});
+
+describe('recordEvidence: which files count as phase evidence', () => {
+    let ledger: TempLedger;
+    let workspaceId: number;
+    let root: string;
+    const OUTSIDE = path.resolve(path.join('..', 'elsewhere', 'plans', 'plan-mode.md'));
+
+    const record = (phase: Phase, files: string[]): Phase => {
+        const task = createTask(ledger.db, { title: 'Evidence', phase, workspaceId, origin: 'local', source: SOURCE });
+        return recordEvidence(ledger.db, {
+            taskId: task.id, sessionId: SESSION_ID, source: SOURCE, workspaceId, cwd: root,
+            files, committed: false, prUrls: [],
+        }).phase;
+    };
+
+    beforeEach(() => {
+        ledger = tempLedger();
+        root = ledger.dir;
+        workspaceId = ensureWorkspace(ledger.db, root).id;
+    });
+
+    afterEach(() => ledger.cleanup());
+
+    it.each<Phase>(['brainstorming', 'planned'])('keeps %s when the only edit is outside the workspace', phase => {
+        expect(record(phase, [OUTSIDE])).toBe(phase);
+    });
+
+    it('still records the outside file as progress', () => {
+        const task = createTask(ledger.db, { title: 'Progress', phase: 'planned', workspaceId, origin: 'local', source: SOURCE });
+        recordEvidence(ledger.db, { taskId: task.id, sessionId: SESSION_ID, source: SOURCE, workspaceId, cwd: root, files: [OUTSIDE], committed: false, prUrls: [] });
+        expect(eventKinds(ledger.db, task.id)).toEqual(['created', 'progress']);
+    });
+
+    it('moves to in_progress when an outside edit comes with an in-workspace non-plan edit', () => {
+        expect(record('planned', [OUTSIDE, path.join(root, 'src', 'login.ts')])).toBe('in_progress');
+    });
+
+    it('treats an in-root name starting with two dots as inside the workspace', () => {
+        expect(record('planned', [path.join('..notes', 'plan.md')])).toBe('in_progress');
+        expect(record('brainstorming', ['..foo.md'])).toBe('in_progress');
     });
 });
