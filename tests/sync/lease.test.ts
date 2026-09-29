@@ -38,7 +38,8 @@ describe('the sync lease', () => {
         expect(leaseHolder(ledger.db, T0 + LEASE_TTL_MS + SECOND_MS)).toBeUndefined();
     });
 
-    it('names a holder by process id', () => {
-        expect(leaseHolderId(1234)).toBe('pid:1234');
+    it('names a holder by process id and a start nonce, so a reused pid is a different holder', () => {
+        expect(leaseHolderId(1234)).toMatch(/^pid:1234:[0-9a-f]{8}$/);
+        expect(leaseHolderId(1234)).toBe(leaseHolderId(1234));
     });
 });

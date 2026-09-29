@@ -50,7 +50,7 @@ export interface CloseDuplicatePayload { of: string }
 export type ProjectionTrigger = 'change' | 'comment' | 'evidence' | 'publish';
 export type ProjectionResult = 'no_vendor' | 'broken_link' | 'not_allowed' | 'create_queued' | 'sync_queued' | 'nothing';
 
-type Reach = 'linked' | 'broken' | 'create_pending' | 'create_in_flight' | 'unlinked';
+type Reach = 'linked' | 'broken' | 'create_pending' | 'create_in_flight' | 'create_failed' | 'unlinked';
 
 const PROGRESS_KINDS: readonly EventKind[] = ['commit', 'progress', 'pr'];
 const PHASE_KIND: EventKind = 'phase';
@@ -68,8 +68,11 @@ function reachOf(db: Ledger, taskId: number): Reach {
     if (link !== undefined) return link.broken_at === null ? 'linked' : 'broken';
     const create = db.prepare('SELECT status FROM outbox WHERE task_id = ? AND op = ? AND status IN (?, ?) ORDER BY id DESC LIMIT 1')
         .get(taskId, OP_CREATE, STATUS_PENDING, STATUS_CLAIMED) as { status: OutboxStatus } | undefined;
-    if (create === undefined) return 'unlinked';
-    return create.status === STATUS_CLAIMED ? 'create_in_flight' : 'create_pending';
+    if (create !== undefined) return create.status === STATUS_CLAIMED ? 'create_in_flight' : 'create_pending';
+    // A failed create waits for a person to re-arm it; queuing another would duplicate the vendor item.
+    const failed = db.prepare('SELECT 1 FROM outbox WHERE task_id = ? AND op = ? AND status = ? LIMIT 1')
+        .get(taskId, OP_CREATE, STATUS_FAILED);
+    return failed === undefined ? 'unlinked' : 'create_failed';
 }
 
 export function hasActiveCreate(db: Ledger, taskId: number): boolean {
@@ -118,6 +121,7 @@ export function projectTask(db: Ledger, task: TaskRow, trigger: ProjectionTrigge
     if (!isSyncable(db, task)) return 'no_vendor';
     const reach = reachOf(db, task.id);
     if (reach === 'broken') return 'broken_link';
+    if (reach === 'create_failed') return 'nothing';
     const policy = policyOf(db, task);
     if (policy === SYNC_POLICY_OFF) return 'not_allowed';
     if (reach === 'unlinked') {

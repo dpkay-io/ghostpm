@@ -205,4 +205,14 @@ describe('queueing vendor projections', () => {
         updateTask(ledger.db, task.id, { title: 'B' }, HUMAN);
         expect(ops(task.id)).toEqual(['sync_state:pending']);
     });
+
+    it('queues nothing more for an unlinked task whose only create failed, until a person re-arms it', () => {
+        const task = track('Gave up');
+        expect(ops(task.id)).toEqual(['create:pending']);
+        ledger.db.prepare("UPDATE outbox SET status = 'failed' WHERE task_id = ?").run(task.id);
+        updateTask(ledger.db, task.id, { title: 'Renamed', phase: 'in_progress', comment: 'note' }, HUMAN);
+        evidence(task, { committed: true });
+        expect(publishTask(ledger.db, task.id)).toBe('nothing');
+        expect(ops(task.id)).toEqual(['create:failed']);
+    });
 });

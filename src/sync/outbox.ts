@@ -1,6 +1,6 @@
 import { Ledger, SqlParam, Where, write } from '../ledger/db';
 import {
-    OP_SYNC_STATE, OutboxRow, OutboxStatus, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
+    OP_CREATE, OP_SYNC_STATE, OutboxRow, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
 } from '../ledger/projection';
 import { SETTING_SYNC_PAUSED } from '../ledger/settings';
 import { SYNC_LEASE } from './lease';
@@ -33,24 +33,26 @@ export function claimNext(db: Ledger, holder: string, now: number): OutboxRow | 
         .get(STATUS_CLAIMED, holder, at, PAUSED_PATH, STATUS_PENDING, at) as OutboxRow | undefined;
 }
 
+/** A post-claim write only lands while the caller still holds the claim: a holder whose lease ran out must not touch a row another holder now owns. */
+const HELD = 'status = ? AND claimed_by = ?';
+
 /**
  * A sync_state going back to pending gives way to a newer one queued while it was out:
  * one pending desired state per task (migration 2), and the newer one is the latest.
+ * False when the claim is no longer `holder`'s.
  */
-function returnToPending(db: Ledger, row: OutboxRow, set: string, params: SqlParam[]): void {
-    write(db, () => {
+function returnToPending(db: Ledger, row: OutboxRow, holder: string, set: string, params: SqlParam[]): boolean {
+    return write(db, () => {
         const newer = row.op === OP_SYNC_STATE && db.prepare(
             'SELECT 1 FROM outbox WHERE task_id = ? AND op = ? AND status = ? AND id <> ?',
         ).get(row.task_id, OP_SYNC_STATE, STATUS_PENDING, row.id) !== undefined;
         if (newer) {
-            db.prepare('DELETE FROM outbox WHERE id = ?').run(row.id);
-            return;
+            return db.prepare(`DELETE FROM outbox WHERE id = ? AND ${HELD}`).run(row.id, STATUS_CLAIMED, holder).changes === 1;
         }
-        db.prepare(`UPDATE outbox SET status = ?, claimed_by = NULL, claimed_at = NULL${set} WHERE id = ?`)
-            .run(STATUS_PENDING, ...params, row.id);
+        return db.prepare(`UPDATE outbox SET status = ?, claimed_by = NULL, claimed_at = NULL${set} WHERE id = ? AND ${HELD}`)
+            .run(STATUS_PENDING, ...params, row.id, STATUS_CLAIMED, holder).changes === 1;
     });
 }
-
 /**
  * A claim whose holder no longer holds the lease will never finish: give it back (spec §6).
  * Stale sync_state claims give way first, so the one-pending index holds: to a pending row of
@@ -70,60 +72,77 @@ export function releaseStaleClaims(db: Ledger, now: number): number {
     });
 }
 
-export function completeRow(db: Ledger, id: number): void {
-    db.prepare('UPDATE outbox SET status = ?, error = NULL WHERE id = ?').run(STATUS_DONE, id);
+export function completeRow(db: Ledger, id: number, holder: string): boolean {
+    return db.prepare(`UPDATE outbox SET status = ?, error = NULL WHERE id = ? AND ${HELD}`)
+        .run(STATUS_DONE, id, STATUS_CLAIMED, holder).changes === 1;
 }
 
-export function failRow(db: Ledger, id: number, error: string): void {
-    db.prepare('UPDATE outbox SET status = ?, error = ? WHERE id = ?').run(STATUS_FAILED, error, id);
+export function failRow(db: Ledger, id: number, holder: string, error: string): boolean {
+    return db.prepare(`UPDATE outbox SET status = ?, error = ? WHERE id = ? AND ${HELD}`)
+        .run(STATUS_FAILED, error, id, STATUS_CLAIMED, holder).changes === 1;
 }
 
 /** Waiting on something else (its task's create), not failing: no attempt is counted. */
-export function deferRow(db: Ledger, row: OutboxRow, until: number): void {
-    returnToPending(db, row, ', next_attempt_at = ?', [iso(until)]);
+export function deferRow(db: Ledger, row: OutboxRow, holder: string, until: number): boolean {
+    return returnToPending(db, row, holder, ', next_attempt_at = ?', [iso(until)]);
 }
 
 /** Back exactly as it was: its workspace was just paused. */
-export function releaseRow(db: Ledger, row: OutboxRow): void {
-    returnToPending(db, row, '', []);
+export function releaseRow(db: Ledger, row: OutboxRow, holder: string): boolean {
+    return returnToPending(db, row, holder, '', []);
 }
 
-/** Transient failure: back off (spec §8.8); `failed` once `maxAttempts` is reached. */
-export function retryRow(db: Ledger, row: OutboxRow, error: string, maxAttempts: number, now: number): OutboxStatus {
-    const attempts = row.attempts + 1;
-    if (attempts >= maxAttempts) {
-        db.prepare('UPDATE outbox SET status = ?, attempts = ?, error = ? WHERE id = ?').run(STATUS_FAILED, attempts, error, row.id);
-        return STATUS_FAILED;
-    }
-    returnToPending(db, row, ', attempts = ?, error = ?, next_attempt_at = ?', [attempts, error, iso(now + backoffMs(attempts))]);
-    return STATUS_PENDING;
+/**
+ * Transient failure: back off (spec §8.8); `failed` once `maxAttempts` is reached. The count comes
+ * from the ledger, not the caller's copy of the row. False when the claim is no longer `holder`'s.
+ */
+export function retryRow(db: Ledger, row: OutboxRow, holder: string, error: string, maxAttempts: number, now: number): boolean {
+    return write(db, () => {
+        const held = db.prepare(`SELECT attempts FROM outbox WHERE id = ? AND ${HELD}`)
+            .get(row.id, STATUS_CLAIMED, holder) as { attempts: number } | undefined;
+        if (held === undefined) return false;
+        const attempts = held.attempts + 1;
+        if (attempts >= maxAttempts) {
+            return db.prepare(`UPDATE outbox SET status = ?, attempts = attempts + 1, error = ? WHERE id = ? AND ${HELD}`)
+                .run(STATUS_FAILED, error, row.id, STATUS_CLAIMED, holder).changes === 1;
+        }
+        return returnToPending(db, row, holder, ', attempts = attempts + 1, error = ?, next_attempt_at = ?',
+            [error, iso(now + backoffMs(attempts))]);
+    });
 }
 
+/** A failed create that no longer matters: its task is linked since, or a newer create was queued. */
+const STALE_FAILED_CREATE = `o.op = ? AND o.status = ? AND (
+    EXISTS (SELECT 1 FROM vendor_links l WHERE l.task_id = o.task_id)
+    OR EXISTS (SELECT 1 FROM outbox n WHERE n.task_id = o.task_id AND n.op = o.op AND n.id > o.id))`;
 /**
  * A person asked to retry (`ghostpm sync`). Superseded sync_state rows go first, so each
  * task keeps at most one pending desired state.
  */
 export function rearmFailed(db: Ledger, now: number): number {
     return write(db, () => {
+        // sync_state carries no payload: any pending one already says everything a failed one would.
         db.prepare(`
             DELETE FROM outbox WHERE op = ? AND status = ?
-              AND id NOT IN (SELECT MAX(id) FROM outbox WHERE op = ? AND status IN (?, ?) GROUP BY task_id)`)
-            .run(OP_SYNC_STATE, STATUS_FAILED, OP_SYNC_STATE, STATUS_FAILED, STATUS_PENDING);
+              AND (task_id IN (SELECT task_id FROM outbox WHERE op = ? AND status = ?)
+                OR id NOT IN (SELECT MAX(id) FROM outbox WHERE op = ? AND status = ? GROUP BY task_id))`)
+            .run(OP_SYNC_STATE, STATUS_FAILED, OP_SYNC_STATE, STATUS_PENDING, OP_SYNC_STATE, STATUS_FAILED);
+        db.prepare(`DELETE FROM outbox WHERE id IN (SELECT o.id FROM outbox o WHERE ${STALE_FAILED_CREATE})`)
+            .run(OP_CREATE, STATUS_FAILED);
         return db.prepare('UPDATE outbox SET status = ?, attempts = 0, error = NULL, next_attempt_at = ? WHERE status = ?')
             .run(STATUS_PENDING, iso(now), STATUS_FAILED).changes;
     });
 }
 
-/** Plan 4 contract: unfinished (pending or in flight) and failed rows, for one workspace or all. */
+/** Plan 4 contract: unfinished (pending or in flight) and failed rows, for one workspace or all. A stale failed create is not a failure. */
 export function outboxHealth(db: Ledger, workspaceId?: number): { pending: number; failed: number } {
-    const where = new Where();
+    const where = new Where().add(`NOT (${STALE_FAILED_CREATE})`, OP_CREATE, STATUS_FAILED);
     if (workspaceId !== undefined) where.add('t.workspace_id = ?', workspaceId);
     return db.prepare(`
         SELECT COALESCE(SUM(o.status IN (?, ?)), 0) AS pending, COALESCE(SUM(o.status = ?), 0) AS failed
         FROM outbox o JOIN tasks t ON t.id = o.task_id${where}`)
         .get(STATUS_PENDING, STATUS_CLAIMED, STATUS_FAILED, ...where.params) as { pending: number; failed: number };
 }
-
 /** SessionStart's question: is there a due row, or a claim nobody is finishing, outside paused workspaces? */
 export function hasDueWork(db: Ledger, now: number): boolean {
     const found = db.prepare(`
