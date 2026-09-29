@@ -1,16 +1,16 @@
 import * as path from 'path';
 import { Ledger, write, nowIso } from './db';
 import { recordEvent } from './events';
-import { applyPhaseChange, bumpRevision, getTask, insertTaskRow, resolveTaskRef, ChangeContext } from './tasks';
+import { applyPhaseChange, bumpRevision, getTask, getVendorLink, insertTaskRow, resolveTaskRef, ChangeContext } from './tasks';
 import { setSessionTask } from './sessions';
 import { readSetting, SETTING_PLAN_GLOBS } from './settings';
 import { getWorkspace } from './workspaces';
 import { matchesAnyGlob } from './glob';
-import { INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
+import { CLOSED_PHASES, INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
+import { enqueueCloseDuplicate, projectTask } from './projection';
 
 /** Forward order for automatic phase moves; done and dropped are terminal. */
 const PHASE_RANK: Record<Phase, number> = { brainstorming: 0, planned: 1, in_progress: 2, in_review: 3, done: 4, dropped: 4 };
-export const CLOSED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['done', 'dropped']);
 /** Spec §7.3: attaching new work to a done or dropped task reopens it in this phase. */
 export const REOPEN_PHASE: Phase = 'in_progress';
 const PLAN_PHASE: Phase = 'planned';
@@ -68,6 +68,7 @@ export function trackWork(db: Ledger, input: TrackWorkInput): TrackWorkResult {
                 origin: 'local', source: input.source, sessionId: input.sessionId,
             }, at);
             setSessionTask(db, input.sessionId, task.id, at);
+            projectTask(db, task, 'change', at);
             return { task, created: true, reopened: false };
         }
 
@@ -117,7 +118,7 @@ export function mergeTask(db: Ledger, input: MergeInput): MergeResult {
 
         db.prepare('UPDATE events SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
         // OR IGNORE: a link that collides with one the kept task already has stays behind,
-        // so Phase 3 can close that remote item as a duplicate.
+        // and that remote item is closed as a duplicate below.
         db.prepare('UPDATE OR IGNORE vendor_links SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
         db.prepare('UPDATE sessions SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
 
@@ -126,6 +127,14 @@ export function mergeTask(db: Ledger, input: MergeInput): MergeResult {
         recordEvent(db, { taskId: from.id, kind: 'merged', source: input.source, sessionId: input.sessionId, payload: { into: into.id } }, at);
         bumpRevision(db, from.id, at);
         bumpRevision(db, into.id, at);
+
+        // Spec §8.7. Same workspace only: a bare remote id means nothing in another repo.
+        const fromLink = getVendorLink(db, from.id);
+        const intoLink = getVendorLink(db, into.id);
+        if (fromLink !== undefined && intoLink !== undefined && fromLink.vendor === intoLink.vendor
+            && from.workspace_id === into.workspace_id) {
+            enqueueCloseDuplicate(db, getTask(db, from.id)!, intoLink.remote_id, at);
+        }
 
         return { from: getTask(db, from.id)!, into: getTask(db, into.id)! };
     });
@@ -180,6 +189,9 @@ export function recordEvidence(db: Ledger, input: EvidenceInput): TaskRow {
             advancePhase(db, task, target, { source: input.source, sessionId: input.sessionId, human: false }, at);
         }
         bumpRevision(db, task.id, at);
-        return getTask(db, task.id)!;
+        const recorded = getTask(db, task.id)!;
+        // Spec §8.2 promote: the first commit or PR publishes a task that was not pushed yet.
+        if (input.committed || input.prUrls.length > 0) projectTask(db, recorded, 'evidence', at);
+        return recorded;
     });
 }

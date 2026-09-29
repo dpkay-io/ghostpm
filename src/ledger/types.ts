@@ -1,5 +1,7 @@
 export const PHASES = ['brainstorming', 'planned', 'in_progress', 'in_review', 'done', 'dropped'] as const;
 export type Phase = typeof PHASES[number];
+/** Terminal phases: evidence never moves a task out of them; only track_work reopens. */
+export const CLOSED_PHASES: ReadonlySet<Phase> = new Set<Phase>(['done', 'dropped']);
 
 export const INTENTS = ['brainstorm', 'plan', 'implement', 'fix'] as const;
 export type Intent = typeof INTENTS[number];
@@ -18,6 +20,8 @@ export type EventKind = typeof EVENT_KINDS[number];
 export type Vendor = 'github' | 'azure_devops' | 'none';
 export const NO_VENDOR: Vendor = 'none';
 export type Origin = 'local' | 'vendor';
+/** Event source for anything that came from GitHub or Azure DevOps. Never projected back. */
+export const VENDOR_SOURCE = 'vendor';
 
 export const TASK_ID_PREFIX = 'T';
 export const formatTaskId = (id: number): string => `${TASK_ID_PREFIX}${id}`;

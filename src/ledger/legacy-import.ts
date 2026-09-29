@@ -9,12 +9,12 @@ import { ensureWorkspace, normalizePath, setWorkspaceVendor } from './workspaces
 import { getSetting, setSetting, setWorkspaceSetting, SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER } from './settings';
 import { insertTaskRow, insertVendorLink } from './tasks';
 import { recordEvent } from './events';
-import { Phase, Vendor } from './types';
+import { Phase, VENDOR_SOURCE, Vendor } from './types';
 
 export const LEGACY_DB_FILE = '.mcp-pm.db';
 export const LEGACY_CONFIG_FILE = '.mcp-pm.yml';
 export const LEGACY_IMPORT_SETTING = 'legacy_import_at';
-export const LEGACY_SOURCE = 'vendor';
+export const LEGACY_SOURCE = VENDOR_SOURCE;
 const LEGACY_COMMENT_SEPARATOR = '\n---\n';
 const CLAUDE_CONFIG_FILE = '.claude.json';
 const LEGACY_USER_KEY = 'current_user';

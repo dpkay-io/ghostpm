@@ -8,8 +8,12 @@ import { PmServer } from '../src/mcp-server';
 import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
-import { setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER } from '../src/ledger/settings';
+import {
+    setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
+    SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_PROMOTE,
+} from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
+import { tempLedger, TempLedger, clonedRepo, outboxRows } from './ledger/helpers';
 import { removeTempDir } from './temp-dir';
 
 jest.mock('child_process');
@@ -286,5 +290,55 @@ describe('mcp server on the ledger', () => {
         const result = await call('update_task', { task_id: `T${existing.id}`, comment: 'note only' });
         expect(result).toContain('comment added');
         expect(result).not.toContain('phase');
+    });
+});
+
+describe('mcp server in a GitHub workspace', () => {
+    let ledger: TempLedger;
+    let client: Client;
+
+    const call = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
+        const result = await client.callTool({ name, arguments: args }) as { content: { text: string }[] };
+        return result.content[0].text;
+    };
+    const trackedId = async (title: string): Promise<number> =>
+        Number((await call('track_work', { title, intent: 'implement' })).match(/T(\d+)/)![1]);
+
+    beforeEach(async () => {
+        (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: unknown[]) => {
+            const cb = args[args.length - 1];
+            if (typeof cb === 'function') (cb as (e: Error | null, out: string, err: string) => void)(new Error(GIT_FAILURE), '', '');
+        });
+        ledger = tempLedger();
+        // The global default is off; these tests are about a workspace that opted in.
+        setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        const repo = clonedRepo(ledger.dir, 'widgets');
+        const server = new PmServer({ db: ledger.db, cwd: repo, sessionId: SESSION_ID, legacyImport: false });
+        client = new Client({ name: 'test-client', version: '1.0.0' });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await Promise.all([client.connect(clientTransport), server.run(serverTransport)]);
+    });
+
+    afterEach(async () => {
+        await client.close();
+        ledger.cleanup();
+        jest.clearAllMocks();
+    });
+
+    it('queues a vendor create when track_work creates a task', async () => {
+        const id = await trackedId('Login fix');
+        expect(outboxRows(ledger.db, id).map(row => row.op)).toEqual(['create']);
+    });
+
+    it('publishes on request under promote, and says why when it cannot', async () => {
+        setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_PROMOTE);
+        const quiet = await trackedId('Quiet until asked');
+        expect(outboxRows(ledger.db, quiet)).toEqual([]);
+        expect(await call('update_task', { task_id: `T${quiet}`, publish: true })).toBe(`T${quiet} updated: queued to publish.`);
+        expect(outboxRows(ledger.db, quiet).map(row => row.op)).toEqual(['create']);
+
+        setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+        const local = await trackedId('Stays local');
+        expect(await call('update_task', { task_id: `T${local}`, publish: true })).toContain('not published: sync_policy');
     });
 });

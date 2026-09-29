@@ -2,8 +2,7 @@ import { Ledger } from '../ledger/db';
 import { resolveSetting, SETTING_CURRENT_USER } from '../ledger/settings';
 import { taskRefFromBranch } from '../ledger/branch';
 import { resolveTaskRef } from '../ledger/tasks';
-import { CLOSED_PHASES } from '../ledger/work';
-import { TaskRow, formatTaskId } from '../ledger/types';
+import { CLOSED_PHASES, TaskRow, formatTaskId } from '../ledger/types';
 
 export const CANDIDATE_LIMIT = 5;
 export const RECENT_DAYS = 14;

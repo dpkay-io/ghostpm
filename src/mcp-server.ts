@@ -19,6 +19,7 @@ import {
     getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImportOnce } from "./ledger/legacy-import";
+import { ProjectionResult, publishTask } from "./ledger/projection";
 import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 
 const execFileAsync = promisify(execFile);
@@ -36,6 +37,15 @@ const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
 const MS_PER_HOUR = 60 * 60 * 1000;
 const SOURCE_PREFIX = "mcp";
+/** What update_task says about a publish request, by what the ledger did with it. */
+const PUBLISH_NOTES: Record<ProjectionResult, string> = {
+    no_vendor: 'not published: this workspace has no GitHub or Azure DevOps remote',
+    broken_link: 'not published: its vendor item was deleted or moved',
+    not_allowed: 'not published: sync_policy is off or does not allow it (ghostpm config set sync_policy), or the task is closed',
+    create_queued: 'queued to publish',
+    sync_queued: 'queued to sync',
+    nothing: 'already on its way to the vendor',
+};
 
 const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task log shared by every session on this machine.
 
@@ -386,16 +396,17 @@ export class PmServer {
 
         this.server.tool(
             "update_task",
-            "Change a task's phase or title, or add a comment. Only change the phase when the user asks for it.",
+            "Change a task's phase or title, add a comment, or publish it to GitHub / Azure DevOps. Only change the phase or publish when the user asks for it.",
             {
                 task_id: z.string().describe('T42, #42 or 42.'),
                 phase: z.enum(PHASES).optional().describe('New phase.'),
                 title: z.string().optional().describe('New title.'),
                 comment: z.string().optional().describe('Comment to record on the task.'),
+                publish: z.boolean().optional().describe('Push this task to the vendor now. Needed under sync_policy "promote"; does nothing while sync_policy is "off".'),
             },
-            async ({ task_id, phase, title, comment }) => {
+            async ({ task_id, phase, title, comment, publish }) => {
                 const workspace = this.context();
-                if (!phase && !title && !comment) return text('Provide a phase, a title or a comment to update.');
+                if (!phase && !title && !comment && !publish) return text('Provide a phase, a title, a comment or publish.');
                 const task = resolveTaskRef(this.db, task_id, workspace.id);
                 if (!task) return text(`Task ${task_id} not found.`);
                 try {
@@ -403,7 +414,8 @@ export class PmServer {
                     const updated = updateTask(this.db, task.id, { phase, title, comment }, {
                         source: this.source(), sessionId: this.sessionId, human: true,
                     });
-                    const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '']
+                    const published = publish ? PUBLISH_NOTES[publishTask(this.db, task.id)] : '';
+                    const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '', published]
                         .filter(part => part.length > 0)
                         .join(', ');
                     const crossNote = this.crossWorkspaceNote(workspace.id, updated);

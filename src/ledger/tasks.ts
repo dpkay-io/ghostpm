@@ -1,6 +1,8 @@
 import { Ledger, Where, write, nowIso } from './db';
 import { recordEvent } from './events';
-import { Origin, Phase, TaskRow, Vendor, VendorLinkRow, formatTaskId } from './types';
+import { enqueueComment, isSyncable, phaseCommentText, projectTask } from './projection';
+import { readSetting, SETTING_PROGRESS_COMMENTS } from './settings';
+import { Origin, Phase, TaskRow, VENDOR_SOURCE, Vendor, VendorLinkRow, formatTaskId } from './types';
 
 const LOCAL_REF = /^T(\d+)$/i;
 const NUMERIC_REF = /^#?(\d+)$/;
@@ -66,11 +68,23 @@ export function createTask(db: Ledger, task: NewTask): TaskRow {
     return write(db, () => insertTaskRow(db, task, nowIso()));
 }
 
-/** Plain phase update plus 'phase' event: call inside write(). */
+/**
+ * Phase update plus 'phase' event, and the vendor projection unless the change came from the
+ * vendor: call inside write().
+ */
 export function applyPhaseChange(db: Ledger, task: TaskRow, phase: Phase, ctx: ChangeContext, at: string): void {
+    const projects = ctx.source !== VENDOR_SOURCE && isSyncable(db, task);
+    // Read before this phase event exists, so "since the last move" means the previous one.
+    const comment = projects && readSetting(db, task.workspace_id, SETTING_PROGRESS_COMMENTS) === 'phase'
+        ? phaseCommentText(db, task.id, task.phase, phase)
+        : null;
     db.prepare('UPDATE tasks SET phase = ?, human_phase_at = COALESCE(?, human_phase_at) WHERE id = ?')
         .run(phase, ctx.human ? at : null, task.id);
     recordEvent(db, { taskId: task.id, kind: 'phase', source: ctx.source, sessionId: ctx.sessionId, payload: { from: task.phase, to: phase } }, at);
+    if (!projects) return;
+    const moved = getTask(db, task.id)!;
+    projectTask(db, moved, 'change', at);
+    if (comment !== null) enqueueComment(db, moved, comment, at);
 }
 
 /** Call inside write(), once per logical change. */
@@ -83,22 +97,28 @@ export function updateTask(db: Ledger, id: number, update: TaskUpdate, ctx: Chan
         const task = getTask(db, id);
         if (!task) throw new Error(`Task ${formatTaskId(id)} not found`);
         const at = nowIso();
-        let changed = false;
-        if (update.title !== undefined && update.title !== task.title) {
-            db.prepare('UPDATE tasks SET title = ? WHERE id = ?').run(update.title, id);
+        const renamed = update.title !== undefined && update.title !== task.title;
+        const rephased = update.phase !== undefined && update.phase !== task.phase;
+        const comment = update.comment ?? '';
+        if (renamed) {
+            db.prepare('UPDATE tasks SET title = ? WHERE id = ?').run(update.title!, id);
             recordEvent(db, { taskId: id, kind: 'renamed', source: ctx.source, sessionId: ctx.sessionId, payload: { from: task.title, to: update.title } }, at);
-            changed = true;
         }
-        if (update.phase !== undefined && update.phase !== task.phase) {
-            applyPhaseChange(db, task, update.phase, ctx, at);
-            changed = true;
+        // Re-read: the projection a phase change queues must see the title just set.
+        if (rephased) applyPhaseChange(db, getTask(db, id)!, update.phase!, ctx, at);
+        if (comment.length > 0) {
+            recordEvent(db, { taskId: id, kind: 'comment', source: ctx.source, sessionId: ctx.sessionId, payload: { text: comment } }, at);
         }
-        if (update.comment) {
-            recordEvent(db, { taskId: id, kind: 'comment', source: ctx.source, sessionId: ctx.sessionId, payload: { text: update.comment } }, at);
-            changed = true;
+        if (renamed || rephased || comment.length > 0) bumpRevision(db, id, at);
+        const updated = getTask(db, id)!;
+        if (ctx.source !== VENDOR_SOURCE) {
+            if (renamed) projectTask(db, updated, 'change', at);
+            if (comment.length > 0) {
+                projectTask(db, updated, 'comment', at);
+                enqueueComment(db, updated, comment, at);
+            }
         }
-        if (changed) bumpRevision(db, id, at);
-        return getTask(db, id)!;
+        return updated;
     });
 }
 
