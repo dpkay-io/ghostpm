@@ -9,6 +9,7 @@ import { removeTempDir } from './temp-dir';
 const HOSTILE = 'a&b | "q" %PATH% ^ <x> (p)\nsecond line';
 const HOSTILE_FRAGMENTS = ['&b', '"q"', '%PATH%', '^', '<x>', '(p)', 'second line'];
 const NON_ASCII = 'Déjà vu — ✓ 日本 😀';
+const BOM = '\uFEFF';
 const AUTH_EXIT = 4;
 const KNACK_ENCODING_ENV = 'GHOSTPM_TEST_KNACK_ENCODING';
 const ANSI_ENCODING = 'latin1';
@@ -19,10 +20,13 @@ const itOnWindows = process.platform === 'win32' ? it : it.skip;
 /** Prints what it received: argv (expanding @file the way az does) and stdin. */
 const ECHO_SOURCE = `
 const fs = require('fs');
-const expand = (arg, encoding) => arg.startsWith('@') ? fs.readFileSync(arg.slice(1), encoding) : arg;
-// az 2.85 expands @file twice and no further: azure.cli.core reads UTF-8, then knack re-expands a result that starts with @,
-// in text mode (the ANSI code page on a launcher without -X utf8).
-const args = process.argv.slice(2).map(arg => expand(expand(arg, 'utf8'), process.env.${KNACK_ENCODING_ENV} || 'utf8'));
+const BOM = '\\uFEFF';
+const load = (arg, encoding) => fs.readFileSync(arg.slice(1), encoding);
+// az 2.85 expands @file twice and no further: azure.cli.core decodes utf-8-sig (dropping exactly one leading BOM), then knack
+// re-expands a result that starts with @, in text mode (the ANSI code page on a launcher without -X utf8), keeping any BOM.
+const corePass = arg => { if (!arg.startsWith('@')) return arg; const text = load(arg, 'utf8'); return text.startsWith(BOM) ? text.slice(BOM.length) : text; };
+const knackPass = arg => arg.startsWith('@') ? load(arg, process.env.${KNACK_ENCODING_ENV} || 'utf8') : arg;
+const args = process.argv.slice(2).map(arg => knackPass(corePass(arg)));
 let stdin = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { stdin += chunk; });
@@ -49,6 +53,14 @@ describe('runCli', () => {
     };
     const echoed = async (command: string, args: Parameters<typeof runCli>[1], input?: string): Promise<Echoed> =>
         JSON.parse(await runCli(command, args, { input })) as Echoed;
+    /** az's first pass drops one leading BOM: a user's own must survive, and `BOM@<file>` must never become a file read. */
+    const expectLeadingBomIntact = async (): Promise<void> => {
+        const secret = path.join(dir, 'secret-bom.txt');
+        fs.writeFileSync(secret, 'SECRET CONTENT');
+        for (const text of [`${BOM}@${secret}`, `${BOM}${NON_ASCII}`]) {
+            expect((await echoed('az', ['--title', freeText(text)])).args).toEqual(['--title', text]);
+        }
+    };
 
     beforeEach(() => {
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-cli-'));
@@ -112,6 +124,11 @@ describe('runCli', () => {
         expect((await echoed('az', [freeText(`@${secret} ${NON_ASCII}`)])).args).toEqual([`@${secret} ${NON_ASCII}`]);
     });
 
+    it('keeps a leading BOM and never loads BOM@<file> for az on an executable-style launcher (UTF-8 knack pass)', async () => {
+        override('az', echo);
+        await expectLeadingBomIntact();
+    });
+
     it('refuses to run az free text when the temporary folder path contains "="', async () => {
         override('az', echo);
         const oddTemp = path.join(dir, 'tmp=eq');
@@ -173,6 +190,11 @@ describe('runCli', () => {
             const secret = path.join(dir, 'secret-ansi.txt');
             fs.writeFileSync(secret, 'SECRET CONTENT');
             expect((await echoed('az', [freeText(`@${secret}`)])).args).toEqual([`@${secret}`]);
+        });
+
+        itOnWindows('keeps a leading BOM and never loads BOM@<file> although the launcher reads the second pass as ANSI', async () => {
+            process.env[KNACK_ENCODING_ENV] = ANSI_ENCODING;
+            await expectLeadingBomIntact();
         });
 
         itOnWindows('refuses text that starts with @ and holds non-ASCII characters, which that launcher would garble', async () => {
@@ -245,7 +267,8 @@ describe('runCli', () => {
             expect(args.slice(0, 5)).toEqual(['-X', 'utf8', '-IBm', 'azure.cli', 'boards']);
             expect(args[5]).toBe('--title');
             expect(path.isAbsolute(args[6].slice(1))).toBe(true);
-            expect(atFileContent).toBe(HOSTILE);
+            // az's first pass decodes utf-8-sig, so the file carries a BOM of its own for that pass to drop.
+            expect(atFileContent).toBe(`${BOM}${HOSTILE}`);
             expect(options.env.AZ_INSTALLER).toBe('MSI');
             expect(options.windowsVerbatimArguments).toBe(false);
             expect(options.cwd).toBe(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32'));

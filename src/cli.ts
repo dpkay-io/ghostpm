@@ -23,6 +23,8 @@ const UNSAFE_IN_QUOTES = /["%!\r\n]/;
 const ARG_DIR_PREFIX = 'ghostpm-args-';
 const argFile = (index: number): string => `arg${index}.txt`;
 const AT_FILE_PREFIX = '@';
+/** az's first pass decodes utf-8-sig and drops one leading U+FEFF; every file it reads starts with this one for it to drop. */
+const FIRST_PASS_BOM = '\uFEFF';
 const ARG_PATH_SPLIT = '=';
 const MAX_ASCII_CODE = 0x7f;
 const hasNonAscii = (text: string): boolean => Array.from(text).some(char => char.charCodeAt(0) > MAX_ASCII_CODE);
@@ -108,11 +110,14 @@ interface Invocation {
 }
 
 /**
- * az 2.85 expands `@<file>` in two passes: azure.cli.core reads the argv value as UTF-8, then knack expands the result again
- * when it starts with @ (text mode, so the ANSI code page unless python runs with -X utf8; a third level stays literal,
+ * az 2.85 expands `@<file>` in two passes: azure.cli.core reads the argv value as utf-8-sig, then knack expands the result
+ * again when it starts with @ (text mode, so the ANSI code page unless python runs with -X utf8; a third level stays literal,
  * verified offline). Free text that does not start with @ is therefore one file, `@B`. Text that does start with @ goes
  * through a pointer: argv `@A`, file A holds `@B`, so the text is never at the start of an expanded value; on a launcher
  * without -X utf8 (`utf8Second` false) that second pass would garble non-ASCII, so such text is refused.
+ * utf-8-sig drops one leading U+FEFF, which would turn text `\uFEFF@<path>` into `@<path>` for knack to load: every file the
+ * first pass reads (B alone, or A) is written with a BOM of its own, so that pass returns the content exactly and the level
+ * decision sees what knack sees. B behind a pointer is read by knack as plain utf-8/ANSI, which keeps a BOM, so it has none.
  * `ref(name, dir)` renders a file path.
  */
 function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => string, utf8Second: boolean): { tokens: string[]; argDir: string | null } {
@@ -131,12 +136,13 @@ function writeArgFiles(args: CliArg[], ref: (name: string, dir: string) => strin
             continue;
         }
         if (argDir === null) argDir = fs.mkdtempSync(path.join(os.tmpdir(), ARG_DIR_PREFIX));
-        fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
         if (!arg.freeText.startsWith(AT_FILE_PREFIX)) {
+            fs.writeFileSync(path.join(argDir, argFile(index)), `${FIRST_PASS_BOM}${arg.freeText}`, 'utf8');
             tokens.push(`${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`);
             continue;
         }
-        fs.writeFileSync(path.join(argDir, pointerFile(index)), `${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`, 'utf8');
+        fs.writeFileSync(path.join(argDir, argFile(index)), arg.freeText, 'utf8');
+        fs.writeFileSync(path.join(argDir, pointerFile(index)), `${FIRST_PASS_BOM}${AT_FILE_PREFIX}${ref(argFile(index), argDir)}`, 'utf8');
         tokens.push(`${AT_FILE_PREFIX}${ref(pointerFile(index), argDir)}`);
     }
     return { tokens, argDir };
