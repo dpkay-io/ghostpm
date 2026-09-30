@@ -654,6 +654,41 @@ describe('pushing the outbox', () => {
         expect(outboxRows(ledger.db, task.id).filter(row => row.status !== 'done')).toEqual([]);
     });
 
+    it('ends a closed task\'s create in the same write that drops its rows, so a reopen right after still gets its item', async () => {
+        const task = track();
+        vendor.failNext = new Error('HTTP 502');   // tried (so it carries a marker) before anything was made
+        await push();
+        change(task.id, { phase: 'done' });
+        const findCreated = vendor.findCreated.bind(vendor);
+        jest.spyOn(vendor, 'findCreated').mockImplementationOnce(async (marker, title) => {
+            const found = await findCreated(marker, title);
+            // Another session reopens the task and comments the moment the next write after the lookup commits.
+            const transaction = ledger.db.transaction.bind(ledger.db);
+            jest.spyOn(ledger.db, 'transaction').mockImplementationOnce(((fn: (...args: unknown[]) => unknown) => {
+                const inner = transaction(fn);
+                return Object.assign((...args: unknown[]) => inner(...args), inner, {
+                    immediate: (...args: unknown[]) => {
+                        const result = inner.immediate(...args);
+                        change(task.id, { phase: 'in_progress' });
+                        change(task.id, { comment: 'note after reopening' });
+                        return result;
+                    },
+                });
+            }) as typeof ledger.db.transaction);
+            return found;
+        });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+        await push();
+        skewMs += DEFER_MS + SLACK_MS;                           // what waited for the create comes due
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(vendor.items.get('1')).toMatchObject({ state: 'open', labels: ['ghostpm:in_progress'] });
+        expect(getVendorLink(ledger.db, task.id)?.remote_id).toBe('1');
+        expect(vendor.comments.get('1')!.some(text => text.startsWith('note after reopening'))).toBe(true);
+        expect(outboxRows(ledger.db, task.id).filter(row => row.status !== 'done')).toEqual([]);
+    });
+
     it('ends the push intent when its row is skipped because sync was switched off', async () => {
         const task = track();
         await push();

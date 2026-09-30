@@ -11,6 +11,16 @@ const HOSTILE_BYTES = 1 << 20;
 /** Generous: a linear scan of 1 MB takes tens of ms; the quadratic patterns took 3-44 s on far less (measured). */
 const HOSTILE_BOUND_MS = 1000;
 const JWT ='eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+/** GitHub App installation tokens since 2026-04-27 (Actions' GITHUB_TOKEN): `ghs_<app id>_<JWT>` (synthetic; unverified against a real one). */
+const GITHUB_APP_TOKEN = `ghs_1234567_${JWT}`;
+/** Entra ID tokens carrying group claims reach about 10K characters. */
+const LARGE_JWT_PAYLOAD = 10000;
+const RS256_SIGNATURE_LENGTH = 342;
+const LARGE_JWT = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ${'a1'.repeat(LARGE_JWT_PAYLOAD / 2)}.${'s'.repeat(RS256_SIGNATURE_LENGTH)}`;
+/** A JWT segment is unbounded, so its hostile run is measured at four times the size. */
+const JWT_RUN_BYTES = 4 * HOSTILE_BYTES;
+/** Random-looking, with digits: a secret under either the assignment or the prose rule. */
+const CAMEL_SECRET = 'Zx8Qv3LmNp7Rt2WyAb4Cd6Ef';
 
 describe('redactSecrets (spec §8.9)', () => {
     // [kind, text, the secret that must be gone]
@@ -51,6 +61,56 @@ describe('redactSecrets (spec §8.9)', () => {
     it('keeps the key it redacts the value of', () => {
         expect(redactSecrets('DB_PASSWORD=hunter2hunter2').text).toBe(`DB_PASSWORD=${REDACTED}`);
         expect(redactSecrets('{"password": "hunter2hunter2"}').text).toBe(`{"password": "${REDACTED}"}`);
+    });
+
+    it.each([
+        ['bare', `token in the log: ${GITHUB_APP_TOKEN} end`, `token in the log: ${REDACTED} end`],
+        ['a Bearer header', `Authorization: Bearer ${GITHUB_APP_TOKEN}`, `Authorization: Bearer ${REDACTED}`],
+        ['a token header', `-H "Authorization: token ${GITHUB_APP_TOKEN}"`, `-H "Authorization: token ${REDACTED}"`],
+        ['a JSON value', `{"auth": "${GITHUB_APP_TOKEN}"}`, `{"auth": "${REDACTED}"}`],
+    ])('redacts a new-format GitHub App token (ghs_<app id>_<JWT>) whole: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        ['bare', `id ${LARGE_JWT} end`, `id ${REDACTED} end`],
+        ['as an assigned value', `access_token=${LARGE_JWT}`, `access_token=${REDACTED}`],
+    ])('redacts a JWT of any size whole: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        ['a JWT later in the same query value', `https://x.test/login?password=Hunter2Hunter2x&jwt=${JWT}`, `https://x.test/login?password=${REDACTED}`],
+        ['an AWS key after a comma', 'password=Hunter2Hunter2x,AKIAIOSFODNN7EXAMPLE', `password=${REDACTED}`],
+        ['a Slack token after a semicolon, in prose form', 'password: Hunter2Hunter2x1;xoxb-1234567890-abcdefghij', `password: ${REDACTED}`],
+        ['a GitHub token in the same quoted value', `password="Hunter2Hunter2x ${GITHUB_TOKEN}"`, `password="${REDACTED}"`],
+    ])('never lets a token redaction shield the secret beside it: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text).text).toBe(redacted);
+    });
+
+    it.each([
+        ['JSON clientSecret', `{"clientSecret": "${CAMEL_SECRET}"}`, `{"clientSecret": "${REDACTED}"}`],
+        ['JSON accessToken', `{"accessToken": "${CAMEL_SECRET}"}`, `{"accessToken": "${REDACTED}"}`],
+        ['JSON refreshToken', `{"refreshToken":"${CAMEL_SECRET}"}`, `{"refreshToken":"${REDACTED}"}`],
+        ['JSON dbPassword', `{"dbPassword": "${CAMEL_SECRET}"}`, `{"dbPassword": "${REDACTED}"}`],
+        ['JSON apiKey', `{"apiKey": "${CAMEL_SECRET}"}`, `{"apiKey": "${REDACTED}"}`],
+        ['YAML clientSecret', `clientSecret: ${CAMEL_SECRET}`, `clientSecret: ${REDACTED}`],
+        ['YAML accessToken', `  accessToken: ${CAMEL_SECRET}`, `  accessToken: ${REDACTED}`],
+        ['env dbPassword', 'dbPassword=correcthorse', `dbPassword=${REDACTED}`],
+        ['env refreshToken', `export refreshToken=${CAMEL_SECRET}`, `export refreshToken=${REDACTED}`],
+        ['a longer camelCase key', `oauthClientSecretValue=${CAMEL_SECRET}`, `oauthClientSecretValue=${REDACTED}`],
+    ])('reads a camelCase secret key as a key: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        'tokenizer: splits words',
+        'passwordless login is next',
+        'newTokenizer: handles text',
+        'resetPassword: flow broken',
+        'the clientSecret rotates weekly',
+    ])('keeps prose around camelCase keys and keywords inside words: %s', text => {
+        expect(redactSecrets(text)).toEqual({ text, count: 0 });
     });
 
     it('redacts a token inside a URL without breaking the URL around it', () => {
@@ -171,13 +231,19 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(`token=${GITHUB_TOKEN}&`.repeat(times)).count).toBe(times);
     });
 
-    it('scans 1 MB hostile inputs in linear time (each well under a second; the old regexes took seconds or threw)', () => {
+    it('scans hostile inputs in linear time: 1 MB each, 4 MB for a JWT run (each well under a second; the old regexes took seconds or threw)', () => {
         const fill = (unit: string): string => unit.repeat(Math.ceil(HOSTILE_BYTES / unit.length));
         const hostile = [
             fill('_token'), fill('token:'), fill('token='), fill(`"'`), fill('=:'), fill('""""""token"""""":x '), fill('token '),
             fill('password'), `"${fill('a_')}token":abcdefghij`, `token${' '.repeat(HOSTILE_BYTES)}x`, `${'a_'.repeat(HOSTILE_BYTES / 2)}password`,
             fill('{"user": "octocat", "password": "correcthorse", "client_secret": "abcdefghij"}\n'),
             fill('-----BEGIN PRIVATE KEY-----'), fill('_eyJaaaaa'),
+            // GitHub tokens are unbounded: one long run, repeated short runs, runs one short of a token.
+            ` ghs_${'a'.repeat(HOSTILE_BYTES)}`, fill('ghs_'), fill(' ghs_1_'), fill(` ghs_${'a'.repeat(35)}`),
+            // JWT segments are unbounded: a run with no dot, and one whose last dot never comes.
+            ` eyJ${'a'.repeat(JWT_RUN_BYTES)}`, ` eyJaaaaa.eyJ${'a'.repeat(JWT_RUN_BYTES)}`, fill('.eyJaaaaa'),
+            // camelCase keys: chains of them, with and without separators, and boundaries with no keyword.
+            fill('aToken'), fill('aToken:'), fill('"aBcToken": "'), fill(` ${'aB'.repeat(40)}`), fill(` ${`${'aToken'.repeat(10)}_`.repeat(17)}`),
         ];
         for (const text of hostile) {
             const started = Date.now();

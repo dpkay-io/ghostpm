@@ -58,8 +58,8 @@ class LeaseLostError extends Error {}
 /** Another runner owns the row now: this runner records nothing for it and never retries it. */
 class ClaimLostError extends Error {}
 
-/** `pushed` and `requeued`: the pusher completed the row itself. */
-type Outcome = 'pushed' | 'skipped' | 'requeued' | 'deferred' | 'no_item';
+/** `pushed` and `ended`: the pusher completed the row itself (`ended`: with nothing pushed). */
+type Outcome = 'pushed' | 'skipped' | 'ended' | 'deferred' | 'no_item';
 
 interface Claim {
     db: Ledger;
@@ -141,18 +141,17 @@ async function pushCreate(ctx: PushContext): Promise<Outcome> {
     // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
     let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
     if (item === null && closed) {
-        // The task may have reopened while the lookup was out: read it again, with the claim, in one write.
-        const stillClosed = write(ctx.db, () => {
-            held(holdsClaim(ctx.db, ctx.row.id, ctx.deps.holder));
-            const closedNow = CLOSED_PHASES.has(getTask(ctx.db, ctx.task.id)!.phase);
-            if (closedNow) dropUnpushed(ctx.db, ctx.task.id);   // its comments can never reach the vendor either
-            return closedNow;
+        // Nothing landed. The task may have reopened while the lookup was out: read it again and complete this row in
+        // the same write, since a reopen between the two would find this create still in flight and queue nothing.
+        finish(ctx, () => {
+            const task = getTask(ctx.db, ctx.task.id)!;
+            // Still closed: its comments can never reach the vendor either.
+            if (CLOSED_PHASES.has(task.phase)) dropUnpushed(ctx.db, task.id);
+            // Reopened: this create is stale. The projection decides, by policy, what the task needs now
+            // (a fresh create its waiting comments and state then follow).
+            else projectTask(ctx.db, task, 'change', nowIso());
         });
-        if (stillClosed) return 'skipped';
-        // Reopened, and nothing landed: this create is stale. Only it ends here; the projection decides, by
-        // policy, what the reopened task needs (a fresh create its waiting comments and state then follow).
-        finish(ctx, () => projectTask(ctx.db, getTask(ctx.db, ctx.task.id)!, 'change', nowIso()));
-        return 'requeued';
+        return 'ended';
     }
     if (item === null) {
         const nonce = earlier.nonce ?? newNonce();
@@ -337,8 +336,8 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
     } else if (outcome === 'skipped') {
         completeSkipped(db, deps, row);
         summary.skipped++;
-    } else if (outcome === 'requeued') {
-        summary.skipped++;   // the pusher completed it, handing the task back to the projection
+    } else if (outcome === 'ended') {
+        summary.skipped++;   // the pusher completed it without pushing
     } else if (outcome === 'deferred') {
         held(deferRow(db, row, deps.holder, deps.now() + DEFER_MS));
         summary.deferred++;
