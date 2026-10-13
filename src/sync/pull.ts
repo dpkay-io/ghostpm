@@ -13,6 +13,8 @@ import { RemoteItem, VendorAdapter } from './vendor';
 /** Spec O2: all states for items changed in the last 90 days, plus all linked items. */
 export const PULL_WINDOW_DAYS = 90;
 export const PULL_PAGE_LIMIT = 500;
+/** How far before its start the next pull re-reads: the vendor's clock and search index may lag ours. */
+export const PULL_OVERLAP_MS = 5 * 60 * 1000;
 /** Linked items the list did not return that one pull re-reads, rotating through all of them. */
 export const LINK_CHECK_LIMIT = 10;
 /** PR events (newest first) of open tasks that one pull asks about. */
@@ -108,7 +110,8 @@ function latestChange(items: RemoteItem[]): string {
 
 /**
  * One pull of one workspace, by the holder of the sync lease, which it renews before every vendor call
- * (ruling D7). Throws on a vendor failure or a lost lease; the watermark then stays where it was.
+ * (ruling D7) and checks in every write (ruling F2). Throws on a vendor failure or a lost lease; the
+ * watermark then stays where it was.
  */
 export async function pullWorkspace(
     db: Ledger,
@@ -117,10 +120,9 @@ export async function pullWorkspace(
     pageLimit: number = PULL_PAGE_LIMIT,
 ): Promise<PullSummary> {
     // Taken before any fetch, so what changes while fetching is read next time (spec §8.5).
-    const now = deps.now();
-    const startedAt = new Date(now).toISOString();
+    const startedAt = deps.now();
     const since = getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC)
-        ?? new Date(now - PULL_WINDOW_DAYS * MS_PER_DAY).toISOString();
+        ?? new Date(startedAt - PULL_WINDOW_DAYS * MS_PER_DAY).toISOString();
     const summary: PullSummary = { fetched: 0, created: 0, humanEdits: 0, broken: 0, merged: 0 };
     const count = (outcome: UpsertOutcome): void => {
         if (outcome === 'created') summary.created++;
@@ -134,14 +136,21 @@ export async function pullWorkspace(
         renew();
         return adapter;
     };
+    // Ruling F2: every write checks the lease first, as the pusher checks its claim, so a lost lease stops the pull
+    // before anything it read lands, the watermark included.
+    const leasedWrite = <T>(fn: () => T): T => write(db, () => {
+        renew();
+        return fn();
+    });
     const upsert = (item: RemoteItem): void => {
         const prepared = incoming(adapter, item);
-        count(write(db, () => upsertItem(db, workspace, adapter, prepared)));
+        count(leasedWrite(() => upsertItem(db, workspace, adapter, prepared)));
     };
 
     // Gap-map N3: without it `@me` and the "assigned to me" candidates never work.
     if (getWorkspaceSetting<string>(db, workspace.id, SETTING_CURRENT_USER) === undefined) {
-        setWorkspaceSetting(db, workspace.id, SETTING_CURRENT_USER, await leased().currentUser());
+        const user = await leased().currentUser();
+        leasedWrite(() => setWorkspaceSetting(db, workspace.id, SETTING_CURRENT_USER, user));
     }
 
     const items = await leased().listChangedSince(since, pageLimit);
@@ -152,10 +161,10 @@ export async function pullWorkspace(
         upsert(item);
     }
 
-    for (const link of linksToCheck(db, workspace, seen)) {
+    for (const link of leasedWrite(() => linksToCheck(db, workspace, seen))) {
         const item = await leased().fetch(link.remote_id);
         if (item === null) {
-            write(db, () => markLinkBroken(db, link, GONE_REASON, nowIso()));
+            leasedWrite(() => markLinkBroken(db, link, GONE_REASON, nowIso()));
             summary.broken++;
         } else {
             upsert(item);
@@ -166,7 +175,7 @@ export async function pullWorkspace(
         const mergedAt = await leased().mergedAt(pr.url);
         if (mergedAt === null) continue;
         // Evidence, not a human edit: blocked if a person changed the phase after the merge (spec §8.6).
-        const moved = write(db, () => {
+        const moved = leasedWrite(() => {
             const task = getTask(db, pr.taskId);
             const at = nowIso();
             if (task === undefined || !advancePhase(db, task, PR_MERGED_PHASE, { source: SYNC_SOURCE, human: false }, at, mergedAt)) return false;
@@ -177,7 +186,9 @@ export async function pullWorkspace(
         if (moved) summary.merged++;
     }
 
-    // A full page may have more behind it: continue from the newest change seen, not from now.
-    setWorkspaceSetting(db, workspace.id, SETTING_LAST_SYNC, items.length >= pageLimit ? latestChange(items) : startedAt);
+    // A full page may have more behind it: continue from the newest change seen. Otherwise re-read a little before
+    // this pull began, for a vendor clock or search index behind ours (ruling F4); re-reads are de-duplicated by baseline.
+    const watermark = items.length >= pageLimit ? latestChange(items) : new Date(startedAt - PULL_OVERLAP_MS).toISOString();
+    leasedWrite(() => setWorkspaceSetting(db, workspace.id, SETTING_LAST_SYNC, watermark));
     return summary;
 }

@@ -344,6 +344,23 @@ describe('pushing the outbox', () => {
         expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'C', last_pushed_rev: getTask(ledger.db, task.id)!.rev, intent_title: null });
     });
 
+    it("keeps the user's rename made since a landed push when a person only closed the item, read before the retry", async () => {
+        const task = track('A');
+        await push();
+        change(task.id, { title: 'B' });
+        vendor.failAfterApply = new Error('gh timed out after 45000 ms');   // B landed; its answer did not
+        expect((await push()).retried).toBe(1);
+        change(task.id, { title: 'C' });
+        vendor.humanEdit('1', { state: 'closed:completed' });              // a person only closes it
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();   // the retry's pre-push read sees B as ours, the close as the person's
+
+        expect(getTask(ledger.db, task.id)).toMatchObject({ title: 'C', phase: 'done' });
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, SOURCE]);
+        expect(vendor.items.get('1')).toMatchObject({ title: 'C', state: 'closed:completed' });
+    });
+
     it('writes nothing of a fetch whose row another runner finished while it was out', async () => {
         const task = track('Login fix');
         await push();

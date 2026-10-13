@@ -5,11 +5,13 @@ import { listEvents, recordEvent } from '../../src/ledger/events';
 import { startSession } from '../../src/ledger/sessions';
 import { recordEvidence, trackWork } from '../../src/ledger/work';
 import {
-    getWorkspaceSetting, setSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
+    getWorkspaceSetting, setSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_PROGRESS_COMMENTS,
+    SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
 } from '../../src/ledger/settings';
 import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
 import { acquireLease, LeaseLostError, LEASE_TTL_MS } from '../../src/sync/lease';
-import { pullWorkspace, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT } from '../../src/sync/pull';
+import { PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
+import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT } from '../../src/sync/pull';
 import { pushDue, PushDeps } from '../../src/sync/push';
 import { VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
 import { FakeVendor } from './fake-vendor';
@@ -21,7 +23,11 @@ const OTHER_HOLDER = 'pid:other-runner';
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const PR_URL = 'https://github.com/acme/widgets/pull/9';
-const RETRY_MARKER = '<!-- ghostpm:0123456789abcdef -->';
+const LOST_ANSWER = 'gh timed out after 45000 ms';
+/** Past the first retry's backoff: the retried push is due. */
+const RETRY_DUE_MS = PUSH_BACKOFF_BASE_MS + 5000;
+/** A change the vendor dates this long before a pull began, but lists only afterwards (clock skew, index lag). */
+const LATE_CHANGE_MS = 2 * 60 * 1000;
 
 describe('pulling a vendor workspace', () => {
     let ledger: TempLedger;
@@ -32,7 +38,7 @@ describe('pulling a vendor workspace', () => {
 
     /** One pull that begins at `now`. */
     const pull = (now: number = Date.now(), pageLimit?: number) => pullWorkspace(ledger.db, workspace, { ...deps, now: () => now }, pageLimit);
-    const push = () => pushDue(ledger.db, deps);
+    const push = (laterMs = 0) => pushDue(ledger.db, { ...deps, now: () => Date.now() + laterMs });
     const track = (title: string): TaskRow =>
         trackWork(ledger.db, { sessionId: SESSION_ID, source: SOURCE, workspaceId: workspace.id, title, intent: 'implement' }).task;
     const taskFor = (remoteId: string): TaskRow => ledger.db.prepare(
@@ -65,13 +71,23 @@ describe('pulling a vendor workspace', () => {
         ledger.cleanup();
     });
 
-    it('starts 90 days back, and moves the watermark to when the pull began', async () => {
+    it('starts 90 days back, and moves the watermark to a little before the pull began', async () => {
         const now = Date.now();
+        const watermark = new Date(now - PULL_OVERLAP_MS).toISOString();
         await pull(now);
         expect(vendor.calls.find(call => call.op === 'list')!.text).toBe(new Date(now - PULL_WINDOW_DAYS * DAY_MS).toISOString());
-        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(new Date(now).toISOString());
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(watermark);
         await pull(now + HOUR_MS);
-        expect(vendor.calls.filter(call => call.op === 'list')[1].text).toBe(new Date(now).toISOString());
+        expect(vendor.calls.filter(call => call.op === 'list')[1].text).toBe(watermark);
+    });
+
+    it('still pulls a change the vendor dates shortly before the last pull began but listed only after it', async () => {
+        const now = Date.now();
+        await pull(now);
+        const late = vendor.seed({ title: 'Indexed late' });
+        vendor.items.get(late.remoteId)!.updatedAt = new Date(now - LATE_CHANGE_MS).toISOString();
+
+        expect((await pull(now + HOUR_MS)).created).toBe(1);
     });
 
     it('leaves the watermark where it was when the vendor call fails', async () => {
@@ -92,12 +108,6 @@ describe('pulling a vendor workspace', () => {
         expect(taskFor('4')).toMatchObject({ origin: 'vendor', title: 'Reviewing', assignee: 'octocat' });
         expect(getVendorLink(ledger.db, taskFor('4').id)).toMatchObject({ remote_title: 'Reviewing', labels: '["ghostpm:in_review"]' });
         expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
-    });
-
-    it('keeps retry markers out of the body of a task it brings in', async () => {
-        vendor.seed({ title: 'Made by an earlier attempt', body: `Details\n\n${RETRY_MARKER}` });
-        await pull();
-        expect(taskFor('1').body).toBe('Details');
     });
 
     it('detects the current user once', async () => {
@@ -161,7 +171,7 @@ describe('pulling a vendor workspace', () => {
         const task = track('A');
         await push();
         change(task.id, { title: 'B' });
-        vendor.failAfterApply = new Error('gh timed out after 45000 ms');   // B landed; its answer did not
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // B landed; its answer did not
         expect((await push()).retried).toBe(1);
         vendor.humanEdit('1', { title: 'C' });
 
@@ -176,13 +186,51 @@ describe('pulling a vendor workspace', () => {
         const task = track('A');
         await push();
         const renamed = change(task.id, { title: 'B' });
-        vendor.failAfterApply = new Error('gh timed out after 45000 ms');
+        vendor.failAfterApply = new Error(LOST_ANSWER);
         expect((await push()).retried).toBe(1);
 
         expect((await pull()).humanEdits).toBe(0);
 
         expect(getTask(ledger.db, task.id)!.title).toBe('B');
         expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_title: 'B', last_pushed_rev: renamed.rev, intent_title: null });
+    });
+
+    // Ruling F1: ownership is decided per field.
+    it('keeps a local rename made since our push landed, when a person only closed the item, and pushes it', async () => {
+        const task = track('A');
+        await push();
+        change(task.id, { title: 'B' });
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // B landed; its answer did not
+        expect((await push()).retried).toBe(1);
+        change(task.id, { title: 'C' });
+        vendor.humanEdit('1', { state: 'closed:completed' });   // a person only closes it
+
+        expect((await pull()).humanEdits).toBe(1);
+
+        expect(getTask(ledger.db, task.id)).toMatchObject({ title: 'C', phase: 'done' });
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual([SOURCE, SOURCE]);
+        expect(pendingOps(task.id)).toContain('sync_state');
+        await push(RETRY_DUE_MS);
+        expect(vendor.items.get('1')).toMatchObject({ title: 'C', state: 'closed:completed' });
+    });
+
+    it('keeps a local phase change made since our push landed, when a person only renamed the item, and pushes it', async () => {
+        setSetting(ledger.db, SETTING_PROGRESS_COMMENTS, 'none');   // the lost answer is then the state push's
+        const task = track('A');
+        await push();
+        change(task.id, { phase: 'in_review' });
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // in_review landed; its answer did not
+        expect((await push()).retried).toBe(1);
+        change(task.id, { phase: 'planned' });
+        vendor.humanEdit('1', { title: 'Renamed by a person' });
+
+        expect((await pull()).humanEdits).toBe(1);
+
+        expect(getTask(ledger.db, task.id)).toMatchObject({ title: 'Renamed by a person', phase: 'planned' });
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['phase'] }).map(event => event.source)).toEqual([SOURCE, SOURCE]);
+        expect(pendingOps(task.id)).toContain('sync_state');
+        await push(RETRY_DUE_MS);
+        expect(vendor.items.get('1')).toMatchObject({ title: 'Renamed by a person', labels: ['ghostpm:planned'] });
     });
 
     it("ends a push's intent when a pull stored a newer baseline before the push's answer came back", async () => {
@@ -292,9 +340,13 @@ describe('pulling a vendor workspace', () => {
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(second.updatedAt);
     });
 
-    describe('holding the sync lease (ruling D7)', () => {
-        /** A pull with every vendor call (list, item re-read, PR view) to make, and a clock it moves itself. */
+    describe('holding the sync lease (rulings D7, F2)', () => {
+        /** The pull's clock, which the tests move themselves. */
         let clock: number;
+        const pullOnClock = () => pullWorkspace(ledger.db, workspace, { ...deps, now: () => clock });
+        /** Our lease ran out while a call was out, and another runner took it. */
+        const otherRunnerTakesLease = (): boolean => acquireLease(ledger.db, OTHER_HOLDER, clock + LEASE_TTL_MS + 1);
+        /** A pull with every vendor call (list, item re-read, PR view) to make. */
         const linkedWithPr = async (): Promise<void> => {
             vendor.seed({ title: 'Linked' });
             await pull();
@@ -304,13 +356,13 @@ describe('pulling a vendor workspace', () => {
             setWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC, new Date(clock).toISOString());
         };
         /** Runs `during` at the start of each vendor call the pull loops make. */
-        const onEachCall = (during: () => void): void => {
+        const onEachCall = (during: (op: string) => void): void => {
             const list = vendor.listChangedSince.bind(vendor);
             const fetch = vendor.fetch.bind(vendor);
             const mergedAt = vendor.mergedAt.bind(vendor);
-            jest.spyOn(vendor, 'listChangedSince').mockImplementation((since, limit) => { during(); return list(since, limit); });
-            jest.spyOn(vendor, 'fetch').mockImplementation(remoteId => { during(); return fetch(remoteId); });
-            jest.spyOn(vendor, 'mergedAt').mockImplementation(url => { during(); return mergedAt(url); });
+            jest.spyOn(vendor, 'listChangedSince').mockImplementation((since, limit) => { during('list'); return list(since, limit); });
+            jest.spyOn(vendor, 'fetch').mockImplementation(remoteId => { during('fetch'); return fetch(remoteId); });
+            jest.spyOn(vendor, 'mergedAt').mockImplementation(url => { during('mergedAt'); return mergedAt(url); });
         };
 
         it('renews the lease before every vendor call, so a pull longer than the lease keeps it', async () => {
@@ -323,7 +375,7 @@ describe('pulling a vendor workspace', () => {
                 othersGotIt.push(acquireLease(ledger.db, OTHER_HOLDER, clock));
             });
 
-            await pullWorkspace(ledger.db, workspace, { ...deps, now: () => clock });
+            await pullOnClock();
 
             expect(vendorOps(before)).toEqual(['list', 'fetch', 'mergedAt']);
             expect(othersGotIt).toEqual([false, false, false]);
@@ -333,15 +385,34 @@ describe('pulling a vendor workspace', () => {
             await linkedWithPr();
             const watermark = getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC);
             const before = vendor.calls.length;
-            let first = true;
-            onEachCall(() => {
-                if (first) acquireLease(ledger.db, OTHER_HOLDER, clock + LEASE_TTL_MS + 1);   // our lease ran out mid-call
-                first = false;
-            });
+            onEachCall(op => { if (op === 'list') otherRunnerTakesLease(); });
 
-            await expect(pullWorkspace(ledger.db, workspace, { ...deps, now: () => clock })).rejects.toThrow(LeaseLostError);
+            await expect(pullOnClock()).rejects.toThrow(LeaseLostError);
 
             expect(vendorOps(before)).toEqual(['list']);
+            expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(watermark);
+        });
+
+        it('writes nothing it listed once another runner took the lease during the list', async () => {
+            clock = Date.now();
+            vendor.seed({ title: 'Listed as the lease ran out' });
+            onEachCall(op => { if (op === 'list') otherRunnerTakesLease(); });
+
+            await expect(pullOnClock()).rejects.toThrow(LeaseLostError);
+
+            expect(taskFor('1')).toBeUndefined();
+            expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBeUndefined();
+        });
+
+        it('moves no task and leaves the watermark once another runner took the lease during the last vendor call', async () => {
+            await linkedWithPr();
+            vendor.prs.set(PR_URL, new Date(Date.now() - HOUR_MS).toISOString());
+            const watermark = getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC);
+            onEachCall(op => { if (op === 'mergedAt') otherRunnerTakesLease(); });
+
+            await expect(pullOnClock()).rejects.toThrow(LeaseLostError);
+
+            expect(taskFor('1').phase).toBe('planned');
             expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(watermark);
         });
     });

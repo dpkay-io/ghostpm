@@ -34,19 +34,31 @@ function writeBaseline(db: Ledger, link: VendorLinkRow, item: RemoteItem, title:
 const isNewer = (item: RemoteItem, link: VendorLinkRow): boolean =>
     link.remote_updated_at === null || Date.parse(item.updatedAt) > Date.parse(link.remote_updated_at);
 
-/** Our own push, landed without its answer being recorded (a failed re-read, a timeout, a lost claim). */
-const matchesIntent = (adapter: VendorAdapter, link: VendorLinkRow, item: RemoteItem): boolean =>
-    link.intent_title !== null && link.intent_phase !== null
-    && adapter.titlesMatch(item.title, link.intent_title)
-    && adapter.phaseOf(item.state, item.labels, link.intent_phase) === link.intent_phase;
+interface Ownership {
+    title: boolean;
+    phase: boolean;
+}
 
 /**
- * Spec §8.6, human wins. `item` is what the vendor holds now. If it is newer than the
- * baseline and its title or phase differs from what we last saw there, a person (or a bot:
- * the spec's accepted limitation) edited it: apply that here as a human change, and drop
- * the pending push only when the edit replaced both title and phase (Ruling: it may carry
- * a local change the person did not touch). A newer item that is the push in flight
- * (`intent_*`) is ours, not an edit. Then `item` becomes the baseline.
+ * Field by field, whether the vendor shows the push in flight (`intent_*`): our own push, landed without its
+ * answer being recorded (a failed re-read, a timeout, a lost claim). A phase the vendor has no opinion on is
+ * no evidence against it.
+ */
+function ownedByIntent(adapter: VendorAdapter, link: VendorLinkRow, item: RemoteItem): Ownership {
+    if (link.intent_title === null || link.intent_phase === null) return { title: false, phase: false };
+    return {
+        title: adapter.titlesMatch(item.title, link.intent_title),
+        phase: adapter.phaseOf(item.state, item.labels, link.intent_phase) === link.intent_phase,
+    };
+}
+
+/**
+ * Spec §8.6, human wins, decided field by field. `item` is what the vendor holds now. If it is
+ * newer than the baseline, each field that shows the push in flight is ours; any other field that
+ * differs from what we last saw there was edited by a person (or a bot: the spec's accepted
+ * limitation). Only those fields are applied here, as a human change, and the pending push is
+ * dropped only when the edit replaced both title and phase (it may carry a local change the person
+ * did not touch). Then `item` becomes the baseline.
  * Returns whether a human edit was applied. Plain statements: call inside write().
  */
 export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRow, link: VendorLinkRow, item: RemoteItem): boolean {
@@ -55,30 +67,28 @@ export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRo
         if (link.broken_at !== null) db.prepare(`UPDATE vendor_links SET broken_at = NULL WHERE ${LINK_KEY}`).run(link.task_id, link.vendor);
         return false;
     }
-    const ours = matchesIntent(adapter, link, item);
-    let edited = false;
-    if (!ours) {
-        const titleChanged = !adapter.titlesMatch(item.title, link.remote_title ?? task.title);
-        const knownPhase = link.remote_state === null
-            ? task.phase
-            : adapter.phaseOf(link.remote_state, parseLabels(link.labels), task.phase);
-        const remotePhase = adapter.phaseOf(item.state, item.labels, task.phase);
-        const phaseChanged = remotePhase !== knownPhase && remotePhase !== task.phase;
-        if (titleChanged || phaseChanged) {
-            updateTask(db, task.id, {
-                title: titleChanged ? item.title : undefined,
-                phase: phaseChanged ? remotePhase : undefined,
-            }, { source: VENDOR_SOURCE, human: true });
-            if (titleChanged && phaseChanged) dropPendingSyncState(db, task.id);
-            edited = true;
-        }
+    const ours = ownedByIntent(adapter, link, item);
+    const knownPhase = link.remote_state === null
+        ? task.phase
+        : adapter.phaseOf(link.remote_state, parseLabels(link.labels), task.phase);
+    const remotePhase = adapter.phaseOf(item.state, item.labels, task.phase);
+    const titleEdited = !ours.title && !adapter.titlesMatch(item.title, link.remote_title ?? task.title);
+    const phaseEdited = !ours.phase && remotePhase !== knownPhase && remotePhase !== task.phase;
+    const edited = titleEdited || phaseEdited;
+    if (edited) {
+        updateTask(db, task.id, {
+            title: titleEdited ? item.title : undefined,
+            phase: phaseEdited ? remotePhase : undefined,
+        }, { source: VENDOR_SOURCE, human: true });
+        if (titleEdited && phaseEdited) dropPendingSyncState(db, task.id);
     }
     // Vendor-owned fields: shown locally, never pushed. The adapter already stripped our markers from the body.
     db.prepare('UPDATE tasks SET body = ?, assignee = ?, milestone = ? WHERE id = ?')
         .run(item.body, item.assignee, item.milestone, task.id);
-    // The intent ends with our push adopted, or with a person's edit applied over it (it can never be ours after that).
-    if (ours) writeBaseline(db, link, item, link.intent_title!, link.intent_rev, true);
-    else writeBaseline(db, link, item, item.title, null, edited);
+    // Our push shows whole: the vendor holds its revision. The intent ends then, or with a person's edit applied
+    // over it (it can never be ours after that).
+    const landed = ours.title && ours.phase;
+    writeBaseline(db, link, item, ours.title ? link.intent_title! : item.title, landed ? link.intent_rev : null, landed || edited);
     return edited;
 }
 
