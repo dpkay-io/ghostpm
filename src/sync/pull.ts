@@ -1,14 +1,16 @@
 import { Ledger, nowIso, write } from '../ledger/db';
 import {
-    getWorkspaceSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_LINK_CHECK_CURSOR, SETTING_PULL_WATERMARK,
+    getWorkspaceSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_LINK_CHECK_CURSOR, SETTING_PR_CHECK_CURSOR,
+    SETTING_PULL_WATERMARK,
 } from '../ledger/settings';
 import { bumpRevision, getTask, insertTaskRow, insertVendorLink } from '../ledger/tasks';
 import { advancePhase } from '../ledger/work';
 import { CLOSED_PHASES, EventKind, Phase, SYNC_SOURCE, VENDOR_SOURCE, VendorLinkRow, WorkspaceRow } from '../ledger/types';
-import { holdLease } from './lease';
+import { appendLog, SYNC_LOG_FILE } from '../hook/log';
+import { holdLease, LeaseLostError } from './lease';
 import { PushDeps, guardWith } from './push';
 import { applyRemoteItem, markLinkBroken } from './reconcile';
-import { RemoteItem, VendorAdapter } from './vendor';
+import { GoneError, RemoteItem, SyncPausedError, VendorAdapter } from './vendor';
 
 /** Spec O2: all states for items changed in the last 90 days, plus all linked items. */
 export const PULL_WINDOW_DAYS = 90;
@@ -75,7 +77,20 @@ function upsertItem(db: Ledger, workspace: WorkspaceRow, adapter: VendorAdapter,
     return 'created';
 }
 
-/** O2 "plus all linked items": the links this pull did not see, a batch at a time, rotating by task id. */
+/**
+ * The next `limit` of `items` (in ascending `keyOf` order) after the workspace's cursor stored under `setting`,
+ * wrapping round to the first; the cursor moves to the last one taken, so every item gets its turn. Call inside write().
+ */
+function nextBatch<T>(db: Ledger, workspace: WorkspaceRow, setting: string, items: T[], keyOf: (item: T) => number, limit: number): T[] {
+    const cursor = getWorkspaceSetting<number>(db, workspace.id, setting) ?? 0;
+    const start = items.findIndex(item => keyOf(item) > cursor);
+    const rotated = start < 0 ? items : items.slice(start).concat(items.slice(0, start));
+    const batch = rotated.slice(0, limit);
+    if (batch.length > 0) setWorkspaceSetting(db, workspace.id, setting, keyOf(batch[batch.length - 1]));
+    return batch;
+}
+
+/** O2 "plus all linked items": the links this pull did not see, a batch at a time, rotating by task id. Call inside write(). */
 function linksToCheck(db: Ledger, workspace: WorkspaceRow, seen: Set<string>): VendorLinkRow[] {
     const links = (db.prepare(`
         SELECT l.* FROM vendor_links l JOIN tasks t ON t.id = l.task_id
@@ -83,27 +98,37 @@ function linksToCheck(db: Ledger, workspace: WorkspaceRow, seen: Set<string>): V
         ORDER BY l.task_id`)
         .all(workspace.id, workspace.vendor) as VendorLinkRow[])
         .filter(link => !seen.has(link.remote_id));
-    const cursor = getWorkspaceSetting<number>(db, workspace.id, SETTING_LINK_CHECK_CURSOR) ?? 0;
-    const start = links.findIndex(link => link.task_id > cursor);
-    const rotated = start < 0 ? links : links.slice(start).concat(links.slice(0, start));
-    const batch = rotated.slice(0, LINK_CHECK_LIMIT);
-    if (batch.length > 0) setWorkspaceSetting(db, workspace.id, SETTING_LINK_CHECK_CURSOR, batch[batch.length - 1].task_id);
-    return batch;
+    return nextBatch(db, workspace, SETTING_LINK_CHECK_CURSOR, links, link => link.task_id, LINK_CHECK_LIMIT);
 }
 
-function openPullRequests(db: Ledger, workspaceId: number): { taskId: number; url: string }[] {
+/** One pull request to ask about, with every open task that recorded it; `seq` is when it was first recorded. */
+interface PullRequestCheck {
+    url: string;
+    seq: number;
+    taskIds: number[];
+}
+
+/**
+ * Ruling F9: each pull request recorded on an open task, asked about once however often it was recorded, a batch at a
+ * time, rotating by when it was first recorded so none waits behind newer ones for ever. Call inside write().
+ */
+function pullRequestsToCheck(db: Ledger, workspace: WorkspaceRow): PullRequestCheck[] {
     const closed = Array.from(CLOSED_PHASES);
     const rows = db.prepare(`
-        SELECT e.task_id AS taskId, e.payload AS payload FROM events e JOIN tasks t ON t.id = e.task_id
+        SELECT e.seq AS seq, e.task_id AS taskId, e.payload AS payload FROM events e JOIN tasks t ON t.id = e.task_id
         WHERE t.workspace_id = ? AND e.kind = ? AND t.phase NOT IN (${closed.map(() => '?').join(', ')})
-        ORDER BY e.seq DESC LIMIT ?`)
-        .all(workspaceId, PR_EVENT, ...closed, PR_CHECK_LIMIT) as { taskId: number; payload: string | null }[];
-    const prs: { taskId: number; url: string }[] = [];
+        ORDER BY e.seq`)
+        .all(workspace.id, PR_EVENT, ...closed) as { seq: number; taskId: number; payload: string | null }[];
+    const byUrl = new Map<string, PullRequestCheck>();
     for (const row of rows) {
         const url = (JSON.parse(row.payload ?? '{}') as { url?: unknown }).url;
-        if (typeof url === 'string' && url.length > 0) prs.push({ taskId: row.taskId, url });
+        if (typeof url !== 'string' || url.length === 0) continue;
+        const known = byUrl.get(url);
+        if (known === undefined) byUrl.set(url, { url, seq: row.seq, taskIds: [row.taskId] });
+        else if (known.taskIds.indexOf(row.taskId) < 0) known.taskIds.push(row.taskId);
     }
-    return prs;
+    // A Map keeps insertion order: by first record.
+    return nextBatch(db, workspace, SETTING_PR_CHECK_CURSOR, Array.from(byUrl.values()), check => check.seq, PR_CHECK_LIMIT);
 }
 
 function latestChange(items: RemoteItem[]): string {
@@ -175,25 +200,37 @@ export async function pullWorkspace(
         }
     }
 
-    for (const pr of openPullRequests(db, workspace.id)) {
-        const mergedAt = await leased().mergedAt(pr.url);
+    for (const pr of leasedWrite(() => pullRequestsToCheck(db, workspace))) {
+        let mergedAt: string | null;
+        try {
+            mergedAt = await leased().mergedAt(pr.url);
+        } catch (error) {
+            // Ruling F5: one pull request that cannot be read must not stop this pull, nor every pull after it. A lost
+            // lease or a reason to pause still ends the pull; a gone pull request is simply not merged.
+            if (error instanceof LeaseLostError || error instanceof SyncPausedError) throw error;
+            if (!(error instanceof GoneError)) {
+                appendLog(SYNC_LOG_FILE, `pull ${workspace.path}: ${pr.url}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            continue;
+        }
         if (mergedAt === null) continue;
+        const merged = mergedAt;
         // Evidence, not a human edit: blocked if a person changed the phase after the merge (spec §8.6).
-        const moved = leasedWrite(() => {
-            const task = getTask(db, pr.taskId);
+        summary.merged += leasedWrite(() => pr.taskIds.filter(taskId => {
+            const task = getTask(db, taskId);
             const at = nowIso();
-            if (task === undefined || !advancePhase(db, task, PR_MERGED_PHASE, { source: SYNC_SOURCE, human: false }, at, mergedAt)) return false;
+            if (task === undefined || !advancePhase(db, task, PR_MERGED_PHASE, { source: SYNC_SOURCE, human: false }, at, merged)) return false;
             // Ruling D2: a new revision, or the pusher skips the queued state as the one it last pushed.
             bumpRevision(db, task.id, at);
             return true;
-        });
-        if (moved) summary.merged++;
+        }).length);
     }
 
     // A full page may have more behind it: continue from the newest change seen, and leave last_sync so the next pull is
     // due at once. Otherwise re-read a little before this pull began, for a vendor clock or search index behind ours
-    // (ruling F4; re-reads are de-duplicated by baseline), and count the schedule from when this pull began.
-    const full = items.length >= pageLimit;
+    // (ruling F4; re-reads are de-duplicated by baseline), and count the schedule from when this pull began. Only an
+    // adapter that lists by page can come back full (ruling F6).
+    const full = adapter.pages && items.length >= pageLimit;
     const watermark = full ? latestChange(items) : new Date(startedAt - PULL_OVERLAP_MS).toISOString();
     leasedWrite(() => {
         setWorkspaceSetting(db, workspace.id, SETTING_PULL_WATERMARK, watermark);

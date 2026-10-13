@@ -26,6 +26,8 @@ export const SETTING_LAST_SYNC = 'last_sync';
 export const SETTING_PULL_WATERMARK = 'pull_watermark';
 /** Workspace, internal: task id the rotating linked-item check stopped at. */
 export const SETTING_LINK_CHECK_CURSOR = 'link_check_cursor';
+/** Workspace, internal: event seq (first record of a pull request) the rotating merged-PR check stopped at. */
+export const SETTING_PR_CHECK_CURSOR = 'pr_check_cursor';
 
 export const SYNC_POLICY_AUTO = 'auto';
 export const SYNC_POLICY_PROMOTE = 'promote';

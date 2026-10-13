@@ -61,12 +61,17 @@ export interface LinkState {
 
 /** Every write resolves to the item as the vendor holds it afterwards: the new baseline (spec §8.6). */
 export interface VendorAdapter {
+    /**
+     * Whether listChangedSince stops at its `limit` (one page). Only then can an answer of `limit` items have more
+     * behind it; an adapter that answers every match is never a full page (ruling F6).
+     */
+    readonly pages: boolean;
     create(desired: DesiredState, body: string): Promise<RemoteItem>;
     syncState(link: LinkState, desired: DesiredState): Promise<RemoteItem>;
     /** null: the comment was posted but the item could not be re-read. Callers must not update any baseline from null. */
     comment(remoteId: string, text: string): Promise<RemoteItem | null>;
     closeDuplicate(remoteId: string, ofRemoteId: string): Promise<RemoteItem>;
-    /** Items changed at or after `since` in every state, oldest change first; at most `limit` where the vendor pages. */
+    /** Items changed at or after `since` in every state, oldest change first; at most `limit` when `pages`. */
     listChangedSince(since: string, limit: number): Promise<RemoteItem[]>;
     /** null when the item was deleted or moved out of this repository or project. */
     fetch(remoteId: string): Promise<RemoteItem | null>;

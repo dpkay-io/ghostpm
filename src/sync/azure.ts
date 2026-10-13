@@ -97,6 +97,9 @@ export function isLossyCopy(received: string, known: string): boolean {
 }
 
 export class AzureAdapter implements VendorAdapter {
+    /** `az boards query` answers every match: WIQL has no row limit and the command no --top (az 2.85 help). */
+    readonly pages = false;
+
     constructor(
         private readonly org: string,
         private readonly project: string,
@@ -208,7 +211,7 @@ export class AzureAdapter implements VendorAdapter {
         return this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
     }
 
-    /** Every match, whatever `_limit` says: WIQL has no row limit and `az boards query` has no --top (az 2.85 help). */
+    /** Every match, whatever `_limit` says (`pages` is false). */
     async listChangedSince(since: string, _limit: number): Promise<RemoteItem[]> {
         const items = await this.query([`[${FIELD.changed}] >= ${wiqlDateFrom(Date.parse(since))}`], `[${FIELD.changed}] ASC`);
         return items.map(item => this.toItem(item));

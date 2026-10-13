@@ -169,6 +169,17 @@ describe('GitHubAdapter', () => {
         expect(gh.calls.map(call => call.args[0])).toEqual(['pr', 'repo']);
     });
 
+    it('answers a pull request GitHub cannot resolve as gone (F5)', async () => {
+        const repo = freshRepo();
+        const missing = new CliError('gh failed (exit 1)', 1, 'GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)', false, false);
+        const adapter = new GitHubAdapter(repo, fakeGh({ 'pr view': missing }).run);
+        await expect(adapter.mergedAt(`https://github.com/${repo}/pull/9`)).rejects.toBeInstanceOf(GoneError);
+    });
+
+    it('lists by page: no more than the limit asked for (F6)', () => {
+        expect(new GitHubAdapter(freshRepo(), fakeGh().run).pages).toBe(true);
+    });
+
     it('reads the current user', async () => {
         const gh = fakeGh({ 'api user': 'octocat\n' });
         expect(await new GitHubAdapter(freshRepo(), gh.run).currentUser()).toBe('octocat');

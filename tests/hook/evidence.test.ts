@@ -91,6 +91,38 @@ describe('PostToolBatch evidence', () => {
         expect(prs[0].url).toBe('https://github.com/acme/app/pull/42');
     });
 
+    it("records the pull request's URL, never the /pull/new/<branch> hint git push prints before it (F9)", () => {
+        batch({
+            tool_name: 'Bash',
+            tool_input: { command: 'git push -u origin feature && gh pr create --fill' },
+            tool_response: "remote: Create a pull request for 'feature' on GitHub by visiting:\n"
+                + 'remote:      https://github.com/acme/app/pull/new/feature\n'
+                + '{"see":"https://github.com/acme/app","pr":"https://github.com/acme/app/pull/43"}\n',
+        });
+
+        expect(payloadsOf(active.id, 'pr').map(pr => pr.url)).toEqual(['https://github.com/acme/app/pull/43']);
+    });
+
+    it('records an Azure DevOps pull request URL (F9)', () => {
+        batch({
+            tool_name: 'Bash',
+            tool_input: { command: 'az repos pr create --open' },
+            tool_response: 'Opening https://dev.azure.com/acme/Widgets/_git/web/pullrequest/34 in a browser\n',
+        });
+
+        expect(payloadsOf(active.id, 'pr').map(pr => pr.url)).toEqual(['https://dev.azure.com/acme/Widgets/_git/web/pullrequest/34']);
+    });
+
+    it('records no pr when a pr create prints no pull request URL (F9)', () => {
+        batch({
+            tool_name: 'Bash',
+            tool_input: { command: 'gh pr create --fill' },
+            tool_response: 'pull request create failed: see https://docs.github.com/rest\n',
+        });
+
+        expect(kindsFor(active.id)).not.toContain('pr');
+    });
+
     it('records nothing at all when the session has no task', () => {
         setSessionTask(ledger.db, SESSION_ID, null);
 

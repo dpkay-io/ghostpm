@@ -24,7 +24,8 @@ const DUPLICATE = 'duplicate';
 const MERGED = 'MERGED';
 /** `gh help exit-codes`: "If a command requires authentication, the exit code will be 4". */
 const AUTH_REQUIRED_EXIT = 4;
-const GONE = /Could not resolve to an issue|HTTP 404|HTTP 410/i;
+/** An issue, or a pull request (`gh pr view` of one deleted or never there: ruling F5), that is not there. */
+const GONE = /Could not resolve to an issue|Could not resolve to a PullRequest|HTTP 404|HTTP 410/i;
 const REPO_UNRESOLVED = /Could not resolve to a Repository/i;
 const REPO_NOT_FOUND = /HTTP 404|HTTP 410/i;
 const NOT_AUTHENTICATED = /HTTP 401|Bad credentials|gh auth login/i;
@@ -118,6 +119,9 @@ function classify(error: unknown, repo: string, itemLevel: boolean): unknown {
 }
 
 export class GitHubAdapter implements VendorAdapter {
+    /** `gh issue list --limit`. */
+    readonly pages = true;
+
     constructor(private readonly repo: string, private readonly run: Runner = runCli) {}
 
     private async gh(args: CliArg[], input?: string, itemLevel = false): Promise<string> {

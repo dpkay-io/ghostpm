@@ -39,6 +39,8 @@ export class FakeVendor implements VendorAdapter {
     hold: Promise<void> | null = null;
     /** Compare titles the way the Azure DevOps adapter does. */
     lossyTitles = false;
+    /** Lists by page, as GitHub does; false answers every match, as Azure DevOps does. */
+    pages = true;
     private next = 1;
     /** Every vendor change is a second after the previous one, starting now: later than any pull begun before it. */
     private clock = Date.now();
@@ -146,7 +148,7 @@ export class FakeVendor implements VendorAdapter {
         return Array.from(this.items.values())
             .filter(item => Date.parse(item.updatedAt) >= Date.parse(since))
             .sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt))
-            .slice(0, limit)
+            .slice(0, this.pages ? limit : undefined)
             .map(copy);
     }
 

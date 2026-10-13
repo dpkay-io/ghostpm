@@ -27,7 +27,11 @@ const BASH_TOOL = 'Bash';
 /** Word-bounded: `git status` is not a commit. */
 const GIT_COMMIT = /\bgit\s+commit\b/;
 const PR_CREATE = /\b(?:gh\s+pr\s+create|az\s+repos\s+pr\s+create)\b/;
-const FIRST_URL = /https?:\/\/\S+/;
+/**
+ * A pull request's own URL (ruling F9): GitHub `/pull/<n>`, Azure DevOps `/pullrequest/<n>`. Not any URL: git push
+ * prints GitHub's `/pull/new/<branch>` hint first. Stops at quotes, so a URL inside printed JSON stays one URL.
+ */
+const PR_URL = /https?:\/\/[^\s"'<>]+?\/(?:pull|pullrequest)\/\d+(?!\w)/i;
 
 export interface HookOptions {
     /** Starts a detached one-shot `ghostpm sync --background`. Injected so tests never spawn. */
@@ -122,7 +126,7 @@ function collectEvidence(payload: HookPayload): BatchEvidence {
         const command = readString(call.tool_input, 'command');
         if (GIT_COMMIT.test(command)) evidence.committed = true;
         if (!PR_CREATE.test(command)) continue;
-        const printed = typeof call.tool_response === 'string' ? call.tool_response.match(FIRST_URL) : null;
+        const printed = typeof call.tool_response === 'string' ? call.tool_response.match(PR_URL) : null;
         if (printed) evidence.prUrls.push(printed[0]);
     }
     return evidence;

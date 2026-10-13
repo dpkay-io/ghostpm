@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from '../ledger/helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { getTask, getVendorLink, updateTask, TaskUpdate } from '../../src/ledger/tasks';
@@ -11,10 +13,11 @@ import {
 import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
 import { acquireLease, LeaseLostError, LEASE_TTL_MS } from '../../src/sync/lease';
 import { PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
-import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT } from '../../src/sync/pull';
+import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT, PR_CHECK_LIMIT } from '../../src/sync/pull';
 import { pushDue, PushDeps } from '../../src/sync/push';
 import { pullIsDue } from '../../src/sync/schedule';
-import { VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
+import { GoneError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
+import { SYNC_LOG_FILE } from '../../src/hook/log';
 import { FakeVendor } from './fake-vendor';
 
 const SOURCE = 'mcp:test';
@@ -30,6 +33,7 @@ const LOST_ANSWER = 'gh timed out after 45000 ms';
 const RETRY_DUE_MS = PUSH_BACKOFF_BASE_MS + 5000;
 /** A change the vendor dates this long before a pull began, but lists only afterwards (clock skew, index lag). */
 const LATE_CHANGE_MS = 2 * 60 * 1000;
+const UNREADABLE_PR = 'HTTP 502: Bad Gateway';
 
 describe('pulling a vendor workspace', () => {
     let ledger: TempLedger;
@@ -379,6 +383,72 @@ describe('pulling a vendor workspace', () => {
         expect(sinceOf(2)).toBe(third.updatedAt);
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(new Date(now).toISOString());
         expect(pullIsDue(ledger.db, workspace, now)).toBe(false);
+    });
+
+    it('reads an answer as complete, however long, from a vendor that does not list by page (F6)', async () => {
+        vendor.pages = false;
+        ['A', 'B', 'C'].forEach(title => vendor.seed({ title }));
+        const now = Date.now();
+
+        const summary = await pull(now, 2);
+
+        expect(summary).toMatchObject({ fetched: 3, created: 3, more: false });
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK)).toBe(new Date(now - PULL_OVERLAP_MS).toISOString());
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(new Date(now).toISOString());
+    });
+
+    it('skips a pull request that is gone, logs one it cannot read, checks the rest and still finishes the pull (F5)', async () => {
+        vendor.seed({ title: 'Gone PR' });
+        vendor.seed({ title: 'Unreadable PR' });
+        vendor.seed({ title: 'Merged PR', labels: ['ghostpm:in_review'] });
+        await pull();
+        const urls = ['1', '2', '3'].map(id => `https://github.com/acme/widgets/pull/${id}`);
+        urls.forEach((url, index) => recordEvent(ledger.db, {
+            taskId: taskFor(String(index + 1)).id, kind: 'pr', source: 'hook:claude-code', sessionId: 'earlier', payload: { url },
+        }));
+        const mergedAt = new Date(Date.now() - HOUR_MS).toISOString();
+        jest.spyOn(vendor, 'mergedAt').mockImplementation(async url => {
+            if (url === urls[0]) throw new GoneError('GraphQL: Could not resolve to a PullRequest with the number of 1.');
+            if (url === urls[1]) throw new Error(UNREADABLE_PR);
+            return mergedAt;
+        });
+        const now = Date.now() + HOUR_MS;
+
+        expect((await pull(now)).merged).toBe(1);
+
+        expect(taskFor('3').phase).toBe('done');
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(new Date(now).toISOString());
+        const log = fs.readFileSync(path.join(ledger.dir, SYNC_LOG_FILE), 'utf8');
+        expect(log).toContain(`${urls[1]}: ${UNREADABLE_PR}`);
+        expect(log).not.toContain(urls[0]);
+    });
+
+    it(`asks about each pull request once however often it was recorded, rotating through all of them ${PR_CHECK_LIMIT} a pull (F9)`, async () => {
+        vendor.seed({ title: 'Many PRs' });
+        vendor.seed({ title: 'Shares one' });
+        await pull();
+        const total = PR_CHECK_LIMIT + 2;
+        const urls = Array.from({ length: total }, (_, index) => `https://github.com/acme/widgets/pull/${index + 1}`);
+        for (const url of urls.concat(urls)) {   // each recorded twice
+            recordEvent(ledger.db, { taskId: taskFor('1').id, kind: 'pr', source: 'hook:claude-code', sessionId: 'earlier', payload: { url } });
+        }
+        recordEvent(ledger.db, { taskId: taskFor('2').id, kind: 'pr', source: 'hook:claude-code', sessionId: 'earlier', payload: { url: urls[0] } });
+        const askedDuring = async (now: number): Promise<string[]> => {
+            const before = vendor.calls.length;
+            await pull(now);
+            return vendor.calls.slice(before).filter(call => call.op === 'mergedAt').map(call => call.text!);
+        };
+        const later = Date.now() + DAY_MS;
+
+        const first = await askedDuring(later);
+        const second = await askedDuring(later + HOUR_MS);
+
+        expect(first).toEqual(urls.slice(0, PR_CHECK_LIMIT));
+        expect(second).toHaveLength(PR_CHECK_LIMIT);
+        expect(new Set(first.concat(second)).size).toBe(total);
+        vendor.prs.set(urls[0], new Date(Date.now() - HOUR_MS).toISOString());
+        await pull(later + 2 * HOUR_MS);
+        expect([taskFor('1').phase, taskFor('2').phase]).toEqual(['done', 'done']);   // one merge moves every task that recorded it
     });
 
     it('has nothing more to read at once after a full page whose changes all share the time it read from (tie stall, F10)', async () => {

@@ -225,6 +225,15 @@ describe('AzureAdapter', () => {
         expect(await adapter(az.run).mergedAt(`${ORG}/Widgets/_git/web/pullrequest/12`)).toBeNull();
     });
 
+    it('answers a pull request Azure DevOps no longer has as gone (F5)', async () => {
+        const az = fakeAz({ 'repos pr': azFailure('ERROR: The pull request 12 does not exist.') });
+        await expect(adapter(az.run).mergedAt(`${ORG}/Widgets/_git/web/pullrequest/12`)).rejects.toBeInstanceOf(GoneError);
+    });
+
+    it('does not list by page: a query answers every match, whatever the limit (F6)', () => {
+        expect(adapter(fakeAz().run).pages).toBe(false);
+    });
+
     it('reads the current user', async () => {
         const az = fakeAz({ 'account show': 'octo@acme.test\n' });
         expect(await adapter(az.run).currentUser()).toBe('octo@acme.test');
