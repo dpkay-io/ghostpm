@@ -7,17 +7,22 @@ import { loadConfig, McpPmConfig } from '../config';
 import { Ledger, write, nowIso } from './db';
 import { ensureWorkspace, findWorkspace, normalizePath, setWorkspaceVendor } from './workspaces';
 import {
-    getWorkspaceSetting, setWorkspaceSetting, PhaseStateMap,
+    getSetting, getWorkspaceSetting, setWorkspaceSetting, PhaseStateMap,
     SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY,
 } from './settings';
 import { getTask, insertTaskRow, insertVendorLink } from './tasks';
 import { recordEvent } from './events';
 import { enqueueComment, projectTask } from './projection';
-import { Phase, VENDOR_SOURCE, Vendor } from './types';
+import { Phase, VENDOR_SOURCE, Vendor, WorkspaceRow } from './types';
+import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 
 export const LEGACY_DB_FILE = '.mcp-pm.db';
 export const LEGACY_CONFIG_FILE = '.mcp-pm.yml';
-/** Workspace setting: when this repo's legacy data was imported. Set once per repo. */
+/**
+ * Workspace setting: when each legacy root was imported, by normalized root. Several roots can share
+ * one workspace (a linked worktree), and each is imported once. Builds before roots were tracked
+ * stored one time here; it covers the workspace's own root.
+ */
 export const LEGACY_IMPORT_SETTING = 'legacy_import_at';
 export const LEGACY_SOURCE = VENDOR_SOURCE;
 const LEGACY_COMMENT_SEPARATOR = '\n---\n';
@@ -120,12 +125,29 @@ function applyLegacyMetadata(db: Ledger, workspaceId: number, metadata: Map<stri
 
 /**
  * 1.4.0 synced existing items both ways but never created one: a legacy repo keeps that as
- * `linked-only` under the `off` default. Only fills a gap: a policy a person set is never overwritten.
+ * `linked-only` under the `off` default. Only fills a gap: a policy a person set, for this
+ * workspace or globally, is never overridden.
  */
 function keepLegacyPolicy(db: Ledger, workspaceId: number): void {
-    if (getWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY) === undefined) {
+    if (getWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY) === undefined
+        && getSetting(db, SETTING_SYNC_POLICY) === undefined) {
         setWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
     }
+}
+
+type ImportedRoots = Record<string, string>;
+
+function importedRoots(db: Ledger, workspace: WorkspaceRow): ImportedRoots {
+    const stored = getWorkspaceSetting<string | ImportedRoots>(db, workspace.id, LEGACY_IMPORT_SETTING);
+    return typeof stored === 'string' ? { [workspace.path]: stored } : stored ?? {};
+}
+
+const wasImported = (db: Ledger, workspace: WorkspaceRow, root: string): boolean =>
+    importedRoots(db, workspace)[normalizePath(root)] !== undefined;
+
+function markImported(db: Ledger, workspace: WorkspaceRow, root: string): void {
+    write(db, () => setWorkspaceSetting(db, workspace.id, LEGACY_IMPORT_SETTING,
+        { ...importedRoots(db, workspace), [normalizePath(root)]: nowIso() }));
 }
 
 /** 1.4.0's sniffer lower-cased the state names; Azure Boards' stock names are title case ("To Do"). */
@@ -154,33 +176,37 @@ interface LegacyOutboxRow {
 function readPendingOutbox(legacy: Database.Database): LegacyOutboxRow[] {
     const exists = legacy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(LEGACY_OUTBOX_TABLE);
     if (exists === undefined) return [];
-    return legacy.prepare('SELECT taskId, payload FROM outbox WHERE status = ? ORDER BY id').all(LEGACY_PENDING) as LegacyOutboxRow[];
+    return legacy.prepare(`SELECT taskId, payload FROM ${LEGACY_OUTBOX_TABLE} WHERE status = ? ORDER BY id`)
+        .all(LEGACY_PENDING) as LegacyOutboxRow[];
 }
 
 /**
  * 1.4.0 queued `{ state?, comment? }` per issue and applied the state to its cached task
- * at once, so the imported phase already is the desired state. Call inside write().
+ * at once, so the imported phase already is the desired state. `linked` maps the workspace's
+ * remote ids to task ids. Returns the rows inserted. Call inside write().
  */
-function queueLegacyOutbox(db: Ledger, workspaceId: number, vendor: Vendor, rows: LegacyOutboxRow[]): number {
-    let queued = 0;
+function queueLegacyOutbox(db: Ledger, workspace: WorkspaceRow, linked: Map<string, number>, rows: LegacyOutboxRow[]): number {
+    // One pending sync_state per task absorbs a second state change, so count what was inserted:
+    // inside write() nobody else inserts, and every new row gets an id above the current highest.
+    const highestBefore = (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM outbox').get() as { id: number }).id;
     for (const row of rows) {
-        const link = db.prepare(`
-            SELECT l.task_id FROM vendor_links l JOIN tasks t ON t.id = l.task_id
-            WHERE t.workspace_id = ? AND l.vendor = ? AND l.remote_id = ?`)
-            .get(workspaceId, vendor, row.taskId) as { task_id: number } | undefined;
-        if (link === undefined) continue;
+        const taskId = linked.get(row.taskId);
+        if (taskId === undefined) {
+            appendLog(SYNC_LOG_FILE, `legacy import ${workspace.path}: #${row.taskId} is not in 1.4.0's cache, so its queued change was not imported`);
+            continue;
+        }
         let payload: { state?: unknown; comment?: unknown };
         try {
             payload = JSON.parse(row.payload) as { state?: unknown; comment?: unknown };
         } catch {
             continue;
         }
-        const task = getTask(db, link.task_id)!;
+        const task = getTask(db, taskId)!;
         const at = nowIso();
-        if (typeof payload.state === 'string' && projectTask(db, task, 'change', at) === 'sync_queued') queued++;
-        if (typeof payload.comment === 'string' && payload.comment.length > 0 && enqueueComment(db, task, payload.comment, at)) queued++;
+        if (typeof payload.state === 'string') projectTask(db, task, 'change', at);
+        if (typeof payload.comment === 'string' && payload.comment.length > 0) enqueueComment(db, task, payload.comment, at);
     }
-    return queued;
+    return (db.prepare('SELECT COUNT(*) AS count FROM outbox WHERE id > ?').get(highestBefore) as { count: number }).count;
 }
 
 /** Imports one legacy repo. Safe to run twice: linked tasks are skipped and the outbox is queued once. */
@@ -191,14 +217,13 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
     setWorkspaceVendor(db, workspace.id, vendor);
     // Before the early return and before the outbox is queued: under `off` the queue would project nothing.
     keepLegacyPolicy(db, workspace.id);
-    const firstImport = getWorkspaceSetting<string>(db, workspace.id, LEGACY_IMPORT_SETTING) === undefined;
     if (vendor === AZURE_DEVOPS && getWorkspaceSetting(db, workspace.id, SETTING_PHASE_STATE_MAP) === undefined) {
         setWorkspaceSetting(db, workspace.id, SETTING_PHASE_STATE_MAP, legacyPhaseStateMap(config));
     }
 
     const legacyPath = path.join(root, LEGACY_DB_FILE);
     if (!fs.existsSync(legacyPath)) {
-        setWorkspaceSetting(db, workspace.id, LEGACY_IMPORT_SETTING, nowIso());
+        markImported(db, workspace, root);
         return { root, workspaceId: workspace.id, imported: 0, skipped: 0, queued: 0 };
     }
 
@@ -215,16 +240,18 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
     }
 
     return write(db, () => {
+        // Read under the write lock: two servers starting at once must not both queue this root's rows.
+        const firstImport = !wasImported(db, workspace, root);
         applyLegacyMetadata(db, workspace.id, metadata);
-        const alreadyLinked = new Set((db.prepare(`
-            SELECT l.remote_id FROM vendor_links l JOIN tasks t ON t.id = l.task_id
-            WHERE t.workspace_id = ? AND l.vendor = ?`).all(workspace.id, vendor) as { remote_id: string }[])
-            .map(r => r.remote_id));
+        const linked = new Map((db.prepare(`
+            SELECT l.remote_id, l.task_id FROM vendor_links l JOIN tasks t ON t.id = l.task_id
+            WHERE t.workspace_id = ? AND l.vendor = ?`).all(workspace.id, vendor) as { remote_id: string; task_id: number }[])
+            .map(r => [r.remote_id, r.task_id] as [string, number]));
 
         let imported = 0;
         let skipped = 0;
         for (const row of rows) {
-            if (alreadyLinked.has(row.id)) {
+            if (linked.has(row.id)) {
                 skipped++;
                 continue;
             }
@@ -252,11 +279,12 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
             for (const text of splitLegacyComments(row.comments)) {
                 recordEvent(db, { taskId: task.id, kind: 'comment', source: LEGACY_SOURCE, payload: { text } }, at);
             }
+            linked.set(row.id, task.id);
             imported++;
         }
-        // Once per repo: a second import must not post the same comments again.
-        const queued = firstImport ? queueLegacyOutbox(db, workspace.id, vendor, pending) : 0;
-        setWorkspaceSetting(db, workspace.id, LEGACY_IMPORT_SETTING, nowIso());
+        // Once per root: a second import must not post the same comments again.
+        const queued = firstImport ? queueLegacyOutbox(db, workspace, linked, pending) : 0;
+        markImported(db, workspace, root);
         return { root, workspaceId: workspace.id, imported, skipped, queued };
     });
 }
@@ -272,7 +300,7 @@ export function runLegacyImport(db: Ledger, roots?: string[]): LegacyImportResul
     for (const root of roots ?? discoverLegacyRoots()) {
         try {
             const known = findWorkspace(db, root);
-            if (known !== undefined && getWorkspaceSetting(db, known.id, LEGACY_IMPORT_SETTING) !== undefined) {
+            if (known !== undefined && wasImported(db, known, root)) {
                 keepLegacyPolicy(db, known.id);
                 continue;
             }
