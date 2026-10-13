@@ -18,7 +18,7 @@ import {
     SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES, SETTING_SYNC_POLICY,
     SYNC_POLICY_AUTO, SYNC_POLICY_OFF, getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
-import { runLegacyImportOnce } from "./ledger/legacy-import";
+import { runLegacyImport } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
 import { INTENTS, NO_VENDOR, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 import { outboxHealth } from "./sync/outbox";
@@ -486,7 +486,7 @@ export class PmServer {
     }
 
     public async run(transport?: Transport): Promise<void> {
-        if (this.legacyImport) runLegacyImportOnce(this.db);
+        if (this.legacyImport) runLegacyImport(this.db);
         const stdio = transport === undefined;
         if (stdio) {
             process.once('exit', () => endSession(this.db, this.sessionId));
