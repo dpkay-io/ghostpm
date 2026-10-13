@@ -251,7 +251,7 @@ describe('pushing the outbox', () => {
         vendor.failNext = new PermanentError('refused');
         await push();
         change(task.id, { phase: 'done' });
-        rearmFailed(ledger.db, Date.now());
+        rearmFailed(ledger.db, Date.now(), [workspace.id]);
         expect((await push()).skipped).toBe(1);
         // The failed attempt carried a marker, so only a look for what it might have made; never a create.
         expect(vendor.calls.map(call => call.op)).toEqual(['findCreated']);

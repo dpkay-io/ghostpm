@@ -8,18 +8,36 @@ const DIST = path.join(__dirname, '..', '..', 'dist');
 // What the hook loads is only observable on the built files; `npm run build` must run first.
 const describeBuilt = fs.existsSync(path.join(DIST, 'hook', 'handlers.js')) ? describe : describe.skip;
 
-/** Everything dist/hook.js requires, apart from its own small payload/output/log modules. */
-const HOOK_ENTRIES = ['hook/handlers.js', 'hook/recover.js', 'plugin-setup.js'].map(entry => path.join(DIST, entry));
-const PROBE = 'for (const entry of process.argv.slice(1)) require(entry); process.stdout.write(JSON.stringify(Object.keys(require.cache)));';
+/** Runs one event through the built handlers, as dist/hook.js does, and prints every module that was loaded. */
+const PROBE = `
+const path = require('path');
+const [dist, event, cwd] = process.argv.slice(1);
+const load = entry => require(path.join(dist, entry));
+for (const entry of ['hook/payload.js', 'hook/output.js', 'hook/log.js', 'hook/handlers.js', 'hook/recover.js', 'plugin-setup.js']) load(entry);
+const db = load('ledger/db.js').openLedger();
+const payload = load('hook/payload.js').readPayload(JSON.stringify({ hook_event_name: event, session_id: 'chain', cwd, prompt: 'hi' }), event);
+load('hook/handlers.js').handleWith(db, payload, { startSync: () => undefined });
+db.close();
+process.stdout.write(JSON.stringify(Object.keys(require.cache)));`;
 /** Spec §7.2, §15: the MCP SDK and zod cost 250 ms+; vendor adapters and the runner have no place in a hook. */
 const FORBIDDEN = [
     /@modelcontextprotocol/, /[\\/]zod[\\/]/, /[\\/]js-yaml[\\/]/,
     /[\\/]dist[\\/]mcp-server\.js$/, /[\\/]dist[\\/]config\.js$/,
     /[\\/]dist[\\/]sync[\\/](github|azure|runner|push|pull|reconcile|redact|identity)\.js$/,
 ];
+/** Ruling M5: only SessionStart decides whether to start a sync; the prompt hook, which runs on every prompt, never loads it. */
+const SESSION_START_ONLY = /[\\/]dist[\\/](sync[\\/](schedule|lease|outbox)|hook[\\/]spawn)\.js$/;
+const SCHEDULE = /[\\/]dist[\\/]sync[\\/]schedule\.js$/;
 
 describeBuilt('the hook import chain', () => {
     let home: string;
+
+    /** Loaded modules after one event, in a child whose homes are all a temp folder. */
+    const loadedBy = (event: string): string[] => {
+        const env = { ...process.env, GHOSTPM_HOME: home, HOME: home, USERPROFILE: home };
+        return JSON.parse(execFileSync(process.execPath, ['-e', PROBE, DIST, event, home], { encoding: 'utf8', env })) as string[];
+    };
+    const forbiddenIn = (loaded: string[]): string[] => loaded.filter(file => FORBIDDEN.some(pattern => pattern.test(file)));
 
     beforeEach(() => {
         home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-import-chain-'));
@@ -29,13 +47,15 @@ describeBuilt('the hook import chain', () => {
         removeTempDir(home);
     });
 
-    it('keeps the MCP SDK, zod and the vendor adapters out of the hook', () => {
-        // Loading only, but never against the real home.
-        const env = { ...process.env, GHOSTPM_HOME: home, HOME: home, USERPROFILE: home };
-        const loaded = JSON.parse(execFileSync(process.execPath, ['-e', PROBE, ...HOOK_ENTRIES], { encoding: 'utf8', env })) as string[];
-        expect(loaded.some(file => /[\\/]dist[\\/]sync[\\/]schedule\.js$/.test(file))).toBe(true);
-        for (const pattern of FORBIDDEN) {
-            expect(loaded.filter(file => pattern.test(file))).toEqual([]);
-        }
+    it('keeps the sync schedule, the lease, the outbox and the spawner out of the prompt hook', () => {
+        const loaded = loadedBy('UserPromptSubmit');
+        expect(loaded.filter(file => SESSION_START_ONLY.test(file))).toEqual([]);
+        expect(forbiddenIn(loaded)).toEqual([]);
+    });
+
+    it('loads the sync schedule on SessionStart, and still no MCP SDK, zod or vendor adapter', () => {
+        const loaded = loadedBy('SessionStart');
+        expect(loaded.some(file => SCHEDULE.test(file))).toBe(true);
+        expect(forbiddenIn(loaded)).toEqual([]);
     });
 });

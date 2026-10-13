@@ -168,7 +168,7 @@ describe('outbox queue mechanics', () => {
         insert('sync_state', 'failed', T0, other.id);
         const newestForOther = insert('sync_state', 'failed', T0, other.id);
 
-        expect(rearmFailed(ledger.db, T0)).toBe(2);
+        expect(rearmFailed(ledger.db, T0, [workspaceId])).toBe(2);
         expect(row(comment)).toMatchObject({ status: 'pending', attempts: 0, error: null, next_attempt_at: iso(T0) });
         expect(row(newestForOther).status).toBe('pending');
         expect(pendingSyncStates()).toBe(2);
@@ -177,7 +177,7 @@ describe('outbox queue mechanics', () => {
     it('re-arms a failed sync_state whose task already has an older pending one', () => {
         insert('sync_state', 'pending');
         const failed = insert('sync_state', 'failed');
-        expect(rearmFailed(ledger.db, T0)).toBe(0);
+        expect(rearmFailed(ledger.db, T0, [workspaceId])).toBe(0);
         expect(row(failed)).toBeUndefined();
         expect(pendingSyncStates()).toBe(1);
     });
@@ -190,7 +190,7 @@ describe('outbox queue mechanics', () => {
         const newer = insert('create', 'failed');
         expect(outboxHealth(ledger.db)).toEqual({ pending: 0, failed: 1 });
 
-        expect(rearmFailed(ledger.db, T0)).toBe(1);
+        expect(rearmFailed(ledger.db, T0, [workspaceId])).toBe(1);
         expect(row(staleLinked)).toBeUndefined();
         expect(row(older)).toBeUndefined();
         expect(row(newer).status).toBe('pending');

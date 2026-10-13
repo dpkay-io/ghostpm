@@ -4,6 +4,7 @@ import * as path from 'path';
 
 const command = process.argv[2];
 const MAX_COL_WIDTH = 50;
+const EXIT_FAILURE = 1;
 
 function printHelp() {
     const help = `ghostpm - Zero-latency PM interface for AI agents
@@ -198,14 +199,10 @@ async function main() {
         }
 
         case 'sync': {
-            const { runSyncCommand } = await import('./sync/runner');
-            const { openLedger, ledgerPath } = await import('./ledger/db');
-            const db = openLedger(ledgerPath());
-            try {
-                console.log(await runSyncCommand(db, process.argv.slice(3)));
-            } finally {
-                db.close();
-            }
+            const { syncCommandMain } = await import('./sync/runner');
+            const result = await syncCommandMain(process.argv.slice(3));
+            if (result.output.length > 0) console.log(result.output);
+            if (result.failed) process.exitCode = EXIT_FAILURE;
             break;
         }
 

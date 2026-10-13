@@ -355,8 +355,11 @@ describe('mcp server in a GitHub workspace', () => {
         );
     });
 
-    it('says sync is off in a GitHub workspace whose sync_policy is off (ruling 4)', async () => {
+    it('says sync is off in a GitHub workspace whose sync_policy is off, and how to turn it on (ruling 4)', async () => {
         setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
-        expect(await call('get_project_state')).toContain('**Sync:** off (sync_policy off');
+        const workspacePath = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'widgets')).path;
+        expect(await call('get_project_state')).toContain(
+            `**Sync:** off (sync_policy off; \`ghostpm config set sync_policy auto --workspace "${workspacePath}"\` turns it on)`,
+        );
     });
 });

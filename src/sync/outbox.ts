@@ -128,22 +128,26 @@ export function retryRow(db: Ledger, row: OutboxRow, holder: string, error: stri
 const STALE_FAILED_CREATE = `o.op = ? AND o.status = ? AND (
     EXISTS (SELECT 1 FROM vendor_links l WHERE l.task_id = o.task_id)
     OR EXISTS (SELECT 1 FROM outbox n WHERE n.task_id = o.task_id AND n.op = o.op AND n.id > o.id))`;
+/** The rows of tasks in the workspaces whose ids are the JSON array bound to it. */
+const IN_WORKSPACES = 'task_id IN (SELECT id FROM tasks WHERE workspace_id IN (SELECT value FROM json_each(?)))';
+
 /**
- * A person asked to retry (`ghostpm sync`). Superseded sync_state rows go first, so each
- * task keeps at most one pending desired state.
+ * A person asked to retry (`ghostpm sync`): the failed rows of `workspaceIds` only, the workspaces that sync
+ * (ruling I1). Superseded sync_state rows go first, so each task keeps at most one pending desired state.
  */
-export function rearmFailed(db: Ledger, now: number): number {
+export function rearmFailed(db: Ledger, now: number, workspaceIds: readonly number[]): number {
+    const workspaces = JSON.stringify(workspaceIds);
     return write(db, () => {
         // sync_state carries no payload: any pending one already says everything a failed one would.
         db.prepare(`
-            DELETE FROM outbox WHERE op = ? AND status = ?
+            DELETE FROM outbox WHERE op = ? AND status = ? AND ${IN_WORKSPACES}
               AND (task_id IN (SELECT task_id FROM outbox WHERE op = ? AND status = ?)
                 OR id NOT IN (SELECT MAX(id) FROM outbox WHERE op = ? AND status = ? GROUP BY task_id))`)
-            .run(OP_SYNC_STATE, STATUS_FAILED, OP_SYNC_STATE, STATUS_PENDING, OP_SYNC_STATE, STATUS_FAILED);
-        db.prepare(`DELETE FROM outbox WHERE id IN (SELECT o.id FROM outbox o WHERE ${STALE_FAILED_CREATE})`)
-            .run(OP_CREATE, STATUS_FAILED);
-        return db.prepare('UPDATE outbox SET status = ?, attempts = 0, error = NULL, next_attempt_at = ? WHERE status = ?')
-            .run(STATUS_PENDING, iso(now), STATUS_FAILED).changes;
+            .run(OP_SYNC_STATE, STATUS_FAILED, workspaces, OP_SYNC_STATE, STATUS_PENDING, OP_SYNC_STATE, STATUS_FAILED);
+        db.prepare(`DELETE FROM outbox WHERE ${IN_WORKSPACES} AND id IN (SELECT o.id FROM outbox o WHERE ${STALE_FAILED_CREATE})`)
+            .run(workspaces, OP_CREATE, STATUS_FAILED);
+        return db.prepare(`UPDATE outbox SET status = ?, attempts = 0, error = NULL, next_attempt_at = ? WHERE status = ? AND ${IN_WORKSPACES}`)
+            .run(STATUS_PENDING, iso(now), STATUS_FAILED, workspaces).changes;
     });
 }
 

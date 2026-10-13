@@ -6,10 +6,10 @@ import { activeTaskFor, currentBranch } from '../ledger/branch';
 import { recordEvidence } from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
 import { listEvents } from '../ledger/events';
-import { TaskRow, formatTaskId } from '../ledger/types';
-import { shouldStartSync, SYNC_COMMAND, BACKGROUND_FLAG } from '../sync/schedule';
+import { TaskRow, WorkspaceRow, formatTaskId } from '../ledger/types';
+import type * as Schedule from '../sync/schedule';
 import { HookPayload } from './payload';
-import { spawnCliDetached } from './spawn';
+import type * as Spawn from './spawn';
 import { logHookError } from './log';
 
 /** Distinguishes hook-captured sessions from the MCP server's own (`mcp`). */
@@ -35,7 +35,17 @@ export interface HookOptions {
     now?: number;
 }
 
-const startBackgroundSync = (): void => spawnCliDetached(SYNC_COMMAND, BACKGROUND_FLAG);
+/**
+ * Spec §8.1: pull on SessionStart through a detached `ghostpm sync`, never inline, and only when nobody holds the
+ * sync lease. The hook itself makes no vendor call. Required here, not imported: the prompt hook runs on every
+ * prompt and never needs the schedule, the lease, the outbox or the spawner (spec §15, ruling M5).
+ */
+function startSyncIfDue(db: Ledger, workspace: WorkspaceRow, options: HookOptions): void {
+    const schedule = require('../sync/schedule') as typeof Schedule;
+    if (!schedule.shouldStartSync(db, workspace, options.now ?? Date.now())) return;
+    if (options.startSync !== undefined) options.startSync();
+    else (require('./spawn') as typeof Spawn).spawnCliDetached(schedule.SYNC_COMMAND, schedule.BACKGROUND_FLAG);
+}
 
 function resumeLine(db: Ledger, task: TaskRow): string {
     const [latest] = listEvents(db, { taskId: task.id, limit: 1 });
@@ -53,10 +63,8 @@ function onSessionStart(db: Ledger, payload: HookPayload, options: HookOptions):
         workspaceId: workspace.id,
         transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null,
     });
-    // Spec §8.1: pull on SessionStart through a detached `ghostpm sync`, never inline, and only
-    // when nobody holds the sync lease. The hook itself makes no vendor call.
     try {
-        if (shouldStartSync(db, workspace, options.now ?? Date.now())) (options.startSync ?? startBackgroundSync)();
+        startSyncIfDue(db, workspace, options);
     } catch (error) {
         logHookError(error);   // a failed spawn must not cost the resume line
     }

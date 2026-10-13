@@ -15,8 +15,8 @@ import {
     MCP_CLIENT, endSession, getSession, listLiveSessions, mcpSessionId, startSession, touchSession,
 } from "./ledger/sessions";
 import {
-    SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
-    getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
+    SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES, SETTING_SYNC_POLICY,
+    SYNC_POLICY_AUTO, SYNC_POLICY_OFF, getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImportOnce } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
@@ -186,7 +186,7 @@ export class PmServer {
     private syncLine(workspace: WorkspaceRow): string {
         if (workspace.vendor === NO_VENDOR) return 'off (no GitHub or Azure DevOps remote)';
         if (syncIsOff(this.db, workspace)) {
-            return `off (sync_policy off; \`ghostpm config set sync_policy auto --workspace ${workspace.path}\` turns it on)`;
+            return `off (${SETTING_SYNC_POLICY} ${SYNC_POLICY_OFF}; \`ghostpm config set ${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO} --workspace "${workspace.path}"\` turns it on)`;
         }
         const health = outboxHealth(this.db, workspace.id);
         const paused = getSyncPause(this.db, workspace.id);

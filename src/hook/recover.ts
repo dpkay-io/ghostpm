@@ -1,6 +1,6 @@
 import { MISSING_BINDING_HELP } from '../ledger/db';
 import { SESSION_START } from './handlers';
-import { spawnCliDetached } from './spawn';
+import type * as Spawn from './spawn';
 
 const BOOTSTRAP_COMMAND = 'bootstrap';
 
@@ -10,8 +10,8 @@ export const BOOTSTRAP_NOTICE =
 
 export type StartBootstrap = () => void;
 
-/** Detached: compiling takes far longer than the few seconds a hook is allowed. */
-const spawnBootstrap: StartBootstrap = () => spawnCliDetached(BOOTSTRAP_COMMAND);
+/** Detached: compiling takes far longer than the few seconds a hook is allowed. Required only when needed (ruling M5). */
+const spawnBootstrap: StartBootstrap = () => (require('./spawn') as typeof Spawn).spawnCliDetached(BOOTSTRAP_COMMAND);
 
 /**
  * Turns the one failure a user cannot act on into one that fixes itself, and returns the

@@ -16,11 +16,15 @@ export function syncIsOff(db: Ledger, workspace: WorkspaceRow): boolean {
     return readSetting(db, workspace.id, SETTING_SYNC_POLICY) === SYNC_POLICY_OFF;
 }
 
-/** Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. */
-export function pullIsDue(db: Ledger, workspace: WorkspaceRow, now: number): boolean {
+/**
+ * Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. Counted from the
+ * last successful pull (`last_sync`), or from `lastAttempt` when that is later: a runner's last try, failed or not.
+ */
+export function pullIsDue(db: Ledger, workspace: WorkspaceRow, now: number, lastAttempt: number = Number.NEGATIVE_INFINITY): boolean {
     if (workspace.vendor === NO_VENDOR || syncIsOff(db, workspace) || getSyncPause(db, workspace.id) !== undefined) return false;
-    const last = getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC);
-    return last === undefined || Date.parse(last) + readSetting(db, null, SETTING_SYNC_PULL_MINUTES) * MS_PER_MINUTE <= now;
+    const lastSync = getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC);
+    const last = Math.max(lastSync === undefined ? Number.NEGATIVE_INFINITY : Date.parse(lastSync), lastAttempt);
+    return last + readSetting(db, null, SETTING_SYNC_PULL_MINUTES) * MS_PER_MINUTE <= now;
 }
 
 /** SessionStart's question (spec §8.1): is there sync work, and nobody doing it? Never in a workspace that is off. */
