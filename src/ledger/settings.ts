@@ -36,9 +36,11 @@ export const SYNC_POLICY_LINKED_ONLY = 'linked-only';
 export const SYNC_POLICY_OFF = 'off';
 export const SYNC_POLICIES = [SYNC_POLICY_AUTO, SYNC_POLICY_PROMOTE, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF] as const;
 export type SyncPolicy = typeof SYNC_POLICIES[number];
-/** `session` and `turn` (spec §8.2) are not built yet; `none` turns progress comments off. */
-export const PROGRESS_COMMENT_MODES = ['phase', 'none'] as const;
-export type ProgressCommentMode = typeof PROGRESS_COMMENT_MODES[number];
+export const PROGRESS_COMMENTS_PHASE = 'phase';
+/** No progress comments (and no evidence-driven phase comments) on the vendor. */
+export const PROGRESS_COMMENTS_NONE = 'none';
+/** `session` and `turn` (spec §8.2) are not built yet. */
+export const PROGRESS_COMMENT_MODES = [PROGRESS_COMMENTS_PHASE, PROGRESS_COMMENTS_NONE] as const;
 export type PhaseStateMap = Partial<Record<Phase, string>>;
 
 export const DEFAULT_PLAN_GLOBS: readonly string[] = ['docs/**/{specs,plans}/**/*.md'];
@@ -155,7 +157,7 @@ function phaseMap(scope: SettingScope): SettingDef<PhaseStateMap> {
 /** Spec §8.2, defined once: scope, default and validation for every user-facing setting. */
 export const SETTING_DEFS = {
     [SETTING_SYNC_POLICY]: choice(SYNC_POLICIES, SYNC_POLICY_OFF, 'both'),
-    [SETTING_PROGRESS_COMMENTS]: choice(PROGRESS_COMMENT_MODES, 'phase', 'both'),
+    [SETTING_PROGRESS_COMMENTS]: choice(PROGRESS_COMMENT_MODES, PROGRESS_COMMENTS_PHASE, 'both'),
     [SETTING_CREATE_BRANCH]: flag(false, 'both'),
     [SETTING_PHASE_STATE_MAP]: phaseMap('workspace'),
     [SETTING_ADO_WORK_ITEM_TYPE]: text(DEFAULT_ADO_WORK_ITEM_TYPE, 'workspace'),

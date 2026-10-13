@@ -6,11 +6,12 @@ import { Db } from '../../src/db';
 import { listTasks, getVendorLink, insertTaskRow, insertVendorLink } from '../../src/ledger/tasks';
 import { ensureWorkspace, getWorkspace, normalizePath, setWorkspaceVendor } from '../../src/ledger/workspaces';
 import { registerWorkspace } from '../../src/registry';
+import log = require('../../src/hook/log');
 import { SYNC_LOG_FILE } from '../../src/hook/log';
 import {
     getWorkspaceSetting, setWorkspaceSetting, setSetting, readSetting,
-    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP,
-    SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF,
+    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP, SETTING_PROGRESS_COMMENTS,
+    SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, PROGRESS_COMMENTS_NONE, PROGRESS_COMMENTS_PHASE,
 } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
 import {
@@ -111,6 +112,7 @@ describe('legacy import', () => {
     });
 
     afterEach(() => {
+        jest.restoreAllMocks();
         HOME_VARIABLES.forEach((name, index) => {
             const original = originalHomes[index];
             if (original !== undefined) process.env[name] = original;
@@ -293,6 +295,47 @@ describe('legacy import', () => {
         setWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY, undefined);   // already imported, no policy
         expect(runLegacyImport(ledger.db, [repo])).toEqual([]);
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_LINKED_ONLY);
+    });
+
+    it('turns phase comments off on a legacy workspace with no setting for them, on import and on every later start (F8)', () => {
+        seedLegacyDb(repo);
+        runLegacyImport(ledger.db, [repo]);
+        const workspaceId = ensureWorkspace(ledger.db, repo).id;
+        expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_NONE);
+
+        setWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS, undefined);   // already imported, no setting
+        expect(runLegacyImport(ledger.db, [repo])).toEqual([]);
+        expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_NONE);
+    });
+
+    it('keeps phase comments a person set for the workspace, or globally (F8)', () => {
+        const workspaceId = ensureWorkspace(ledger.db, repo).id;
+        setWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS, PROGRESS_COMMENTS_PHASE);
+        seedLegacyDb(repo);
+        runLegacyImport(ledger.db, [repo]);
+        expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_PHASE);
+
+        const other = createLegacyRepo();
+        try {
+            setSetting(ledger.db, SETTING_PROGRESS_COMMENTS, PROGRESS_COMMENTS_PHASE);
+            const { workspaceId: otherId } = importLegacyWorkspace(ledger.db, other);
+            expect(getWorkspaceSetting(ledger.db, otherId, SETTING_PROGRESS_COMMENTS)).toBeUndefined();
+            expect(readSetting(ledger.db, otherId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_PHASE);
+        } finally {
+            fs.rmSync(other, { recursive: true, force: true });
+        }
+    });
+
+    it('writes its log lines only once the import has committed (F16)', () => {
+        seedLegacyDb(repo, legacy => {
+            legacy.addOutboxItem({ taskId: '99', action: 'updateTask', payload: JSON.stringify({ comment: 'uncached' }), status: 'pending' });
+        });
+        const inTransaction: boolean[] = [];
+        jest.spyOn(log, 'appendLog').mockImplementation(() => { inTransaction.push(ledger.db.inTransaction); });
+
+        importLegacyWorkspace(ledger.db, repo);
+
+        expect(inTransaction).toEqual([false]);
     });
 
     it.each([[SYNC_POLICY_OFF, 0], [SYNC_POLICY_AUTO, 2]])(

@@ -7,8 +7,9 @@ import { loadConfig, McpPmConfig } from '../config';
 import { Ledger, write, nowIso } from './db';
 import { ensureWorkspace, findWorkspace, normalizePath, setWorkspaceVendor } from './workspaces';
 import {
-    getSetting, getWorkspaceSetting, setWorkspaceSetting, PhaseStateMap,
-    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY,
+    getSetting, getWorkspaceSetting, setWorkspaceSetting, PhaseStateMap, PROGRESS_COMMENTS_NONE,
+    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP, SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY,
+    SYNC_POLICY_LINKED_ONLY,
 } from './settings';
 import { getTask, insertTaskRow, insertVendorLink } from './tasks';
 import { recordEvent } from './events';
@@ -124,14 +125,20 @@ function applyLegacyMetadata(db: Ledger, workspaceId: number, metadata: Map<stri
 }
 
 /**
- * 1.4.0 synced existing items both ways but never created one: a legacy repo keeps that as
- * `linked-only` under the `off` default. Only fills a gap: a policy a person set, for this
- * workspace or globally, is never overridden.
+ * What 1.4.0 did, as settings: it synced existing items both ways but never created one (`linked-only`, under the
+ * `off` default), and it never posted phase comments nor moved labels on evidence (`progress_comments` none, ruling F8).
  */
+const LEGACY_SETTINGS: readonly [string, unknown][] = [
+    [SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY],
+    [SETTING_PROGRESS_COMMENTS, PROGRESS_COMMENTS_NONE],
+];
+
+/** A legacy repo keeps 1.4.0's behaviour. Only fills a gap: a value a person set, for this workspace or globally, stays. */
 function keepLegacyPolicy(db: Ledger, workspaceId: number): void {
-    if (getWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY) === undefined
-        && getSetting(db, SETTING_SYNC_POLICY) === undefined) {
-        setWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+    for (const [key, value] of LEGACY_SETTINGS) {
+        if (getWorkspaceSetting(db, workspaceId, key) === undefined && getSetting(db, key) === undefined) {
+            setWorkspaceSetting(db, workspaceId, key, value);
+        }
     }
 }
 
@@ -183,16 +190,17 @@ function readPendingOutbox(legacy: Database.Database): LegacyOutboxRow[] {
 /**
  * 1.4.0 queued `{ state?, comment? }` per issue and applied the state to its cached task
  * at once, so the imported phase already is the desired state. `linked` maps the workspace's
- * remote ids to task ids. Returns the rows inserted. Call inside write().
+ * remote ids to task ids. Returns the rows inserted; what it could not queue goes to `notes`,
+ * to be logged once the write has committed (ruling F16). Call inside write().
  */
-function queueLegacyOutbox(db: Ledger, workspace: WorkspaceRow, linked: Map<string, number>, rows: LegacyOutboxRow[]): number {
+function queueLegacyOutbox(db: Ledger, workspace: WorkspaceRow, linked: Map<string, number>, rows: LegacyOutboxRow[], notes: string[]): number {
     // One pending sync_state per task absorbs a second state change, so count what was inserted:
     // inside write() nobody else inserts, and every new row gets an id above the current highest.
     const highestBefore = (db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM outbox').get() as { id: number }).id;
     for (const row of rows) {
         const taskId = linked.get(row.taskId);
         if (taskId === undefined) {
-            appendLog(SYNC_LOG_FILE, `legacy import ${workspace.path}: #${row.taskId} is not in 1.4.0's cache, so its queued change was not imported`);
+            notes.push(`legacy import ${workspace.path}: #${row.taskId} is not in 1.4.0's cache, so its queued change was not imported`);
             continue;
         }
         let payload: { state?: unknown; comment?: unknown };
@@ -239,7 +247,9 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
         legacy.close();
     }
 
-    return write(db, () => {
+    // No file I/O under the write lock: what to log is logged after the write commits.
+    const notes: string[] = [];
+    const result = write(db, () => {
         // Read under the write lock: two servers starting at once must not both queue this root's rows.
         const firstImport = !wasImported(db, workspace, root);
         applyLegacyMetadata(db, workspace.id, metadata);
@@ -283,10 +293,12 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
             imported++;
         }
         // Once per root: a second import must not post the same comments again.
-        const queued = firstImport ? queueLegacyOutbox(db, workspace, linked, pending) : 0;
+        const queued = firstImport ? queueLegacyOutbox(db, workspace, linked, pending, notes) : 0;
         markImported(db, workspace, root);
         return { root, workspaceId: workspace.id, imported, skipped, queued };
     });
+    notes.forEach(note => appendLog(SYNC_LOG_FILE, note));
+    return result;
 }
 
 /**
