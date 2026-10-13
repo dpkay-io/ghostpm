@@ -1,7 +1,6 @@
-import { spawn } from 'child_process';
 import { MISSING_BINDING_HELP } from '../ledger/db';
-import { CLI_ENTRY_PATH } from '../plugin-setup';
 import { SESSION_START } from './handlers';
+import { spawnCliDetached } from './spawn';
 
 const BOOTSTRAP_COMMAND = 'bootstrap';
 
@@ -12,12 +11,7 @@ export const BOOTSTRAP_NOTICE =
 export type StartBootstrap = () => void;
 
 /** Detached: compiling takes far longer than the few seconds a hook is allowed. */
-const spawnBootstrap: StartBootstrap = () => {
-    spawn(process.execPath, [CLI_ENTRY_PATH, BOOTSTRAP_COMMAND], {
-        detached: true,
-        stdio: 'ignore',
-    }).unref();
-};
+const spawnBootstrap: StartBootstrap = () => spawnCliDetached(BOOTSTRAP_COMMAND);
 
 /**
  * Turns the one failure a user cannot act on into one that fixes itself, and returns the

@@ -16,11 +16,14 @@ import {
 } from "./ledger/sessions";
 import {
     SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
-    getWorkspaceSetting, readSetting, setWorkspaceSetting,
+    getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImportOnce } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
-import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
+import { INTENTS, NO_VENDOR, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
+import { outboxHealth } from "./sync/outbox";
+import { defaultSyncDeps, startSyncRunner } from "./sync/runner";
+import { syncIsOff } from "./sync/schedule";
 
 const execFileAsync = promisify(execFile);
 
@@ -179,6 +182,17 @@ export class PmServer {
         }).join('');
     }
 
+    /** Spec §9.1: this workspace's pending and failed pushes, and why sync is paused if it is. */
+    private syncLine(workspace: WorkspaceRow): string {
+        if (workspace.vendor === NO_VENDOR) return 'off (no GitHub or Azure DevOps remote)';
+        if (syncIsOff(this.db, workspace)) {
+            return `off (sync_policy off; \`ghostpm config set sync_policy auto --workspace ${workspace.path}\` turns it on)`;
+        }
+        const health = outboxHealth(this.db, workspace.id);
+        const paused = getSyncPause(this.db, workspace.id);
+        return `${health.pending} pending, ${health.failed} failed${paused === undefined ? '' : ` — paused: ${paused}`}`;
+    }
+
     private sprintsOf(workspaceId: number): string[] {
         const milestones = listTasks(this.db, { workspaceId })
             .map(task => task.milestone)
@@ -236,8 +250,6 @@ export class PmServer {
                 const tasks = listTasks(this.db, { workspaceId: workspace.id });
                 const summary = this.phaseSummary(tasks);
                 const staleMinutes = readSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES);
-                const outbox = this.db.prepare('SELECT status, COUNT(*) AS n FROM outbox GROUP BY status ORDER BY status')
-                    .all() as { status: string; n: number }[];
                 return text([
                     `**Workspace:** ${workspace.path} (vendor: ${workspace.vendor})`,
                     `**User:** ${getWorkspaceSetting<string>(this.db, workspace.id, SETTING_CURRENT_USER) ?? UNKNOWN}`,
@@ -246,7 +258,7 @@ export class PmServer {
                     active ? `**Active Task:** ${formatTaskId(active.id)} ${active.title} · ${active.phase}` : '**Active Task:** _none_',
                     `**Tasks:** ${tasks.length} total${summary ? ` — ${summary}` : ''}`,
                     `**Live Sessions:** ${listLiveSessions(this.db, staleMinutes).length}`,
-                    `**Outbox:** ${outbox.length > 0 ? outbox.map(row => `${row.n} ${row.status}`).join(', ') : 'empty'}`,
+                    `**Sync:** ${this.syncLine(workspace)}`,
                 ].join('\n'));
             },
         );
@@ -476,7 +488,13 @@ export class PmServer {
     public async run(transport?: Transport): Promise<void> {
         if (this.legacyImport) runLegacyImportOnce(this.db);
         const stdio = transport === undefined;
-        if (stdio) process.once('exit', () => endSession(this.db, this.sessionId));
+        if (stdio) {
+            process.once('exit', () => endSession(this.db, this.sessionId));
+            // A real client: this process competes for the sync lease (spec §8.1). An injected
+            // transport (tests) never starts a background timer.
+            const runner = startSyncRunner(this.db, defaultSyncDeps(this.db));
+            process.once('exit', () => runner.stop());
+        }
         await this.server.connect(transport ?? new StdioServerTransport());
         if (stdio) console.error(`GhostPM MCP server running on stdio (${this.sessionId})`);
     }

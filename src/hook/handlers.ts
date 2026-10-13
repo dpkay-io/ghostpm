@@ -7,7 +7,10 @@ import { recordEvidence } from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
 import { listEvents } from '../ledger/events';
 import { TaskRow, formatTaskId } from '../ledger/types';
+import { shouldStartSync, SYNC_COMMAND, BACKGROUND_FLAG } from '../sync/schedule';
 import { HookPayload } from './payload';
+import { spawnCliDetached } from './spawn';
+import { logHookError } from './log';
 
 /** Distinguishes hook-captured sessions from the MCP server's own (`mcp`). */
 export const HOOK_CLIENT = 'claude-code';
@@ -26,13 +29,21 @@ const GIT_COMMIT = /\bgit\s+commit\b/;
 const PR_CREATE = /\b(?:gh\s+pr\s+create|az\s+repos\s+pr\s+create)\b/;
 const FIRST_URL = /https?:\/\/\S+/;
 
+export interface HookOptions {
+    /** Starts a detached one-shot `ghostpm sync --background`. Injected so tests never spawn. */
+    startSync?: () => void;
+    now?: number;
+}
+
+const startBackgroundSync = (): void => spawnCliDetached(SYNC_COMMAND, BACKGROUND_FLAG);
+
 function resumeLine(db: Ledger, task: TaskRow): string {
     const [latest] = listEvents(db, { taskId: task.id, limit: 1 });
     const tail = latest ? ` · last: ${latest.kind}` : '';
     return `Resuming ${formatTaskId(task.id)} ${task.title} · ${task.phase}${tail}`;
 }
 
-function onSessionStart(db: Ledger, payload: HookPayload): string | null {
+function onSessionStart(db: Ledger, payload: HookPayload, options: HookOptions): string | null {
     const workspace = ensureWorkspace(db, payload.cwd);
     const transcriptPath = payload.raw.transcript_path;
     startSession(db, {
@@ -42,6 +53,13 @@ function onSessionStart(db: Ledger, payload: HookPayload): string | null {
         workspaceId: workspace.id,
         transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null,
     });
+    // Spec §8.1: pull on SessionStart through a detached `ghostpm sync`, never inline, and only
+    // when nobody holds the sync lease. The hook itself makes no vendor call.
+    try {
+        if (shouldStartSync(db, workspace, options.now ?? Date.now())) (options.startSync ?? startBackgroundSync)();
+    } catch (error) {
+        logHookError(error);   // a failed spawn must not cost the resume line
+    }
     const task = activeTaskFor(db, payload.sessionId, currentBranch(payload.cwd), workspace.id);
     return task ? resumeLine(db, task) : null;
 }
@@ -138,7 +156,7 @@ function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     return null;
 }
 
-type Handler = (db: Ledger, payload: HookPayload) => string | null;
+type Handler = (db: Ledger, payload: HookPayload, options: HookOptions) => string | null;
 
 const HANDLERS: { [event: string]: Handler } = {
     [SESSION_START]: onSessionStart,
@@ -158,12 +176,12 @@ export const HANDLED_EVENTS: string[] = Object.keys(HANDLERS);
  * Ledger-injected entry, so tests drive a temp ledger rather than the real one.
  * Returns the text to inject, or null when there is nothing to say.
  */
-export function handleWith(db: Ledger, payload: HookPayload): string | null {
+export function handleWith(db: Ledger, payload: HookPayload, options: HookOptions = {}): string | null {
     // Without a session id nothing can be correlated later, and every such hook would
     // share one row keyed on the empty string.
     if (payload.sessionId.length === 0) return null;
     const handler = HANDLERS[payload.event];
-    return handler === undefined ? null : handler(db, payload);
+    return handler === undefined ? null : handler(db, payload, options);
 }
 
 export function handle(payload: HookPayload): string | null {

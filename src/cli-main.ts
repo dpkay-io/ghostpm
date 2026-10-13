@@ -19,7 +19,8 @@ Commands:
   config get|set|unset <key> [value...] [--workspace <path>]
                     Read or change a setting (sync_policy, progress_comments, plan_globs, ...)
   tasks             List cached tasks
-  sync              Force sync with remote
+  sync              Push queued changes to GitHub / Azure DevOps and pull theirs now
+                    (also resumes a paused workspace and retries failed pushes)
   status            Show sync status and config
   dashboard         Show all workspaces and task status
   unregister [path] Remove a workspace from the dashboard
@@ -197,12 +198,14 @@ async function main() {
         }
 
         case 'sync': {
-            const { Engine } = await import('./engine');
-            const engine = new Engine();
-            process.stdout.write('Syncing...');
-            await engine.sync();
-            const tasks = engine.getDb().getTasks();
-            console.log(` done. ${tasks.length} tasks cached.`);
+            const { runSyncCommand } = await import('./sync/runner');
+            const { openLedger, ledgerPath } = await import('./ledger/db');
+            const db = openLedger(ledgerPath());
+            try {
+                console.log(await runSyncCommand(db, process.argv.slice(3)));
+            } finally {
+                db.close();
+            }
             break;
         }
 

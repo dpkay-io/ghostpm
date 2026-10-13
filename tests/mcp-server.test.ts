@@ -9,8 +9,8 @@ import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
 import {
-    setSetting, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
-    SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_PROMOTE,
+    setSetting, setSyncPause, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
+    SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SYNC_POLICY_PROMOTE,
 } from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from './ledger/helpers';
@@ -88,6 +88,10 @@ describe('mcp server on the ledger', () => {
         expect(state).toContain('**Active Task:** _none_');
         expect(state).toContain('**Live Sessions:** 1');
         expect(state).toContain('**Current Branch:** _unknown_');
+    });
+
+    it('reports sync as off in a workspace with no vendor', async () => {
+        expect(await call('get_project_state')).toContain('**Sync:** off (no GitHub or Azure DevOps remote)');
     });
 
     it('shows the task named by the current task/<ref> branch', async () => {
@@ -340,5 +344,19 @@ describe('mcp server in a GitHub workspace', () => {
         setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
         const local = await trackedId('Stays local');
         expect(await call('update_task', { task_id: `T${local}`, publish: true })).toContain('not published: sync_policy');
+    });
+
+    it("reports this workspace's pending pushes and why sync is paused", async () => {
+        await trackedId('Login fix');
+        const workspaceId = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'widgets')).id;
+        setSyncPause(ledger.db, workspaceId, 'GitHub CLI is not logged in. Run `gh auth login`, then `ghostpm sync`.');
+        expect(await call('get_project_state')).toContain(
+            '**Sync:** 1 pending, 0 failed — paused: GitHub CLI is not logged in. Run `gh auth login`, then `ghostpm sync`.',
+        );
+    });
+
+    it('says sync is off in a GitHub workspace whose sync_policy is off (ruling 4)', async () => {
+        setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
+        expect(await call('get_project_state')).toContain('**Sync:** off (sync_policy off');
     });
 });
