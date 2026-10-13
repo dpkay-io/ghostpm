@@ -1,5 +1,5 @@
 import { randomBytes } from 'crypto';
-import { Ledger } from '../ledger/db';
+import { Ledger, iso } from '../ledger/db';
 
 export const SYNC_LEASE = 'sync';
 /** Spec §8.1: TTL 60 s, renewed while running. */
@@ -8,8 +8,6 @@ const HOLDER_PREFIX = 'pid:';
 const NONCE_BYTES = 4;
 /** Fixed per process start, so a reused PID cannot impersonate a dead holder. */
 const START_NONCE = randomBytes(NONCE_BYTES).toString('hex');
-
-const iso = (ms: number): string => new Date(ms).toISOString();
 
 export const leaseHolderId = (pid: number = process.pid): string => `${HOLDER_PREFIX}${pid}:${START_NONCE}`;
 

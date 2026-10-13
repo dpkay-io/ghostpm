@@ -6,7 +6,7 @@ import { createTask } from '../../src/ledger/tasks';
 import { getSession } from '../../src/ledger/sessions';
 import { taskBranchName } from '../../src/ledger/branch';
 import { Phase, TaskRow } from '../../src/ledger/types';
-import { readPayload } from '../../src/hook/payload';
+import { HookPayload, readPayload } from '../../src/hook/payload';
 import { handleWith, HookOptions, HOOK_CLIENT } from '../../src/hook/handlers';
 import {
     deleteSetting, setSetting, setWorkspaceSetting, DEFAULT_SYNC_PULL_MINUTES, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
@@ -19,6 +19,8 @@ import { FakeVendor } from '../sync/fake-vendor';
 const SESSION_ID = 'claude-abc123';
 const PULL_HOLDER = 'pid:background-sync';
 const MINUTE_MS = 60 * 1000;
+/** Every SessionStart here starts its sync through this unless a test passes its own: none can spawn a real `ghostpm sync` (F17). */
+const NO_SPAWN: HookOptions = { startSync: () => undefined };
 
 describe('SessionStart handler', () => {
     let ledger: TempLedger;
@@ -34,8 +36,11 @@ describe('SessionStart handler', () => {
     const task = (title: string, phase: Phase = 'in_progress'): TaskRow =>
         createTask(ledger.db, { title, phase, workspaceId, origin: 'local', source: 'test' });
 
+    const handle = (payload: HookPayload, options: HookOptions = {}): string | null =>
+        handleWith(ledger.db, payload, { ...NO_SPAWN, ...options });
+
     const sessionStart = (sessionId: string = SESSION_ID): string | null =>
-        handleWith(ledger.db, readPayload(JSON.stringify({
+        handle(readPayload(JSON.stringify({
             hook_event_name: 'SessionStart', session_id: sessionId, cwd: repo,
         }), 'SessionStart'));
 
@@ -87,7 +92,7 @@ describe('SessionStart handler', () => {
 
     it('ignores an event it has no handler for', () => {
         const payload = readPayload(JSON.stringify({ hook_event_name: 'PreToolUse', session_id: SESSION_ID, cwd: repo }), 'PreToolUse');
-        expect(handleWith(ledger.db, payload)).toBeNull();
+        expect(handle(payload)).toBeNull();
     });
 
     it('does not register a session when the payload carries no session id', () => {
@@ -102,8 +107,7 @@ describe('SessionStart handler', () => {
         let widgets: string;
         let originalHome: string | undefined;
         const startSync = (): void => { started++; };
-        const sessionStartIn = (cwd: string, options: HookOptions): string | null => handleWith(
-            ledger.db,
+        const sessionStartIn = (cwd: string, options: HookOptions): string | null => handle(
             readPayload(JSON.stringify({ hook_event_name: 'SessionStart', session_id: SESSION_ID, cwd }), 'SessionStart'),
             options,
         );

@@ -1,4 +1,4 @@
-import { Ledger, nowIso, write } from '../ledger/db';
+import { Ledger, MS_PER_DAY, nowIso, write } from '../ledger/db';
 import {
     getWorkspaceSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_LINK_CHECK_CURSOR, SETTING_PR_CHECK_CURSOR,
     SETTING_PULL_WATERMARK,
@@ -21,7 +21,6 @@ export const PULL_OVERLAP_MS = 5 * 60 * 1000;
 export const LINK_CHECK_LIMIT = 10;
 /** PR events (newest first) of open tasks that one pull asks about. */
 export const PR_CHECK_LIMIT = 10;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const NEW_ITEM_PHASE: Phase = 'planned';
 const PR_MERGED_PHASE: Phase = 'done';
 const PR_EVENT: EventKind = 'pr';

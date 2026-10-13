@@ -1,4 +1,4 @@
-import { Ledger } from '../ledger/db';
+import { Ledger, MS_PER_MINUTE } from '../ledger/db';
 import {
     getSyncPause, getWorkspaceSetting, readSetting, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SETTING_SYNC_PULL_MINUTES, SYNC_POLICY_AUTO,
     SYNC_POLICY_OFF,
@@ -10,7 +10,6 @@ import { hasDueWork } from './outbox';
 /** `ghostpm sync`, and the flag SessionStart adds to it. */
 export const SYNC_COMMAND = 'sync';
 export const BACKGROUND_FLAG = '--background';
-const MS_PER_MINUTE = 60 * 1000;
 
 /** Ruling 4: `off` (the default) means no push, no pull and no SessionStart spawn for the workspace. */
 export function syncIsOff(db: Ledger, workspace: WorkspaceRow): boolean {

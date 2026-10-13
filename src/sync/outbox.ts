@@ -1,4 +1,4 @@
-import { Ledger, SqlParam, Where, write } from '../ledger/db';
+import { Ledger, MS_PER_DAY, SqlParam, Where, iso, write } from '../ledger/db';
 import {
     OP_CREATE, OP_SYNC_STATE, OutboxRow, OutboxStatus, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
 } from '../ledger/projection';
@@ -10,9 +10,9 @@ export const PUSH_BACKOFF_BASE_MS = 30 * 1000;
 export const PUSH_BACKOFF_CAP_MS = 30 * 60 * 1000;
 /** How long a row waits for its task's create to land before it is looked at again. */
 export const DEFER_MS = 2 * 1000;
+/** Ruling F15: a done row is history nothing reads; it is pruned this long after it was taken. */
+export const DONE_ROW_RETENTION_DAYS = 30;
 const PAUSED_PATH = `$.${SETTING_SYNC_PAUSED}`;
-
-const iso = (ms: number): string => new Date(ms).toISOString();
 
 export function backoffMs(attempt: number): number {
     return Math.min(PUSH_BACKOFF_BASE_MS * Math.pow(2, attempt - 1), PUSH_BACKOFF_CAP_MS);
@@ -56,10 +56,13 @@ function returnToPending(db: Ledger, row: OutboxRow, holder: string, set: string
 /**
  * A claim whose holder no longer holds the lease will never finish: give it back (spec §6).
  * Stale sync_state claims give way first, so the one-pending index holds: to a pending row of
- * the same task, and among themselves to the newest.
+ * the same task, and among themselves to the newest. The holder that just took the lease also
+ * prunes done rows past their retention, in the same write (ruling F15).
  */
 export function releaseStaleClaims(db: Ledger, now: number): number {
     return write(db, () => {
+        db.prepare('DELETE FROM outbox WHERE status = ? AND COALESCE(claimed_at, next_attempt_at) < ?')
+            .run(STATUS_DONE, iso(now - DONE_ROW_RETENTION_DAYS * MS_PER_DAY));
         const stale = `status = ? AND claimed_by IS NOT (SELECT holder FROM leases WHERE name = ? AND expires_at >= ?)`;
         const params = [STATUS_CLAIMED, SYNC_LEASE, iso(now)];
         db.prepare(`
@@ -140,6 +143,8 @@ export function retryRow(db: Ledger, row: OutboxRow, holder: string, error: stri
 const STALE_FAILED_CREATE = `o.op = ? AND o.status = ? AND (
     EXISTS (SELECT 1 FROM vendor_links l WHERE l.task_id = o.task_id)
     OR EXISTS (SELECT 1 FROM outbox n WHERE n.task_id = o.task_id AND n.op = o.op AND n.id > o.id))`;
+/** The statuses outbox health counts: every one but done. */
+const HEALTH_STATUSES: readonly OutboxStatus[] = [STATUS_PENDING, STATUS_CLAIMED, STATUS_FAILED];
 /** The rows of tasks in the workspaces whose ids are the JSON array bound to it. */
 const IN_WORKSPACES = 'task_id IN (SELECT id FROM tasks WHERE workspace_id IN (SELECT value FROM json_each(?)))';
 
@@ -163,9 +168,12 @@ export function rearmFailed(db: Ledger, now: number, workspaceIds: readonly numb
     });
 }
 
-/** Plan 4 contract: unfinished (pending or in flight) and failed rows, for one workspace or all. A stale failed create is not a failure. */
+/**
+ * Plan 4 contract: unfinished (pending or in flight) and failed rows, for one workspace or all. A stale failed create
+ * is not a failure. Done rows, nearly all of the outbox, are never read: the status index skips them (ruling F15).
+ */
 export function outboxHealth(db: Ledger, workspaceId?: number): { pending: number; failed: number } {
-    const where = new Where().add(`NOT (${STALE_FAILED_CREATE})`, OP_CREATE, STATUS_FAILED);
+    const where = new Where().in('o.status', HEALTH_STATUSES).add(`NOT (${STALE_FAILED_CREATE})`, OP_CREATE, STATUS_FAILED);
     if (workspaceId !== undefined) where.add('t.workspace_id = ?', workspaceId);
     return db.prepare(`
         SELECT COALESCE(SUM(o.status IN (?, ?)), 0) AS pending, COALESCE(SUM(o.status = ?), 0) AS failed

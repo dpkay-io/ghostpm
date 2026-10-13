@@ -2,7 +2,7 @@ import { Ledger, ledgerPath, openLedger, write } from '../ledger/db';
 import {
     getSyncPause, readSetting, setSyncPause, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP,
 } from '../ledger/settings';
-import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
+import { NO_VENDOR, WorkspaceRow, plural } from '../ledger/types';
 import { findWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { Runner, runCli, sweepArgDirs } from '../cli';
@@ -170,7 +170,6 @@ export function startSyncRunner(db: Ledger, deps: PushDeps, pollMs: number = PUS
     };
 }
 
-const plural = (count: number, noun: string, suffix = 's'): string => `${count} ${noun}${count === 1 ? '' : suffix}`;
 const isBackground = (argv: readonly string[]): boolean => argv.indexOf(BACKGROUND_FLAG) >= 0;
 const LEASE_LOST_NOTE = 'Stopped part way: another sync runner took the lease and carries on from there.';
 /** Where no workspace of its own is known: the folder a person names. */

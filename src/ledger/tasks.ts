@@ -1,7 +1,7 @@
 import { Ledger, Where, write, nowIso } from './db';
 import { recordEvent } from './events';
 import { enqueueComment, isSyncable, phaseCommentText, projectTask } from './projection';
-import { readSetting, SETTING_PROGRESS_COMMENTS } from './settings';
+import { readSetting, PROGRESS_COMMENTS_PHASE, SETTING_PROGRESS_COMMENTS } from './settings';
 import { Origin, Phase, TaskRow, VENDOR_SOURCE, Vendor, VendorLinkRow, formatTaskId } from './types';
 
 const LOCAL_REF = /^T(\d+)$/i;
@@ -78,7 +78,7 @@ export function createTask(db: Ledger, task: NewTask): TaskRow {
 export function applyPhaseChange(db: Ledger, task: TaskRow, phase: Phase, ctx: ChangeContext, at: string): void {
     const projects = ctx.source !== VENDOR_SOURCE && isSyncable(db, task);
     // Read before this phase event exists, so "since the last move" means the previous one.
-    const comment = projects && readSetting(db, task.workspace_id, SETTING_PROGRESS_COMMENTS) === 'phase'
+    const comment = projects && readSetting(db, task.workspace_id, SETTING_PROGRESS_COMMENTS) === PROGRESS_COMMENTS_PHASE
         ? phaseCommentText(db, task.id, task.phase, phase)
         : null;
     db.prepare('UPDATE tasks SET phase = ?, human_phase_at = COALESCE(?, human_phase_at) WHERE id = ?')

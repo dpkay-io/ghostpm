@@ -1,9 +1,8 @@
-import { Ledger, nowIso } from './db';
+import { Ledger, MS_PER_MINUTE, nowIso } from './db';
 import { SessionRow } from './types';
 
 export const MCP_CLIENT = 'mcp';
 export const DEFAULT_STALE_SESSION_MINUTES = 10;
-const MS_PER_MINUTE = 60 * 1000;
 
 export const mcpSessionId = (pid: number = process.pid): string => `${MCP_CLIENT}:${pid}`;
 

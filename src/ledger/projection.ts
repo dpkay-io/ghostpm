@@ -3,7 +3,7 @@ import { getWorkspace } from './workspaces';
 import {
     readSetting, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_OFF, SYNC_POLICY_PROMOTE, SyncPolicy,
 } from './settings';
-import { CLOSED_PHASES, EventKind, NO_VENDOR, Phase, TaskRow, formatTaskId } from './types';
+import { CLOSED_PHASES, EventKind, NO_VENDOR, Phase, TaskRow, formatTaskId, plural } from './types';
 
 export const OUTBOX_OPS = ['create', 'sync_state', 'comment', 'close_duplicate'] as const;
 export type OutboxOp = typeof OUTBOX_OPS[number];
@@ -190,8 +190,6 @@ export function handOverVendorItem(db: Ledger, fromId: number, into: TaskRow, at
 export function dropPendingSyncState(db: Ledger, taskId: number): void {
     db.prepare('DELETE FROM outbox WHERE task_id = ? AND op = ? AND status = ?').run(taskId, OP_SYNC_STATE, STATUS_PENDING);
 }
-
-const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? '' : 's'}`;
 
 /**
  * Spec D8 `phase`: one comment per phase move, summarising the evidence since the previous

@@ -7,11 +7,13 @@ import { TaskRow } from '../../src/ledger/types';
 import { acquireLease } from '../../src/sync/lease';
 import {
     backoffMs, claimNext, completeRow, deferRow, failRow, hasDueWork, outboxHealth, rearmFailed, releaseRow,
-    releaseStaleClaims, retryRow, DEFER_MS, PUSH_BACKOFF_BASE_MS, PUSH_BACKOFF_CAP_MS,
+    releaseStaleClaims, retryRow, DEFER_MS, DONE_ROW_RETENTION_DAYS, PUSH_BACKOFF_BASE_MS, PUSH_BACKOFF_CAP_MS,
 } from '../../src/sync/outbox';
 
 const T0 = Date.parse('2026-09-29T12:00:00.000Z');
 const MINUTE_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+const PARAMETER = '?';
 const HOLDER = 'pid:1';
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -206,6 +208,44 @@ describe('outbox queue mechanics', () => {
         insert('comment', 'pending', T0, otherTask.id);
         expect(outboxHealth(ledger.db, workspaceId)).toEqual({ pending: 2, failed: 1 });
         expect(outboxHealth(ledger.db)).toEqual({ pending: 3, failed: 1 });
+    });
+
+    it('reads health through the status index, never by scanning every row done long ago (F15)', () => {
+        const prepared: string[] = [];
+        const prepare = ledger.db.prepare.bind(ledger.db);
+        jest.spyOn(ledger.db, 'prepare').mockImplementation(((sql: string) => {
+            prepared.push(sql);
+            return prepare(sql);
+        }) as typeof ledger.db.prepare);
+        outboxHealth(ledger.db, workspaceId);
+        outboxHealth(ledger.db);
+        jest.restoreAllMocks();
+
+        expect(prepared).toHaveLength(2);
+        for (const sql of prepared) {
+            const unbound = Array.from({ length: sql.split(PARAMETER).length - 1 }, () => null);
+            const plan = (ledger.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...unbound) as { detail: string }[]).map(step => step.detail);
+            expect(plan).toContain('SEARCH o USING INDEX outbox_due (status=?)');
+            expect(plan).not.toContain('SCAN o');
+        }
+    });
+
+    it('prunes rows done more than the retention period ago when a holder takes over, and nothing else (F15)', () => {
+        const longAgo = T0 - (DONE_ROW_RETENTION_DAYS + 1) * DAY_MS;
+        const lately = T0 - (DONE_ROW_RETENTION_DAYS - 1) * DAY_MS;
+        const takenAt = (id: number, at: number): number => {
+            ledger.db.prepare('UPDATE outbox SET claimed_at = ? WHERE id = ?').run(iso(at), id);
+            return id;
+        };
+        const oldDone = takenAt(insert('comment', 'done', longAgo), longAgo);
+        const recentDone = takenAt(insert('comment', 'done', lately), lately);
+        const oldFailed = takenAt(insert('comment', 'failed', longAgo), longAgo);
+        const oldPending = insert('comment', 'pending', longAgo);
+
+        releaseStaleClaims(ledger.db, T0);
+
+        expect(row(oldDone)).toBeUndefined();
+        expect([recentDone, oldFailed, oldPending].map(id => row(id).status)).toEqual(['done', 'failed', 'pending']);
     });
 
     it('sees due work: a due row, or a claim nobody is finishing, outside paused workspaces', () => {

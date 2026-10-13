@@ -20,6 +20,8 @@ export type EventKind = typeof EVENT_KINDS[number];
 export type Vendor = 'github' | 'azure_devops' | 'none';
 export const NO_VENDOR: Vendor = 'none';
 export type Origin = 'local' | 'vendor';
+/** A task that came from GitHub or Azure DevOps. */
+export const VENDOR_ORIGIN: Origin = 'vendor';
 /** Event source for anything that came from GitHub or Azure DevOps. Never projected back. */
 export const VENDOR_SOURCE = 'vendor';
 /** Event source for what the sync engine records itself: links, broken links, merged-PR moves. */
@@ -27,6 +29,8 @@ export const SYNC_SOURCE = 'sync';
 
 export const TASK_ID_PREFIX = 'T';
 export const formatTaskId = (id: number): string => `${TASK_ID_PREFIX}${id}`;
+/** `1 commit`, `2 commits`; `suffix` for nouns that take another (`2 pushes`). */
+export const plural = (count: number, noun: string, suffix = 's'): string => `${count} ${noun}${count === 1 ? '' : suffix}`;
 export const isPhase = (value: string): value is Phase => (PHASES as readonly string[]).includes(value);
 
 export interface TaskRow {

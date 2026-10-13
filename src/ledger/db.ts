@@ -126,6 +126,11 @@ export function nowIso(): string {
     return new Date().toISOString();
 }
 
+/** The ledger's time format for a moment given in epoch milliseconds. */
+export const iso = (ms: number): string => new Date(ms).toISOString();
+export const MS_PER_MINUTE = 60 * 1000;
+export const MS_PER_DAY = 24 * 60 * MS_PER_MINUTE;
+
 export type SqlParam = string | number;
 
 /** Collects AND-joined conditions and their bound parameters for dynamic filters. */

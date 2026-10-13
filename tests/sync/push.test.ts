@@ -41,7 +41,7 @@ const WRITE_LOCK_BOUND_MS = 250;
 const LOST_ANSWER = 'gh timed out after 45000 ms';
 /** How long a write waits for another writer's lock in the stuck-claim test (the ledger waits BUSY_TIMEOUT_MS). */
 const SHORT_BUSY_TIMEOUT_MS = 50;
-const DATABASE_LOCKED = /database is locked/;
+const SQLITE_BUSY = 'SQLITE_BUSY';
 
 /** The longest any ledger transaction ran while this is installed: how long another writer could have to wait. */
 function timeTransactions(db: Database.Database): () => number {
@@ -796,7 +796,10 @@ describe('pushing the outbox', () => {
             return created;
         });
         try {
-            await expect(push()).rejects.toThrow(DATABASE_LOCKED);
+            // By its code: better-sqlite3 builds its errors once per process, so in a reused jest worker they are not
+            // instances of this test file's Error.
+            const failure = await push().then(() => undefined, (error: unknown) => error as { code?: string });
+            expect(failure?.code).toBe(SQLITE_BUSY);
         } finally {
             other.exec('ROLLBACK');
             other.close();

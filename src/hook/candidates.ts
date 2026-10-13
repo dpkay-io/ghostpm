@@ -1,17 +1,15 @@
-import { Ledger } from '../ledger/db';
+import { Ledger, MS_PER_DAY } from '../ledger/db';
 import { resolveSetting, SETTING_CURRENT_USER } from '../ledger/settings';
 import { taskRefFromBranch } from '../ledger/branch';
 import { resolveTaskRef } from '../ledger/tasks';
-import { CLOSED_PHASES, TaskRow, formatTaskId } from '../ledger/types';
+import { CLOSED_PHASES, TaskRow, VENDOR_ORIGIN, formatTaskId } from '../ledger/types';
 
 export const CANDIDATE_LIMIT = 5;
 export const RECENT_DAYS = 14;
 export const INJECTION_CHAR_BUDGET = 600;
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const TITLE_LIMIT = 60;
 const ELLIPSIS = '…';
-const VENDOR_ORIGIN = 'vendor';
 
 /** Spec §7.4: what the model is told to do when the session has no task yet. */
 const INSTRUCTION = [
