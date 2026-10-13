@@ -7,6 +7,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PmServer } from '../src/mcp-server';
 import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
+import { recordEvent } from '../src/ledger/events';
+import { SINCE_HELP } from '../src/surfaces/since';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
 import {
     setSetting, setSyncPause, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
@@ -220,6 +222,28 @@ describe('mcp server on the ledger', () => {
         expect(timeline).toContain(`${id} Login fix · created`);
         expect(timeline).toContain('planned → in_review');
         expect(await call('timeline', { since: new Date(Date.now() + 60_000).toISOString() })).toBe('Nothing recorded in that period.');
+    });
+
+    it('renders hook evidence and keeps PR links instead of printing undefined (gap N1)', async () => {
+        const tracked = task('Login fix');
+        const hook = 'hook:claude-code';
+        recordEvent(db, { taskId: tracked.id, kind: 'progress', source: hook, payload: { files: ['C:\\repo\\src\\a.ts', 'C:\\repo\\src\\b.ts'] } });
+        recordEvent(db, { taskId: tracked.id, kind: 'commit', source: hook, payload: {} });
+        recordEvent(db, { taskId: tracked.id, kind: 'pr', source: hook, payload: { url: 'https://github.com/acme/app/pull/7' } });
+        const timeline = await call('timeline');
+        expect(timeline).not.toContain('undefined');
+        expect(timeline).toContain('edited 2 files: a.ts, b.ts');
+        expect(timeline).toContain('committed');
+        expect(timeline).toContain('PR https://github.com/acme/app/pull/7');
+    });
+
+    it('reads since as a duration or keyword and refuses what it cannot read (Review Focus 3)', async () => {
+        task('Login fix');
+        expect(await call('timeline', { since: '2d' })).toContain('Login fix');
+        expect(await call('timeline', { since: 'yesterday' })).toContain('Login fix');
+        const refused = await client.callTool({ name: 'timeline', arguments: { since: 'whenever' } }) as { isError?: boolean; content: { text: string }[] };
+        expect(refused.isError).toBe(true);
+        expect(refused.content[0].text).toContain(SINCE_HELP);
     });
 
     it('renders merged task ids in the timeline using the real id format', async () => {

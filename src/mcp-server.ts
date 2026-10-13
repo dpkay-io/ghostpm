@@ -5,10 +5,12 @@ import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { Ledger, openLedger } from "./ledger/db";
+import { Ledger, MS_PER_HOUR, openLedger } from "./ledger/db";
 import { ensureWorkspace, getWorkspace } from "./ledger/workspaces";
 import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
-import { listEvents, TimelineEntry } from "./ledger/events";
+import { listEvents } from "./ledger/events";
+import { renderEvent } from "./surfaces/render-event";
+import { parseSince } from "./surfaces/since";
 import { mergeTask, trackWork } from "./ledger/work";
 import { activeTaskFor, taskBranchName } from "./ledger/branch";
 import {
@@ -39,7 +41,6 @@ type TaskColumn = typeof TASK_COLUMNS[number];
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
-const MS_PER_HOUR = 60 * 60 * 1000;
 const SOURCE_PREFIX = "mcp";
 /** What update_task says about a publish request, by what the ledger did with it. */
 const PUBLISH_NOTES: Record<ProjectionResult, string> = {
@@ -221,21 +222,6 @@ export class PmServer {
                 return `\n(Branch not created: ${(error as Error).message})`;
             }
         }
-    }
-
-    private renderEvent(entry: TimelineEntry): string {
-        const payload = JSON.parse(entry.payload ?? '{}') as Record<string, unknown>;
-        const task = entry.task_id === null ? '' : `${formatTaskId(entry.task_id)} ${entry.title ?? ''} · `;
-        let detail: string;
-        switch (entry.kind) {
-            case 'phase': detail = `${payload.from} → ${payload.to}`; break;
-            case 'comment': detail = String(payload.text ?? ''); break;
-            case 'renamed': detail = `renamed to ${payload.to}`; break;
-            case 'progress': detail = `${payload.intent}: ${payload.note}`; break;
-            case 'merged': detail = payload.into !== undefined ? `merged into ${formatTaskId(payload.into as number)}` : `absorbed ${formatTaskId(payload.from as number)}`; break;
-            default: detail = entry.kind;
-        }
-        return `- ${entry.at} · ${task}${detail} (${entry.source})`;
     }
 
     private registerTools(): void {
@@ -464,25 +450,33 @@ export class PmServer {
 
         this.server.tool(
             "timeline",
-            "Recent activity: task creations, phase changes, progress and comments. Use it for standups and 'what did I do' questions.",
+            "Recent activity: task creations, phase changes, edits, commits, PRs and comments. Use it for standups and 'what did I do' questions.",
             {
-                since: z.string().optional().describe('ISO timestamp or date. Defaults to the last 24 hours.'),
+                since: z.string().optional().describe('A duration (36h, 2d), a date (2026-09-28), a date and time, today or yesterday. Defaults to the last 24 hours.'),
                 task_id: z.string().optional().describe('Limit to one task.'),
                 all_workspaces: z.boolean().optional().describe('Include every workspace on this machine.'),
                 limit: z.number().int().positive().optional().describe('Maximum number of entries.'),
             },
             async ({ since, task_id, all_workspaces, limit }) => {
                 const workspace = this.context();
+                let from: string;
+                try {
+                    from = since === undefined
+                        ? new Date(Date.now() - DEFAULT_TIMELINE_HOURS * MS_PER_HOUR).toISOString()
+                        : parseSince(since).toISOString();
+                } catch (error) {
+                    return failure(error);
+                }
                 const task = task_id ? resolveTaskRef(this.db, task_id, workspace.id) : undefined;
                 if (task_id && !task) return text(`Task ${task_id} not found.`);
                 const entries = listEvents(this.db, {
                     taskId: task?.id,
                     workspaceId: task || all_workspaces ? undefined : workspace.id,
-                    since: since ?? new Date(Date.now() - DEFAULT_TIMELINE_HOURS * MS_PER_HOUR).toISOString(),
+                    since: from,
                     limit,
                 });
                 if (entries.length === 0) return text('Nothing recorded in that period.');
-                return text(entries.map(entry => this.renderEvent(entry)).join('\n'));
+                return text(entries.map(renderEvent).join('\n'));
             },
         );
     }
