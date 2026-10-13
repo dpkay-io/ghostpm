@@ -1,6 +1,6 @@
 import { Ledger, nowIso, write } from '../ledger/db';
 import {
-    getWorkspaceSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_LINK_CHECK_CURSOR,
+    getWorkspaceSetting, setWorkspaceSetting, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_LINK_CHECK_CURSOR, SETTING_PULL_WATERMARK,
 } from '../ledger/settings';
 import { bumpRevision, getTask, insertTaskRow, insertVendorLink } from '../ledger/tasks';
 import { advancePhase } from '../ledger/work';
@@ -111,7 +111,7 @@ function latestChange(items: RemoteItem[]): string {
 /**
  * One pull of one workspace, by the holder of the sync lease, which it renews before every vendor call
  * (ruling D7) and checks in every write (ruling F2). Throws on a vendor failure or a lost lease; the
- * watermark then stays where it was.
+ * watermark and last_sync then stay where they were.
  */
 export async function pullWorkspace(
     db: Ledger,
@@ -121,7 +121,9 @@ export async function pullWorkspace(
 ): Promise<PullSummary> {
     // Taken before any fetch, so what changes while fetching is read next time (spec §8.5).
     const startedAt = deps.now();
-    const since = getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC)
+    // A ledger from before the watermark existed reads from its last_sync, which held the same thing (no migration).
+    const since = getWorkspaceSetting<string>(db, workspace.id, SETTING_PULL_WATERMARK)
+        ?? getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC)
         ?? new Date(startedAt - PULL_WINDOW_DAYS * MS_PER_DAY).toISOString();
     const summary: PullSummary = { fetched: 0, created: 0, humanEdits: 0, broken: 0, merged: 0 };
     const count = (outcome: UpsertOutcome): void => {
@@ -186,9 +188,14 @@ export async function pullWorkspace(
         if (moved) summary.merged++;
     }
 
-    // A full page may have more behind it: continue from the newest change seen. Otherwise re-read a little before
-    // this pull began, for a vendor clock or search index behind ours (ruling F4); re-reads are de-duplicated by baseline.
-    const watermark = items.length >= pageLimit ? latestChange(items) : new Date(startedAt - PULL_OVERLAP_MS).toISOString();
-    leasedWrite(() => setWorkspaceSetting(db, workspace.id, SETTING_LAST_SYNC, watermark));
+    // A full page may have more behind it: continue from the newest change seen, and leave last_sync so the next pull is
+    // due at once. Otherwise re-read a little before this pull began, for a vendor clock or search index behind ours
+    // (ruling F4; re-reads are de-duplicated by baseline), and count the schedule from when this pull began.
+    const full = items.length >= pageLimit;
+    const watermark = full ? latestChange(items) : new Date(startedAt - PULL_OVERLAP_MS).toISOString();
+    leasedWrite(() => {
+        setWorkspaceSetting(db, workspace.id, SETTING_PULL_WATERMARK, watermark);
+        if (!full) setWorkspaceSetting(db, workspace.id, SETTING_LAST_SYNC, new Date(startedAt).toISOString());
+    });
     return summary;
 }

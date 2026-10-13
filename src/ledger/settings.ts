@@ -17,8 +17,13 @@ export const SETTING_SYNC_PULL_MINUTES = 'sync_pull_minutes';
 export const SETTING_MAX_PUSH_ATTEMPTS = 'max_push_attempts';
 /** Workspace, internal: why sync is paused there (spec §8.8). Absent means not paused. */
 export const SETTING_SYNC_PAUSED = 'sync_paused';
-/** Workspace, internal: pull watermark (spec §8.5), advanced only after a successful pull. */
+/**
+ * Workspace, internal: when the last pull that read everything began, advanced only by such a pull (spec §8.5). The pull
+ * schedule counts from it. A pull that read a full page leaves it, so the next pull is due at once.
+ */
 export const SETTING_LAST_SYNC = 'last_sync';
+/** Workspace, internal: where the next pull reads from (its `since`), advanced only after a successful pull. */
+export const SETTING_PULL_WATERMARK = 'pull_watermark';
 /** Workspace, internal: task id the rotating linked-item check stopped at. */
 export const SETTING_LINK_CHECK_CURSOR = 'link_check_cursor';
 

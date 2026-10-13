@@ -17,8 +17,9 @@ export function syncIsOff(db: Ledger, workspace: WorkspaceRow): boolean {
 }
 
 /**
- * Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. Counted from the
- * last successful pull (`last_sync`), or from `lastAttempt` when that is later: a runner's last try, failed or not.
+ * Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. Counted from when the
+ * last pull that read everything began (`last_sync`), or from `lastAttempt` when that is later: a runner's last try,
+ * failed or not.
  */
 export function pullIsDue(db: Ledger, workspace: WorkspaceRow, now: number, lastAttempt: number = Number.NEGATIVE_INFINITY): boolean {
     if (workspace.vendor === NO_VENDOR || syncIsOff(db, workspace) || getSyncPause(db, workspace.id) !== undefined) return false;

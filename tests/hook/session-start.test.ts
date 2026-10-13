@@ -9,11 +9,16 @@ import { Phase, TaskRow } from '../../src/ledger/types';
 import { readPayload } from '../../src/hook/payload';
 import { handleWith, HookOptions, HOOK_CLIENT } from '../../src/hook/handlers';
 import {
-    deleteSetting, setSetting, setWorkspaceSetting, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_OFF,
+    deleteSetting, setSetting, setWorkspaceSetting, DEFAULT_SYNC_PULL_MINUTES, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
+    SYNC_POLICY_OFF,
 } from '../../src/ledger/settings';
-import { acquireLease } from '../../src/sync/lease';
+import { acquireLease, releaseLease } from '../../src/sync/lease';
+import { pullWorkspace } from '../../src/sync/pull';
+import { FakeVendor } from '../sync/fake-vendor';
 
 const SESSION_ID = 'claude-abc123';
+const PULL_HOLDER = 'pid:background-sync';
+const MINUTE_MS = 60 * 1000;
 
 describe('SessionStart handler', () => {
     let ledger: TempLedger;
@@ -142,6 +147,19 @@ describe('SessionStart handler', () => {
 
             queuePush(workspaceId);
             sessionStartIn(widgets, { startSync });
+            expect(started).toBe(1);
+        });
+
+        it('starts none right after a successful pull, and one once sync_pull_minutes have passed', async () => {
+            const workspace = ensureWorkspace(ledger.db, widgets);
+            const now = Date.now();
+            await pullWorkspace(ledger.db, workspace, { holder: PULL_HOLDER, now: () => now, adapterFor: () => new FakeVendor() });
+            releaseLease(ledger.db, PULL_HOLDER);   // that sync is over: nobody holds the lease
+
+            sessionStartIn(widgets, { startSync, now });
+            expect(started).toBe(0);
+
+            sessionStartIn(widgets, { startSync, now: now + DEFAULT_SYNC_PULL_MINUTES * MINUTE_MS });
             expect(started).toBe(1);
         });
 
