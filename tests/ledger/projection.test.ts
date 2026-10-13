@@ -212,7 +212,15 @@ describe('queueing vendor projections', () => {
         ledger.db.prepare("UPDATE outbox SET status = 'failed' WHERE task_id = ?").run(task.id);
         updateTask(ledger.db, task.id, { title: 'Renamed', phase: 'in_progress', comment: 'note' }, HUMAN);
         evidence(task, { committed: true });
-        expect(publishTask(ledger.db, task.id)).toBe('nothing');
+        expect(publishTask(ledger.db, task.id)).toBe('create_failed');
+        expect(ops(task.id)).toEqual(['create:failed']);
+    });
+
+    it('answers not_allowed, not create_failed, for a task whose create failed once sync is off (F13)', () => {
+        const task = track('Gave up');
+        ledger.db.prepare("UPDATE outbox SET status = 'failed' WHERE task_id = ?").run(task.id);
+        setWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
+        expect(publishTask(ledger.db, task.id)).toBe('not_allowed');
         expect(ops(task.id)).toEqual(['create:failed']);
     });
 });

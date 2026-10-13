@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from '../ledger/helpers';
 import { LEDGER_FILE, migrate, openLedger } from '../../src/ledger/db';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
-import { getTask, getVendorLink, updateTask } from '../../src/ledger/tasks';
+import { createTask, getTask, getVendorLink, insertVendorLink, updateTask } from '../../src/ledger/tasks';
 import { startSession } from '../../src/ledger/sessions';
 import { trackWork, mergeTask } from '../../src/ledger/work';
 import { listEvents } from '../../src/ledger/events';
@@ -16,7 +16,7 @@ import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
 import { CliArg, Runner } from '../../src/cli';
 import { emptyPushSummary, pushDue, PushDeps } from '../../src/sync/push';
 import { recordOwnPush } from '../../src/sync/reconcile';
-import { rearmFailed, releaseStaleClaims, DEFER_MS, PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
+import { outboxHealth, rearmFailed, releaseStaleClaims, DEFER_MS, PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
 import { acquireLease, releaseLease, LEASE_TTL_MS } from '../../src/sync/lease';
 import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
 import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
@@ -38,6 +38,10 @@ const SYNC_V2_SCHEMA_VERSION = 2;
 const GITHUB_MAX_BODY = 65536;
 const HOSTILE_PUSH_BOUND_MS = 2000;
 const WRITE_LOCK_BOUND_MS = 250;
+const LOST_ANSWER = 'gh timed out after 45000 ms';
+/** How long a write waits for another writer's lock in the stuck-claim test (the ledger waits BUSY_TIMEOUT_MS). */
+const SHORT_BUSY_TIMEOUT_MS = 50;
+const DATABASE_LOCKED = /database is locked/;
 
 /** The longest any ledger transaction ran while this is installed: how long another writer could have to wait. */
 function timeTransactions(db: Database.Database): () => number {
@@ -742,5 +746,112 @@ describe('pushing the outbox', () => {
         expect((await push()).broken).toBe(1);
         expect(getVendorLink(ledger.db, task.id)!.broken_at).not.toBeNull();
         expect(statuses(task.id)).toEqual(['create:done', 'comment:done']);
+    });
+
+    it("hands a merged task's vendor item, with what it still had to push there, to the unlinked task it merged into (F1)", async () => {
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+        const into = track('Local plan');   // linked-only: never created on the vendor
+        const item = vendor.seed({ title: 'Issue from GitHub' });
+        const from = createTask(ledger.db, { title: item.title, phase: 'planned', workspaceId: workspace.id, origin: 'vendor', source: 'vendor' });
+        insertVendorLink(ledger.db, {
+            taskId: from.id, vendor: workspace.vendor, remoteId: item.remoteId, remoteState: item.state, labels: '[]',
+            remoteUpdatedAt: item.updatedAt, remoteTitle: item.title,
+        });
+        change(from.id, { title: 'Renamed locally', comment: 'note before the merge' });   // queued for that item
+        mergeTask(ledger.db, { fromRef: `T${from.id}`, intoRef: `T${into.id}`, workspaceId: workspace.id, source: SOURCE, sessionId: SESSION_ID });
+        expect(getVendorLink(ledger.db, into.id)?.remote_id).toBe(item.remoteId);
+
+        await push();
+        rearmFailed(ledger.db, Date.now(), [workspace.id]);   // a person's `ghostpm sync`
+        await push();
+
+        expect(outboxHealth(ledger.db, workspace.id)).toEqual({ pending: 0, failed: 0 });
+        expect(outboxRows(ledger.db, from.id)).toEqual([]);
+        expect(vendor.items.get(item.remoteId)).toMatchObject({ title: 'Local plan', labels: ['ghostpm:planned'] });
+        expect(vendor.comments.get(item.remoteId)!.map(text => text.split('\n')[0])).toEqual(['note before the merge']);
+    });
+
+    it('completes a desired state or a duplicate close with no vendor item as skipped, and still fails such a comment (F1)', async () => {
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+        const task = track('Never on the vendor');
+        const queue = ledger.db.prepare("INSERT INTO outbox (task_id, op, payload, status, next_attempt_at) VALUES (?, ?, ?, 'pending', ?)");
+        queue.run(task.id, 'sync_state', null, new Date(0).toISOString());
+        queue.run(task.id, 'close_duplicate', JSON.stringify({ of: '7' }), new Date(0).toISOString());
+        queue.run(task.id, 'comment', JSON.stringify({ text: 'note' }), new Date(0).toISOString());
+
+        expect(await push()).toMatchObject({ pushed: 0, skipped: 2, failed: 1 });
+
+        expect(statuses(task.id)).toEqual(['sync_state:done', 'close_duplicate:done', 'comment:failed']);
+        expect(vendor.calls).toEqual([]);
+    });
+
+    it('gives back a row whose bookkeeping write failed, so the same live holder pushes it on its next run (F3)', async () => {
+        const task = track();
+        ledger.db.pragma(`busy_timeout = ${SHORT_BUSY_TIMEOUT_MS}`);   // feel another writer's lock at once, not after 5 s
+        const other = openLedger(path.join(ledger.dir, LEDGER_FILE));
+        const create = vendor.create.bind(vendor);
+        jest.spyOn(vendor, 'create').mockImplementationOnce(async (desired, body) => {
+            const created = await create(desired, body);
+            other.exec('BEGIN IMMEDIATE');   // another writer holds the lock through every write that follows
+            return created;
+        });
+        try {
+            await expect(push()).rejects.toThrow(DATABASE_LOCKED);
+        } finally {
+            other.exec('ROLLBACK');
+            other.close();
+        }
+        expect(acquireLease(ledger.db, HOLDER, Date.now())).toBe(true);   // the same live holder keeps its lease
+
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(statuses(task.id)).toEqual(['create:done']);
+        expect(getVendorLink(ledger.db, task.id)?.remote_id).toBe('1');
+    });
+
+    it('fails, never skips, a create that may have landed once sync is switched off, and adopts its item when sync is back (F4)', async () => {
+        const task = track('Login fix');
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // landed, answer lost
+        expect((await push()).retried).toBe(1);
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+        expect((await push()).failed).toBe(1);
+        expect(vendor.calls.map(call => call.op)).toEqual(['create']);
+
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        change(task.id, { title: 'Login fix v2' });
+        expect(statuses(task.id)).toEqual(['create:failed']);   // nothing re-queued behind it
+        await push();
+        rearmFailed(ledger.db, deps.now(), [workspace.id]);     // a person's `ghostpm sync`
+        await push();
+
+        expect(vendor.calls.filter(call => call.op === 'create')).toHaveLength(1);
+        expect(Array.from(vendor.items.values()).map(each => each.title)).toEqual(['Login fix v2']);
+        expect(getVendorLink(ledger.db, task.id)?.remote_id).toBe('1');
+    });
+
+    it('only looks for, never makes, the item of a tried create once the workspace went linked-only (F4)', async () => {
+        const landed = track('Landed');
+        const lost = track('Never landed');
+        change(lost.id, { comment: 'waits for an item that never comes' });
+        vendor.failAfterApply = new Error(LOST_ANSWER);           // the first create landed, its answer did not
+        const create = vendor.create.bind(vendor);
+        jest.spyOn(vendor, 'create').mockImplementation(async (desired, body) => {
+            if (desired.title === lost.title) throw new Error(LOST_ANSWER);   // the second failed before anything was made
+            return create(desired, body);
+        });
+        await push();
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(vendor.items.size).toBe(1);
+        expect(getVendorLink(ledger.db, landed.id)?.remote_id).toBe('1');
+        expect(getVendorLink(ledger.db, lost.id)).toBeUndefined();
+        expect(statuses(landed.id)).toEqual(['create:done']);
+        expect(statuses(lost.id)).toEqual(['create:done']);
+        expect(outboxHealth(ledger.db, workspace.id)).toEqual({ pending: 0, failed: 0 });
     });
 });

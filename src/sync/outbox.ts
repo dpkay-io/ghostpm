@@ -104,6 +104,18 @@ export function releaseRow(db: Ledger, row: OutboxRow, holder: string): boolean 
 }
 
 /**
+ * Ruling F3: a holder pushes one row at a time, so a row it still has claimed when a run starts is one an earlier
+ * run gave up on when its bookkeeping write failed (another writer held the lock past the busy timeout). It goes back
+ * as a dead holder's claim would, and its retry marker keeps a second push from duplicating the first. Reads first:
+ * a run with nothing left over writes nothing.
+ */
+export function releaseOwnClaims(db: Ledger, holder: string): number {
+    const left = db.prepare(`SELECT * FROM outbox WHERE ${HELD}`).all(STATUS_CLAIMED, holder) as OutboxRow[];
+    if (left.length === 0) return 0;
+    return write(db, () => left.filter(row => releaseRow(db, row, holder)).length);
+}
+
+/**
  * Transient failure: back off (spec §8.8); `failed` once `maxAttempts` is reached. The count comes
  * from the ledger, not the caller's copy of the row. The resulting status, or null when the claim is no longer `holder`'s.
  */

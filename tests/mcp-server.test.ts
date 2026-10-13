@@ -346,6 +346,26 @@ describe('mcp server in a GitHub workspace', () => {
         expect(await call('update_task', { task_id: `T${local}`, publish: true })).toContain('not published: sync_policy');
     });
 
+    it('queues the comment that comes with a publish under promote (F13)', async () => {
+        setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_PROMOTE);
+        const id = await trackedId('Quiet until asked');
+        expect(await call('update_task', { task_id: `T${id}`, comment: 'Ready for review', publish: true }))
+            .toBe(`T${id} updated: comment added, queued to publish.`);
+        expect(outboxRows(ledger.db, id).map(row => [row.op, row.payload])).toEqual([
+            ['create', null],
+            ['comment', JSON.stringify({ text: 'Ready for review' })],
+        ]);
+    });
+
+    it('says a publish waits on a failed create, and how to retry it, rather than that it is on its way (F13)', async () => {
+        const id = await trackedId('Gave up');
+        ledger.db.prepare("UPDATE outbox SET status = 'failed' WHERE task_id = ?").run(id);
+        const answer = await call('update_task', { task_id: `T${id}`, publish: true });
+        expect(answer).toContain('not published: its create failed');
+        expect(answer).toContain('ghostpm sync');
+        expect(answer).not.toContain('on its way');
+    });
+
     it("reports this workspace's pending pushes and why sync is paused", async () => {
         await trackedId('Login fix');
         const workspaceId = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'widgets')).id;

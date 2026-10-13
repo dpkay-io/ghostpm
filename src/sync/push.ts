@@ -3,7 +3,7 @@ import { Runner } from '../cli';
 import { Ledger, nowIso, write } from '../ledger/db';
 import { recordEvent } from '../ledger/events';
 import {
-    AttemptPayload, CloseDuplicatePayload, CommentPayload, OP_CLOSE_DUPLICATE, OP_CREATE, OP_SYNC_STATE, OutboxOp, OutboxRow, STATUS_FAILED,
+    AttemptPayload, CloseDuplicatePayload, CommentPayload, OP_CLOSE_DUPLICATE, OP_COMMENT, OP_CREATE, OP_SYNC_STATE, OutboxOp, OutboxRow, STATUS_FAILED,
     dropUnpushed, hasActiveCreate, projectTask,
 } from '../ledger/projection';
 import {
@@ -15,7 +15,9 @@ import { MERGED_PHASE } from '../ledger/work';
 import { getWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { acquireLease, holdLease, LeaseLostError } from './lease';
-import { DEFER_MS, claimNext, completeRow, deferRow, failRow, holdsClaim, releaseRow, retryRow, setRowPayload } from './outbox';
+import {
+    DEFER_MS, claimNext, completeRow, deferRow, failRow, holdsClaim, releaseOwnClaims, releaseRow, retryRow, setRowPayload,
+} from './outbox';
 import { applyRemoteItem, clearIntent, markLinkBroken, recordIntent, recordOwnPush } from './reconcile';
 import { redactSecrets } from './redact';
 import {
@@ -49,6 +51,8 @@ export const emptyPushSummary = (): PushSummary =>
 
 const NOT_SYNCABLE = 'The task or its workspace no longer syncs.';
 const NO_VENDOR_ITEM = 'The task has no vendor item and none is being created.';
+const TRIED_BEFORE_OFF = 'Sync was switched off after this create was tried, and the item may exist. '
+    + 'With sync on again, `ghostpm sync` looks for it before creating anything.';
 const MARKER_SEPARATOR = '\n\n';
 /** The ops that write a push intent before their vendor call. */
 const RECORDS_INTENT: ReadonlySet<OutboxOp> = new Set<OutboxOp>([OP_SYNC_STATE, OP_CLOSE_DUPLICATE]);
@@ -73,6 +77,8 @@ interface PushContext extends Claim {
 }
 
 const defaultBody = (task: TaskRow): string => `Tracked by GhostPM as ${formatTaskId(task.id)}.`;
+/** What an earlier attempt at a create or comment row recorded; a row never tried carries no nonce. */
+const attemptOf = (row: OutboxRow): AttemptPayload => JSON.parse(row.payload ?? '{}') as AttemptPayload;
 const withMarker = (text: string, nonce: string): string => `${text}${MARKER_SEPARATOR}${idempotencyMarker(nonce)}`;
 const newNonce = (): string => randomBytes(MARKER_NONCE_BYTES).toString('hex');
 
@@ -123,33 +129,43 @@ const desiredOf = (ctx: PushContext, task: TaskRow): DesiredState => ({ title: s
 
 type LinkCheck = { link: VendorLinkRow } | { outcome: Outcome };
 
-/** Rows after `create` need the vendor item; while its create is on the way they wait. */
+/**
+ * Rows after `create` need the vendor item; while its create is on the way they wait. With none coming, a desired
+ * state has nothing to apply to and is done with (ruling F1), while a comment's text would be lost: it fails.
+ */
 function requireLink(ctx: PushContext): LinkCheck {
     const link = getVendorLink(ctx.db, ctx.task.id);
     if (link !== undefined) return link.broken_at === null ? { link } : { outcome: 'skipped' };
-    return { outcome: hasActiveCreate(ctx.db, ctx.task.id) ? 'deferred' : 'no_item' };
+    if (hasActiveCreate(ctx.db, ctx.task.id)) return { outcome: 'deferred' };
+    return { outcome: ctx.row.op === OP_COMMENT ? 'no_item' : 'skipped' };
 }
+
+/**
+ * Plan Ruling 87: nothing is created for work already done or dropped (a re-armed create can outlive its task's
+ * phase), and spec §8.2: nothing in a linked-only workspace (ruling F4: one switched there after the create was tried).
+ */
+const createsNothing = (db: Ledger, task: TaskRow, workspace: WorkspaceRow): boolean =>
+    CLOSED_PHASES.has(task.phase) || readSetting(db, workspace.id, SETTING_SYNC_POLICY) === SYNC_POLICY_LINKED_ONLY;
 
 async function pushCreate(ctx: PushContext): Promise<Outcome> {
     if (getVendorLink(ctx.db, ctx.task.id) !== undefined) return 'skipped';   // never create twice
-    const earlier = JSON.parse(ctx.row.payload ?? '{}') as AttemptPayload;
-    // Plan Ruling 87: nothing is created for work already done or dropped (a re-armed create can outlive its task's
-    // phase). An attempt that may have landed is still looked for, so its item is linked and then closed, not orphaned.
-    const closed = CLOSED_PHASES.has(ctx.task.phase);
-    if (closed && earlier.nonce === undefined) return 'skipped';
+    const earlier = attemptOf(ctx.row);
+    // An attempt that may have landed is still looked for, so its item is linked (and closed, for a closed task), not orphaned.
+    const lookOnly = createsNothing(ctx.db, ctx.task, ctx.workspace);
+    if (lookOnly && earlier.nonce === undefined) return 'skipped';
     const desired = desiredOf(ctx, ctx.task);
     let sent = earlier.title ?? desired.title;
     // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
     let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
-    if (item === null && closed) {
+    if (item === null && lookOnly) {
         // Nothing landed. The task may have reopened while the lookup was out: read it again and complete this row in
         // the same write, since a reopen between the two would find this create still in flight and queue nothing.
         finish(ctx, () => {
             const task = getTask(ctx.db, ctx.task.id)!;
-            // Still closed: its comments can never reach the vendor either.
-            if (CLOSED_PHASES.has(task.phase)) dropUnpushed(ctx.db, task.id);
-            // Reopened: this create is stale. The projection decides, by policy, what the task needs now
-            // (a fresh create its waiting comments and state then follow).
+            // Still nothing to create: its comments can never reach the vendor either.
+            if (createsNothing(ctx.db, task, ctx.workspace)) dropUnpushed(ctx.db, task.id);
+            // Reopened, or sync switched since: this create is stale. The projection decides, by policy, what the task
+            // needs now (a fresh create its waiting comments and state then follow).
             else projectTask(ctx.db, task, 'change', nowIso());
         });
         return 'ended';
@@ -315,10 +331,18 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
         summary.failed++;
         return;
     }
-    // Rulings: rows queued before the workspace was switched off, and creates queued before it went
-    // linked-only (which never creates, spec §8.2), are done with. Released, they would be claimed again at once.
+    // Rulings: rows queued before the workspace was switched off, and creates never tried before it went linked-only
+    // (which never creates, spec §8.2), are done with. Released, they would be claimed again at once. A create that was
+    // tried may have landed (ruling F4): skipped, its item would be orphaned and duplicated once sync is back. Under off
+    // it fails, for a person's `ghostpm sync` to look for once sync is on again; under linked-only pushCreate looks now.
     const policy = readSetting(db, workspace.id, SETTING_SYNC_POLICY);
-    if (policy === SYNC_POLICY_OFF || (policy === SYNC_POLICY_LINKED_ONLY && row.op === OP_CREATE)) {
+    const triedCreate = row.op === OP_CREATE && attemptOf(row).nonce !== undefined;
+    if (policy === SYNC_POLICY_OFF && triedCreate) {
+        held(failRow(db, row.id, deps.holder, TRIED_BEFORE_OFF));
+        summary.failed++;
+        return;
+    }
+    if (policy === SYNC_POLICY_OFF || (policy === SYNC_POLICY_LINKED_ONLY && row.op === OP_CREATE && !triedCreate)) {
         completeSkipped(db, deps, row);
         summary.skipped++;
         return;
@@ -354,6 +378,8 @@ async function pushRow(db: Ledger, deps: PushDeps, row: OutboxRow, summary: Push
  */
 export async function pushDue(db: Ledger, deps: PushDeps, summary: PushSummary = emptyPushSummary()): Promise<PushSummary> {
     const handled = new Set<number>();
+    // Ruling F3: what an earlier run of this holder left claimed (its bookkeeping write failed) is pushed again.
+    releaseOwnClaims(db, deps.holder);
     while (acquireLease(db, deps.holder, deps.now())) {
         const row = claimNext(db, deps.holder, deps.now());
         if (row === undefined) break;

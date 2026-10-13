@@ -55,7 +55,7 @@ const ATTEMPT_NONCE_PATH = '$.nonce';
  * for a done or dropped task).
  */
 export type ProjectionTrigger = 'change' | 'comment' | 'evidence' | 'publish';
-export type ProjectionResult = 'no_vendor' | 'broken_link' | 'not_allowed' | 'create_queued' | 'sync_queued' | 'nothing';
+export type ProjectionResult = 'no_vendor' | 'broken_link' | 'not_allowed' | 'create_failed' | 'create_queued' | 'sync_queued' | 'nothing';
 
 type Reach = 'linked' | 'broken' | 'create_pending' | 'create_in_flight' | 'create_failed' | 'unlinked';
 
@@ -133,9 +133,9 @@ export function projectTask(db: Ledger, task: TaskRow, trigger: ProjectionTrigge
     if (!isSyncable(db, task)) return 'no_vendor';
     const reach = reachOf(db, task.id);
     if (reach === 'broken') return 'broken_link';
-    if (reach === 'create_failed') return 'nothing';
     const policy = policyOf(db, task);
     if (policy === SYNC_POLICY_OFF) return 'not_allowed';
+    if (reach === 'create_failed') return 'create_failed';
     if (reach === 'unlinked') {
         if (!mayCreate(policy, trigger, task)) return 'not_allowed';
         insertRow(db, task.id, OP_CREATE, null, at);
@@ -161,13 +161,29 @@ export function enqueueComment(db: Ledger, task: TaskRow, text: string, at: stri
     return true;
 }
 
+/** A desired state for `taskId` that has not gone out, nor will: something else now says what its item shows. */
+function dropUnsentSyncState(db: Ledger, taskId: number): void {
+    db.prepare('DELETE FROM outbox WHERE task_id = ? AND op = ? AND status IN (?, ?)')
+        .run(taskId, OP_SYNC_STATE, STATUS_PENDING, STATUS_FAILED);
+}
+
 /** Spec §8.7: the merged-away item closes as a duplicate, which replaces its own pending state. */
 export function enqueueCloseDuplicate(db: Ledger, from: TaskRow, ofRemoteId: string, at: string): void {
     if (!isSyncable(db, from) || policyOf(db, from) === SYNC_POLICY_OFF || reachOf(db, from.id) !== 'linked') return;
-    db.prepare('DELETE FROM outbox WHERE task_id = ? AND op = ? AND status IN (?, ?)')
-        .run(from.id, OP_SYNC_STATE, STATUS_PENDING, STATUS_FAILED);
+    dropUnsentSyncState(db, from.id);
     const payload: CloseDuplicatePayload = { of: ofRemoteId };
     insertRow(db, from.id, OP_CLOSE_DUPLICATE, payload, at);
+}
+
+/**
+ * Ruling F1: a merge moved `fromId`'s vendor item to `into`, which had none. That item now shows `into`: its
+ * desired state replaces the one `fromId` still had queued, and the comments not posted yet go there as `into`'s.
+ * Call inside write().
+ */
+export function handOverVendorItem(db: Ledger, fromId: number, into: TaskRow, at: string): void {
+    dropUnsentSyncState(db, fromId);
+    db.prepare('UPDATE outbox SET task_id = ? WHERE task_id = ? AND op = ? AND status <> ?').run(into.id, fromId, OP_COMMENT, STATUS_DONE);
+    projectTask(db, into, 'change', at);
 }
 
 /** Human wins (spec §8.6): the vendor's own edit already says everything this row would. */

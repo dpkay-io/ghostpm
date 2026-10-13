@@ -21,6 +21,7 @@ import {
 import { runLegacyImport } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
 import { INTENTS, NO_VENDOR, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
+import { SYNC_LOG_FILE } from "./hook/log";
 import { outboxHealth } from "./sync/outbox";
 import { defaultSyncDeps, startSyncRunner } from "./sync/runner";
 import { syncIsOff } from "./sync/schedule";
@@ -45,6 +46,7 @@ const PUBLISH_NOTES: Record<ProjectionResult, string> = {
     no_vendor: 'not published: this workspace has no GitHub or Azure DevOps remote',
     broken_link: 'not published: its vendor item was deleted or moved',
     not_allowed: 'not published: sync_policy is off or does not allow it (ghostpm config set sync_policy), or the task is closed',
+    create_failed: `not published: its create failed (see ${SYNC_LOG_FILE} in the ghostpm home); \`ghostpm sync\` retries it`,
     create_queued: 'queued to publish',
     sync_queued: 'queued to sync',
     nothing: 'already on its way to the vendor',
@@ -423,10 +425,12 @@ export class PmServer {
                 if (!task) return text(`Task ${task_id} not found.`);
                 try {
                     // A tool call carries the user's instruction, so it counts as a human change (spec §8.6).
-                    const updated = updateTask(this.db, task.id, { phase, title, comment }, {
-                        source: this.source(), sessionId: this.sessionId, human: true,
-                    });
+                    const ctx = { source: this.source(), sessionId: this.sessionId, human: true };
+                    // Ruling F13: the publish goes after the phase and title (a task closed here is not published) and
+                    // before the comment, which is queued only for a task on its way to the vendor.
+                    updateTask(this.db, task.id, { phase, title }, ctx);
                     const published = publish ? PUBLISH_NOTES[publishTask(this.db, task.id)] : '';
+                    const updated = updateTask(this.db, task.id, { comment }, ctx);
                     const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '', published]
                         .filter(part => part.length > 0)
                         .join(', ');

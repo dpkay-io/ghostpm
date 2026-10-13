@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { tempLedger, TempLedger, eventKinds } from './helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { createTask, updateTask, insertVendorLink, getVendorLink, ChangeContext } from '../../src/ledger/tasks';
@@ -54,6 +56,21 @@ describe('mergeTask', () => {
 
         expect(getVendorLink(ledger.db, kept.id)?.remote_id).toBe('50');
         expect(getVendorLink(ledger.db, duplicate.id)?.remote_id).toBe('51');
+    });
+
+    it('keeps the vendor link of a task merged into one of another workspace, where its remote id means nothing', () => {
+        const otherFolder = path.join(ledger.dir, 'other-repo');
+        fs.mkdirSync(otherFolder);
+        const elsewhere = createTask(ledger.db, {
+            title: 'Kept elsewhere', phase: 'planned', workspaceId: ensureWorkspace(ledger.db, otherFolder).id, origin: 'local', source: SOURCE,
+        });
+        const duplicate = task('Dup');
+        insertVendorLink(ledger.db, { taskId: duplicate.id, vendor: 'github', remoteId: '51' });
+
+        merge(`T${duplicate.id}`, `T${elsewhere.id}`);
+
+        expect(getVendorLink(ledger.db, duplicate.id)?.remote_id).toBe('51');
+        expect(getVendorLink(ledger.db, elsewhere.id)).toBeUndefined();
     });
 
     it('rejects merging a task into itself and unknown references', () => {

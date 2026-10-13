@@ -7,7 +7,7 @@ import { readSetting, SETTING_PLAN_GLOBS } from './settings';
 import { getWorkspace } from './workspaces';
 import { matchesAnyGlob } from './glob';
 import { CLOSED_PHASES, INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
-import { enqueueCloseDuplicate, projectTask } from './projection';
+import { enqueueCloseDuplicate, handOverVendorItem, projectTask } from './projection';
 
 /** Forward order for automatic phase moves; done and dropped are terminal. */
 const PHASE_RANK: Record<Phase, number> = { brainstorming: 0, planned: 1, in_progress: 2, in_review: 3, done: 4, dropped: 4 };
@@ -117,9 +117,12 @@ export function mergeTask(db: Ledger, input: MergeInput): MergeResult {
         const ctx: ChangeContext = { source: input.source, sessionId: input.sessionId, human: true };
 
         db.prepare('UPDATE events SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
+        // Spec §8.7: a bare remote id means nothing in another repo, so the link moves within one workspace only.
         // OR IGNORE: a link that collides with one the kept task already has stays behind,
         // and that remote item is closed as a duplicate below.
-        db.prepare('UPDATE OR IGNORE vendor_links SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
+        const sameWorkspace = from.workspace_id === into.workspace_id;
+        const linkMoved = sameWorkspace
+            && db.prepare('UPDATE OR IGNORE vendor_links SET task_id = ? WHERE task_id = ?').run(into.id, from.id).changes > 0;
         db.prepare('UPDATE sessions SET task_id = ? WHERE task_id = ?').run(into.id, from.id);
 
         if (from.phase !== MERGED_PHASE) applyPhaseChange(db, from, MERGED_PHASE, ctx, at);
@@ -128,13 +131,13 @@ export function mergeTask(db: Ledger, input: MergeInput): MergeResult {
         bumpRevision(db, from.id, at);
         bumpRevision(db, into.id, at);
 
-        // Spec §8.7. Same workspace only: a bare remote id means nothing in another repo.
+        // Spec §8.7, within one workspace as above.
         const fromLink = getVendorLink(db, from.id);
         const intoLink = getVendorLink(db, into.id);
-        if (fromLink !== undefined && intoLink !== undefined && fromLink.vendor === intoLink.vendor
-            && from.workspace_id === into.workspace_id) {
+        if (fromLink !== undefined && intoLink !== undefined && fromLink.vendor === intoLink.vendor && sameWorkspace) {
             enqueueCloseDuplicate(db, getTask(db, from.id)!, intoLink.remote_id, at);
         }
+        if (linkMoved) handOverVendorItem(db, from.id, getTask(db, into.id)!, at);
 
         return { from: getTask(db, from.id)!, into: getTask(db, into.id)! };
     });
