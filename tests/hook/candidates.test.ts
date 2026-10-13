@@ -125,6 +125,22 @@ describe('candidate ranking', () => {
 
         expect(rank().length).toBe(CANDIDATE_LIMIT);
     });
+
+    it('leaves out pulled team items nobody here has worked on', () => {
+        setWorkspaceSetting(ledger.db, workspaceId, SETTING_CURRENT_USER, CURRENT_USER);
+        const vendorTask = (title: string, assignee: string): TaskRow =>
+            createTask(ledger.db, { title, phase: 'planned', workspaceId, origin: 'vendor', source: 'vendor', assignee });
+        const teamItem = vendorTask('Team item', 'someone-else');
+        const pickedUp = vendorTask('Picked up here', 'someone-else');
+        recordEvent(ledger.db, { taskId: pickedUp.id, kind: 'progress', source: 'test', sessionId: 'an-earlier-session' });
+        const mine = vendorTask('Mine', CURRENT_USER);
+
+        const ids = rank().map(t => t.id);
+
+        expect(ids).not.toContain(teamItem.id);
+        expect(ids).toContain(pickedUp.id);
+        expect(ids).toContain(mine.id);
+    });
 });
 
 describe('renderCandidatePrompt', () => {

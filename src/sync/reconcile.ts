@@ -18,7 +18,11 @@ function isStale(db: Ledger, link: VendorLinkRow, updatedAt: string): boolean {
 
 /** What the vendor holds becomes the comparison point for the next pull (spec §8.6). Monotonic in remote_updated_at. */
 function writeBaseline(db: Ledger, link: VendorLinkRow, item: RemoteItem, title: string, lastPushedRev: number | null, endIntent: boolean): void {
-    if (isStale(db, link, item.updatedAt)) return;
+    if (isStale(db, link, item.updatedAt)) {
+        // A newer baseline is stored already (a pull read past this answer); the push it ends still leaves no intent behind.
+        if (endIntent) clearIntent(db, link.task_id);
+        return;
+    }
     db.prepare(`
         UPDATE vendor_links
         SET remote_title = ?, remote_state = ?, labels = ?, remote_updated_at = ?, remote_url = COALESCE(?, remote_url),
@@ -46,7 +50,11 @@ const matchesIntent = (adapter: VendorAdapter, link: VendorLinkRow, item: Remote
  * Returns whether a human edit was applied. Plain statements: call inside write().
  */
 export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRow, link: VendorLinkRow, item: RemoteItem): boolean {
-    if (!isNewer(item, link)) return false;
+    if (!isNewer(item, link)) {
+        // Unchanged, but there: a link marked broken works again (a newer item's baseline clears it too).
+        if (link.broken_at !== null) db.prepare(`UPDATE vendor_links SET broken_at = NULL WHERE ${LINK_KEY}`).run(link.task_id, link.vendor);
+        return false;
+    }
     const ours = matchesIntent(adapter, link, item);
     let edited = false;
     if (!ours) {

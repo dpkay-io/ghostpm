@@ -40,13 +40,19 @@ function fromThisSession(db: Ledger, query: CandidateQuery): TaskRow[] {
         .all(query.sessionId, query.workspaceId, ...closedPhases) as TaskRow[];
 }
 
+/**
+ * Recent work in the workspace. Items pulled from the vendor count only when they are the
+ * user's, or someone here already worked on them (spec §8.5: hidden from "my work").
+ */
 function recentlyTouched(db: Ledger, query: CandidateQuery): TaskRow[] {
     const cutoff = new Date((query.now ?? Date.now()) - RECENT_DAYS * MS_PER_DAY).toISOString();
+    const user = resolveSetting<string>(db, query.workspaceId, SETTING_CURRENT_USER, '');
     return db.prepare(`
         SELECT * FROM tasks
         WHERE workspace_id = ? AND updated_at >= ? AND ${NOT_CLOSED}
+          AND (origin <> ? OR assignee = ? OR EXISTS (SELECT 1 FROM events e WHERE e.task_id = tasks.id AND e.session_id IS NOT NULL))
         ORDER BY updated_at DESC`)
-        .all(query.workspaceId, cutoff, ...closedPhases) as TaskRow[];
+        .all(query.workspaceId, cutoff, ...closedPhases, VENDOR_ORIGIN, user) as TaskRow[];
 }
 
 /** Vendor items assigned to the current user stay eligible however old they are. */

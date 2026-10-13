@@ -14,7 +14,7 @@ import { CLOSED_PHASES, NO_VENDOR, SYNC_SOURCE, TaskRow, VendorLinkRow, Workspac
 import { MERGED_PHASE } from '../ledger/work';
 import { getWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
-import { acquireLease } from './lease';
+import { acquireLease, holdLease, LeaseLostError } from './lease';
 import { DEFER_MS, claimNext, completeRow, deferRow, failRow, holdsClaim, releaseRow, retryRow, setRowPayload } from './outbox';
 import { applyRemoteItem, clearIntent, markLinkBroken, recordIntent, recordOwnPush } from './reconcile';
 import { redactSecrets } from './redact';
@@ -53,8 +53,6 @@ const MARKER_SEPARATOR = '\n\n';
 /** The ops that write a push intent before their vendor call. */
 const RECORDS_INTENT: ReadonlySet<OutboxOp> = new Set<OutboxOp>([OP_SYNC_STATE, OP_CLOSE_DUPLICATE]);
 
-/** The lease ran out or another runner took it: stop at once, writing nothing (§8.1: one sync runner). */
-class LeaseLostError extends Error {}
 /** Another runner owns the row now: this runner records nothing for it and never retries it. */
 class ClaimLostError extends Error {}
 
@@ -85,14 +83,17 @@ function held(landed: boolean): void {
 
 /** Before every vendor call: renew the lease (each call then starts with a full TTL, longer than its timeout) and make sure the row is still ours. */
 function guard(claim: Claim): void {
-    if (!acquireLease(claim.db, claim.deps.holder, claim.deps.now())) throw new LeaseLostError();
+    holdLease(claim.db, claim.deps.holder, claim.deps.now());
     held(holdsClaim(claim.db, claim.row.id, claim.deps.holder));
 }
 
-const guarded = (claim: Claim): RunGuard => run => async (command, args, options) => {
-    guard(claim);
+/** Runs `check` before each CLI call the adapter makes through the wrapped runner. */
+export const guardWith = (check: () => void): RunGuard => run => async (command, args, options) => {
+    check();
     return run(command, args, options);
 };
+
+const guarded = (claim: Claim): RunGuard => guardWith(() => guard(claim));
 
 /** The adapter, once guarded: covers adapters with no CLI runner of their own. */
 function leased(ctx: PushContext): VendorAdapter {

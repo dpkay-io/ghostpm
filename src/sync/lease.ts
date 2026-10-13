@@ -22,6 +22,19 @@ export function acquireLease(db: Ledger, holder: string, now: number = Date.now(
         .run(SYNC_LEASE, holder, iso(now + ttlMs), iso(now)).changes === 1;
 }
 
+/** The lease ran out or another runner took it: stop at once, writing nothing (§8.1: one sync runner). */
+export class LeaseLostError extends Error {
+    constructor() {
+        super('the sync lease is gone');
+        this.name = 'LeaseLostError';
+    }
+}
+
+/** Before every vendor call: renew the lease, so each call starts with a full TTL, longer than its timeout. */
+export function holdLease(db: Ledger, holder: string, now: number): void {
+    if (!acquireLease(db, holder, now)) throw new LeaseLostError();
+}
+
 export function releaseLease(db: Ledger, holder: string): void {
     db.prepare('DELETE FROM leases WHERE name = ? AND holder = ?').run(SYNC_LEASE, holder);
 }
