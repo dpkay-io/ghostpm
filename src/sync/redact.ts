@@ -35,30 +35,27 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
 const KEY_BLOCK_BEGIN = /-----BEGIN [A-Z ]{0,64}PRIVATE KEY(?: BLOCK)?-----/g;
 const KEY_BLOCK_END = /-----END [A-Z ]{0,64}PRIVATE KEY(?: BLOCK)?-----/g;
 
-/** Case-insensitive without the `i` flag, which would also blur the lower-to-Upper boundary of a camelCase key. */
-const anyCase = (word: string): string => word.replace(/[a-z]/g, letter => `[${letter}${letter.toUpperCase()}]`);
-const SECRET_KEYWORD = `(?:${['password', 'passwd', 'secret', 'token'].map(anyCase).join('|')}|${anyCase('api')}[_-]?${anyCase('key')})`;
-/** Longest word of a key: the camelCase words before a keyword share one, ending in the lower-case letter before it. */
+/** Longest word of a key, and longest part of one before its keyword. */
 const MAX_KEY_WORD = 64;
 
 /**
  * A key naming a secret, its quotes, and its separator. Groups: 1 the edge before it, 2 its opening quote, 3 the key
- * (words joined by `_`/`-`, or camelCase, one of them a secret keyword: `client_secret`, `clientSecret`), 4 its
- * closing quote, 5 the separator, 6 space after it. Every quantifier is bounded, and a key can only start where an
- * identifier starts; inside it, a keyword starts a word or follows a lower-case letter with its first letter upper-case.
+ * (words joined by `_`/`-`, one of them holding a secret keyword anywhere, in any case: `client_secret`,
+ * `clientSecret`, `mytoken`, `AWSSecret`), 4 its closing quote, 5 the separator, 6 space after it. Every quantifier
+ * is bounded, and a key can only start where an identifier starts.
  */
 const KEY = new RegExp(
-    `(^|[^A-Za-z0-9_-])(["']?)((?:[A-Za-z0-9]{0,${MAX_KEY_WORD}}[_-]){0,16}(?:[A-Za-z0-9]{0,${MAX_KEY_WORD - 1}}[a-z](?=[A-Z]))?`
-    + `${SECRET_KEYWORD}[A-Za-z0-9_-]{0,${MAX_KEY_WORD}})`
-    + '(["\']?)\\s{0,64}([=:])(\\s{0,64})', 'g');
+    `(^|[^A-Za-z0-9_-])(["']?)((?:[A-Za-z0-9]{0,${MAX_KEY_WORD}}[_-]){0,16}[A-Za-z0-9]{0,${MAX_KEY_WORD}}`
+    + `(?:password|passwd|secret|token|api[_-]?key)[A-Za-z0-9_-]{0,${MAX_KEY_WORD}})`
+    + '(["\']?)\\s{0,64}([=:])(\\s{0,64})', 'gi');
 const ASSIGNMENT = '=';
 const QUOTES = '"\'';
 const isQuote = (char: string | undefined): boolean => char !== undefined && char.length === 1 && QUOTES.indexOf(char) >= 0;
-/** Longest value read after a key. */
+/** Furthest a closing quote is looked for after a value's opening quote. */
 const MAX_VALUE = 4096;
 const WHITESPACE = /\s/;
 const HAS_DIGIT = /\d/;
-/** An assignment (`key=value`, `key="value"`, or a quoted key and a colon, as in pasted config): any value this long is a secret. */
+/** An assignment (`key=value`, `key="value"`, or a colon after a quoted key or before a quoted value, as in pasted config): any value this long is a secret. */
 const ASSIGNED_SECRET_MIN_LENGTH = 8;
 /** Prose (`token: expiration bug`, `key = value`): a secret only when this long with a digit in it. */
 const SECRET_VALUE_MIN_LENGTH = 12;
@@ -74,8 +71,9 @@ interface Span {
 }
 
 /**
- * The value after a key. A quoted one runs to its closing quote (spaces included); an unquoted one to whitespace or a
- * quote, and never into the next key (`abc&password: …` is two pairs, `abc&def;ghi` one value). Both are bounded.
+ * The value after a key. A quoted one runs to its closing quote (spaces included), looked for within MAX_VALUE; an
+ * unquoted one, however long, to whitespace, a quote or the next key (`abc&password: …` is two pairs, `abc&def;ghi`
+ * one value). An unquoted read never overlaps a later key's, so the scan stays linear.
  */
 function readValue(text: string, at: number, nextKeyAt: number): Span {
     const quote = text[at];
@@ -84,11 +82,10 @@ function readValue(text: string, at: number, nextKeyAt: number): Span {
         for (let end = at + 1; end < limit; end++) {
             if (text[end] === quote) return { start: at + 1, end };
         }
-        at++;   // never closed: read what follows the quote as unquoted
+        at++;   // never closed nearby: read what follows the quote as unquoted
     }
-    const limit = Math.min(nextKeyAt, text.length, at + MAX_VALUE);
     let end = at;
-    while (end < limit && !WHITESPACE.test(text[end]) && !isQuote(text[end])) end++;
+    while (end < nextKeyAt && !WHITESPACE.test(text[end]) && !isQuote(text[end])) end++;
     return { start: at, end };
 }
 
@@ -137,7 +134,9 @@ export function redactSecrets(text: string): Redaction {
         const next = KEY.exec(result);
         const value = readValue(result, valueAt, next === null ? result.length : next.index);
         const quotedKey = close.length > 0 && (open.length > 0 || isQuote(edge));
-        const assigned = separator === ASSIGNMENT ? after.length === 0 : quotedKey;
+        const quotedValue = value.start > valueAt;
+        // A colon is pasted config (JSON, YAML) when the key or the value is quoted; `key: value` alone is prose.
+        const assigned = separator === ASSIGNMENT ? after.length === 0 : quotedKey || quotedValue;
         if (isSecret(result.slice(value.start, value.end), assigned)) {
             out.push(result.slice(copied, value.start), REDACTED);
             copied = value.end;

@@ -21,6 +21,9 @@ const LARGE_JWT = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ${'a1'.repeat(LARGE_J
 const JWT_RUN_BYTES = 4 * HOSTILE_BYTES;
 /** Random-looking, with digits: a secret under either the assignment or the prose rule. */
 const CAMEL_SECRET = 'Zx8Qv3LmNp7Rt2WyAb4Cd6Ef';
+/** Longer than the 4,096 characters a value used to be cut off at. */
+const LONG_VALUE = 5000;
+const LONG_SECRET = CAMEL_SECRET.repeat(Math.ceil(LONG_VALUE / CAMEL_SECRET.length)).slice(0, LONG_VALUE);
 
 describe('redactSecrets (spec §8.9)', () => {
     // [kind, text, the secret that must be gone]
@@ -103,12 +106,29 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
     });
 
+    it.each(['mytoken', 'authtoken', 'oauth2Token', 'AWSSecret', 'GCPToken', 'dbpassword'].flatMap(key => [
+        [`env ${key}`, `${key}=abcdefghij`, `${key}=${REDACTED}`],
+        [`JSON ${key}`, `{"${key}": "abcdefghij"}`, `{"${key}": "${REDACTED}"}`],
+        [`YAML-quoted ${key}`, `${key}: "abcdefghij"`, `${key}: "${REDACTED}"`],
+    ]))('reads a key holding a secret keyword anywhere, in any case, as a key: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
+    it.each([
+        ['unquoted', `DB_PASSWORD=${LONG_SECRET}`, `DB_PASSWORD=${REDACTED}`],
+        ['quoted, with no spaces', `password="${LONG_SECRET}"`, `password="${REDACTED}"`],
+    ])('redacts a secret value longer than 4,096 characters whole: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
     it.each([
         'tokenizer: splits words',
         'passwordless login is next',
         'newTokenizer: handles text',
         'resetPassword: flow broken',
         'the clientSecret rotates weekly',
+        'mytoken: abcdefghij',
+        'AWSSecret: rotate weekly',
     ])('keeps prose around camelCase keys and keywords inside words: %s', text => {
         expect(redactSecrets(text)).toEqual({ text, count: 0 });
     });
@@ -244,6 +264,13 @@ describe('redactSecrets (spec §8.9)', () => {
             ` eyJ${'a'.repeat(JWT_RUN_BYTES)}`, ` eyJaaaaa.eyJ${'a'.repeat(JWT_RUN_BYTES)}`, fill('.eyJaaaaa'),
             // camelCase keys: chains of them, with and without separators, and boundaries with no keyword.
             fill('aToken'), fill('aToken:'), fill('"aBcToken": "'), fill(` ${'aB'.repeat(40)}`), fill(` ${`${'aToken'.repeat(10)}_`.repeat(17)}`),
+            // Keywords anywhere in a word: keyword-dense words, and long words a keyword never ends.
+            fill('xtoken'), fill('xtokenx='), fill(`!${'a'.repeat(64)}token`), fill(`!${`${'a'.repeat(64)}_`.repeat(16)}${'a'.repeat(64)}tokex `),
+            fill(`!${`${'token'.repeat(12)}_`.repeat(16)}${'token'.repeat(12)} `),
+            // Values have no length cap but whitespace, a quote or the next key: one long value, quotes never
+            // closed, and prose keys with long digitless quoted values back to back.
+            `password=${'x'.repeat(HOSTILE_BYTES)}`, `password="${'x'.repeat(HOSTILE_BYTES)}`, fill('password="'),
+            fill(`token = "${'a'.repeat(4000)}"`), fill(`token = "${'a b'.repeat(1500)}"`),
         ];
         for (const text of hostile) {
             const started = Date.now();
