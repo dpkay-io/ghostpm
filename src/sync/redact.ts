@@ -55,9 +55,9 @@ const isQuote = (char: string | undefined): boolean => char !== undefined && cha
 const MAX_VALUE = 4096;
 const WHITESPACE = /\s/;
 const HAS_DIGIT = /\d/;
-/** An assignment (`key=value`, `key="value"`, or a colon after a quoted key or before a quoted value, as in pasted config): any value this long is a secret. */
+/** An assignment (`key=value`, a quoted value after any separator, or a quoted key and a colon, as in pasted config): any value this long is a secret. */
 const ASSIGNED_SECRET_MIN_LENGTH = 8;
-/** Prose (`token: expiration bug`, `key = value`): a secret only when this long with a digit in it. */
+/** Prose (`token: expiration bug`, `key = value`, the value unquoted): a secret only when this long with a digit in it. */
 const SECRET_VALUE_MIN_LENGTH = 12;
 
 export interface Redaction {
@@ -135,8 +135,9 @@ export function redactSecrets(text: string): Redaction {
         const value = readValue(result, valueAt, next === null ? result.length : next.index);
         const quotedKey = close.length > 0 && (open.length > 0 || isQuote(edge));
         const quotedValue = value.start > valueAt;
-        // A colon is pasted config (JSON, YAML) when the key or the value is quoted; `key: value` alone is prose.
-        const assigned = separator === ASSIGNMENT ? after.length === 0 : quotedKey || quotedValue;
+        // A quoted value is config after any separator (JSON, YAML, TOML, INI, Python), and so is a quoted key before a
+        // colon; only an unquoted value after `key: ` or `key = ` is read as prose.
+        const assigned = quotedValue || (separator === ASSIGNMENT ? after.length === 0 : quotedKey);
         if (isSecret(result.slice(value.start, value.end), assigned)) {
             out.push(result.slice(copied, value.start), REDACTED);
             copied = value.end;

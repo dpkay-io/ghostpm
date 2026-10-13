@@ -17,8 +17,6 @@ const GITHUB_APP_TOKEN = `ghs_1234567_${JWT}`;
 const LARGE_JWT_PAYLOAD = 10000;
 const RS256_SIGNATURE_LENGTH = 342;
 const LARGE_JWT = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJ${'a1'.repeat(LARGE_JWT_PAYLOAD / 2)}.${'s'.repeat(RS256_SIGNATURE_LENGTH)}`;
-/** A JWT segment is unbounded, so its hostile run is measured at four times the size. */
-const JWT_RUN_BYTES = 4 * HOSTILE_BYTES;
 /** Random-looking, with digits: a secret under either the assignment or the prose rule. */
 const CAMEL_SECRET = 'Zx8Qv3LmNp7Rt2WyAb4Cd6Ef';
 /** Longer than the 4,096 characters a value used to be cut off at. */
@@ -210,8 +208,22 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(result.text).not.toContain(GITHUB_TOKEN);
     });
 
+    it.each([
+        ['TOML', 'password = "staplehorse"', `password = "${REDACTED}"`],
+        ['a TOML literal string under a table', "[database]\npassword = 'abcdefgh'", `[database]\npassword = '${REDACTED}'`],
+        ['INI', '[auth]\nclient_secret = "letmeinnow"', `[auth]\nclient_secret = "${REDACTED}"`],
+        ['INI with a colon', 'api_key : "abcdefghi"', `api_key : "${REDACTED}"`],
+        ['Python', 'PASSWORD = "hunterpass"', `PASSWORD = "${REDACTED}"`],
+        ['a Python attribute', "self.api_token = 'opensesame'", `self.api_token = '${REDACTED}'`],
+        ['a Python keyword argument', 'connect(password = "swordfish")', `connect(password = "${REDACTED}")`],
+        ['prose-spaced, holding a key', 'password = "see token=abcdefghij here"', `password = "${REDACTED}"`],
+    ])('reads a quoted value after any separator as assigned: %s', (_kind, text, redacted) => {
+        expect(redactSecrets(text)).toEqual({ text: redacted, count: 1 });
+    });
+
     it('still examines a key inside a quoted value it keeps', () => {
-        expect(redactSecrets('password = "see token=abcdefghij here"')).toEqual({ text: 'password = "see token=[redacted] here"', count: 1 });
+        // Quoted but under 8 characters, so kept; its opening quote is the edge of a key whose value is a secret.
+        expect(redactSecrets('password = "token="abcdefghij"')).toEqual({ text: 'password = "token="[redacted]"', count: 1 });
     });
 
     it('redacts the secret after a short value, not the short value and the key', () => {
@@ -251,7 +263,7 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(`token=${GITHUB_TOKEN}&`.repeat(times)).count).toBe(times);
     });
 
-    it('scans hostile inputs in linear time: 1 MB each, 4 MB for a JWT run (each well under a second; the old regexes took seconds or threw)', () => {
+    it('scans 1 MB hostile inputs in linear time (each well under a second; the old regexes took seconds or threw)', () => {
         const fill = (unit: string): string => unit.repeat(Math.ceil(HOSTILE_BYTES / unit.length));
         const hostile = [
             fill('_token'), fill('token:'), fill('token='), fill(`"'`), fill('=:'), fill('""""""token"""""":x '), fill('token '),
@@ -261,7 +273,7 @@ describe('redactSecrets (spec §8.9)', () => {
             // GitHub tokens are unbounded: one long run, repeated short runs, runs one short of a token.
             ` ghs_${'a'.repeat(HOSTILE_BYTES)}`, fill('ghs_'), fill(' ghs_1_'), fill(` ghs_${'a'.repeat(35)}`),
             // JWT segments are unbounded: a run with no dot, and one whose last dot never comes.
-            ` eyJ${'a'.repeat(JWT_RUN_BYTES)}`, ` eyJaaaaa.eyJ${'a'.repeat(JWT_RUN_BYTES)}`, fill('.eyJaaaaa'),
+            ` eyJ${'a'.repeat(HOSTILE_BYTES)}`, ` eyJaaaaa.eyJ${'a'.repeat(HOSTILE_BYTES)}`, fill('.eyJaaaaa'),
             // camelCase keys: chains of them, with and without separators, and boundaries with no keyword.
             fill('aToken'), fill('aToken:'), fill('"aBcToken": "'), fill(` ${'aB'.repeat(40)}`), fill(` ${`${'aToken'.repeat(10)}_`.repeat(17)}`),
             // Keywords anywhere in a word: keyword-dense words, and long words a keyword never ends.
