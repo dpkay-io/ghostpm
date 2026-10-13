@@ -9,7 +9,7 @@ const MS_PER_UNIT: { [unit: string]: number } = {
 };
 const DURATION = /^(\d+)\s*([mhdw])$/i;
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
-const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+const DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}/;
 const DAYS_BACK: { [keyword: string]: number } = { today: 0, yesterday: 1 };
 
 export const SINCE_HELP =
@@ -21,6 +21,12 @@ function localMidnight(now: Date, daysBack: number): Date {
 
 function isValid(date: Date): boolean {
     return !isNaN(date.getTime());
+}
+
+/** new Date(2026, 1, 30) quietly becomes 2 March; a date that does not round-trip was never a date. */
+function isCalendarDate(year: number, month: number, date: number): boolean {
+    const check = new Date(Date.UTC(year, month, date));
+    return check.getUTCFullYear() === year && check.getUTCMonth() === month && check.getUTCDate() === date;
 }
 
 /**
@@ -44,12 +50,11 @@ export function parseSince(input: string, now: Date = new Date()): Date {
         const year = Number(day[1]);
         const month = Number(day[2]) - 1;
         const date = Number(day[3]);
-        const start = new Date(year, month, date);
-        // new Date(2026, 1, 30) quietly becomes 2 March; a date that does not round-trip was never a date.
-        if (start.getFullYear() === year && start.getMonth() === month && start.getDate() === date) return start;
+        if (isCalendarDate(year, month, date)) return new Date(year, month, date);
     }
 
-    if (DATE_TIME.test(value)) {
+    const dateTime = value.match(DATE_TIME);
+    if (dateTime && isCalendarDate(Number(dateTime[1]), Number(dateTime[2]) - 1, Number(dateTime[3]))) {
         const start = new Date(value);
         if (isValid(start)) return start;
     }

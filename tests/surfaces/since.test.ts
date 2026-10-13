@@ -37,7 +37,7 @@ describe('parseSince (Review Focus 3)', () => {
         expect(parseSince('2026-09-28T09:00:00.000+05:30', NOW).getTime()).toBe(Date.UTC(2026, 8, 28, 3, 30, 0));
     });
 
-    it.each(['', 'Monday', '2 days', '-1d', '0h', '99999999999d', '2026-02-30', '2026-09-28Tsoon', 'soon', '__proto__'])(
+    it.each(['', 'Monday', '2 days', '-1d', '0h', '99999999999d', '2026-02-30', '2026-02-30T09:00', '2026-02-30T09:00:00Z', '2026-09-28Tsoon', 'soon', '__proto__'])(
         'refuses %p with the accepted forms instead of reporting nothing',
         input => {
             expect(() => parseSince(input, NOW)).toThrow(SINCE_HELP);
