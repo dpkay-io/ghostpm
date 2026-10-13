@@ -15,16 +15,16 @@ import {
     MCP_CLIENT, endSession, getSession, listLiveSessions, mcpSessionId, startSession, touchSession,
 } from "./ledger/sessions";
 import {
-    SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES, SETTING_SYNC_POLICY,
-    SYNC_POLICY_AUTO, SYNC_POLICY_OFF, getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
+    SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
+    getSyncPause, getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from "./ledger/settings";
 import { runLegacyImport } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
 import { INTENTS, NO_VENDOR, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 import { SYNC_LOG_FILE } from "./hook/log";
 import { outboxHealth } from "./sync/outbox";
-import { defaultSyncDeps, startSyncRunner } from "./sync/runner";
-import { syncIsOff } from "./sync/schedule";
+import { defaultSyncDeps, startSyncRunner, sweepStaleArgDirs } from "./sync/runner";
+import { syncIsOff, syncOffHint } from "./sync/schedule";
 
 const execFileAsync = promisify(execFile);
 
@@ -187,9 +187,7 @@ export class PmServer {
     /** Spec §9.1: this workspace's pending and failed pushes, and why sync is paused if it is. */
     private syncLine(workspace: WorkspaceRow): string {
         if (workspace.vendor === NO_VENDOR) return 'off (no GitHub or Azure DevOps remote)';
-        if (syncIsOff(this.db, workspace)) {
-            return `off (${SETTING_SYNC_POLICY} ${SYNC_POLICY_OFF}; \`ghostpm config set ${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO} --workspace "${workspace.path}"\` turns it on)`;
-        }
+        if (syncIsOff(this.db, workspace)) return `off (${syncOffHint(workspace.path)})`;
         const health = outboxHealth(this.db, workspace.id);
         const paused = getSyncPause(this.db, workspace.id);
         return `${health.pending} pending, ${health.failed} failed${paused === undefined ? '' : ` — paused: ${paused}`}`;
@@ -495,7 +493,8 @@ export class PmServer {
         if (stdio) {
             process.once('exit', () => endSession(this.db, this.sessionId));
             // A real client: this process competes for the sync lease (spec §8.1). An injected
-            // transport (tests) never starts a background timer.
+            // transport (tests) never starts a background timer, nor sweeps the temporary folder.
+            void sweepStaleArgDirs();
             const runner = startSyncRunner(this.db, defaultSyncDeps(this.db));
             process.once('exit', () => runner.stop());
         }

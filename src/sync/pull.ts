@@ -31,6 +31,8 @@ export interface PullSummary {
     humanEdits: number;
     broken: number;
     merged: number;
+    /** The page came back full and moved the watermark: there is more to read now, not after sync_pull_minutes. */
+    more: boolean;
 }
 
 type UpsertOutcome = 'created' | 'edited' | 'refreshed';
@@ -125,7 +127,7 @@ export async function pullWorkspace(
     const since = getWorkspaceSetting<string>(db, workspace.id, SETTING_PULL_WATERMARK)
         ?? getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC)
         ?? new Date(startedAt - PULL_WINDOW_DAYS * MS_PER_DAY).toISOString();
-    const summary: PullSummary = { fetched: 0, created: 0, humanEdits: 0, broken: 0, merged: 0 };
+    const summary: PullSummary = { fetched: 0, created: 0, humanEdits: 0, broken: 0, merged: 0, more: false };
     const count = (outcome: UpsertOutcome): void => {
         if (outcome === 'created') summary.created++;
         else if (outcome === 'edited') summary.humanEdits++;
@@ -197,5 +199,7 @@ export async function pullWorkspace(
         setWorkspaceSetting(db, workspace.id, SETTING_PULL_WATERMARK, watermark);
         if (!full) setWorkspaceSetting(db, workspace.id, SETTING_LAST_SYNC, new Date(startedAt).toISOString());
     });
+    // A full page whose changes all share the time it read from cannot move on (a tie stall): it waits as any pull does.
+    summary.more = full && Date.parse(watermark) > Date.parse(since);
     return summary;
 }

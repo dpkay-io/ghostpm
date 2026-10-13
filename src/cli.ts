@@ -245,6 +245,32 @@ function toCliError(command: string, error: ExecFileException, stderr: string): 
     return new CliError(`${command} failed${exitCode === null ? '' : ` (exit ${exitCode})`}: ${detail}`, exitCode, stderr, notFound, false);
 }
 
+/**
+ * Ruling F11, best effort: argument folders a call could not remove (on the batch path a child that outlives az keeps
+ * the folder busy) still hold the text that was passed. Removes those last touched more than `olderThanMs` ago: a
+ * caller passes an age past any call's timeout, so no call is still reading one. Answers how many it removed.
+ */
+export async function sweepArgDirs(olderThanMs: number, now: number = Date.now()): Promise<number> {
+    const tmp = os.tmpdir();
+    let names: string[];
+    try {
+        names = await fs.promises.readdir(tmp);
+    } catch {
+        return 0;
+    }
+    let removed = 0;
+    for (const name of names.filter(entry => entry.startsWith(ARG_DIR_PREFIX))) {
+        const folder = path.join(tmp, name);
+        try {
+            const stat = await fs.promises.stat(folder);
+            if (!stat.isDirectory() || now - stat.mtimeMs < olderThanMs) continue;
+            await fs.promises.rm(folder, { recursive: true, force: true });
+            removed++;
+        } catch { /* busy or already gone: the next sweep tries again */ }
+    }
+    return removed;
+}
+
 /** Runs a vendor CLI with no shell in between, except the guarded batch-file path above. */
 export const runCli: Runner = (command, args, options = {}) => new Promise<string>((resolve, reject) => {
     let invocation: Invocation;

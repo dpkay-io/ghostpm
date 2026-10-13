@@ -366,19 +366,30 @@ describe('pulling a vendor workspace', () => {
         const now = Date.now();
         const sinceOf = (call: number): string => vendor.calls.filter(entry => entry.op === 'list')[call].text!;
 
-        await pull(now, 2);   // A, B
+        expect((await pull(now, 2)).more).toBe(true);   // A, B
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK)).toBe(second.updatedAt);
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBeUndefined();
         expect(pullIsDue(ledger.db, workspace, now)).toBe(true);
 
-        await pull(now, 2);   // B again, C: full once more
+        expect((await pull(now, 2)).more).toBe(true);   // B again, C: full once more
         expect(sinceOf(1)).toBe(second.updatedAt);
         expect(pullIsDue(ledger.db, workspace, now)).toBe(true);
 
-        await pull(now, 2);   // C alone: caught up
+        expect((await pull(now, 2)).more).toBe(false);   // C alone: caught up
         expect(sinceOf(2)).toBe(third.updatedAt);
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBe(new Date(now).toISOString());
         expect(pullIsDue(ledger.db, workspace, now)).toBe(false);
+    });
+
+    it('has nothing more to read at once after a full page whose changes all share the time it read from (tie stall, F10)', async () => {
+        const items = [vendor.seed({ title: 'A' }), vendor.seed({ title: 'B' })];
+        const tied = items[0].updatedAt;
+        items.forEach(item => { vendor.items.get(item.remoteId)!.updatedAt = tied; });
+        const now = Date.now();
+
+        expect((await pull(now, 2)).more).toBe(true);    // the watermark moves up to the tied time
+        expect((await pull(now, 2)).more).toBe(false);   // the same page again: it cannot move past it
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK)).toBe(tied);
     });
 
     describe('holding the sync lease (rulings D7, F2)', () => {

@@ -18,7 +18,8 @@ import { PushDeps, RunGuard } from '../../src/sync/push';
 import {
     adapterFor, defaultSyncDeps, pullWorkspaces, runSyncCommand, startSyncRunner, syncCommandMain, syncOnce, SyncReport, PUSH_POLL_MS,
 } from '../../src/sync/runner';
-import { BACKGROUND_FLAG, pullIsDue } from '../../src/sync/schedule';
+import { BACKGROUND_FLAG, pullIsDue, syncOffHint } from '../../src/sync/schedule';
+import { PULL_PAGE_LIMIT } from '../../src/sync/pull';
 import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
 import { AzureAdapter } from '../../src/sync/azure';
 import { PermanentError, SyncPausedError } from '../../src/sync/vendor';
@@ -278,6 +279,46 @@ describe('the sync runner', () => {
 
         expect(vendor.calls).toEqual([]);
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_LAST_SYNC)).toBeUndefined();
+    });
+
+    it('says how to turn sync on for the workspace it runs in when that one is off, and exits 0 (F2)', async () => {
+        setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
+        const { output, failed } = await runSyncCommand(ledger.db, [], deps, workspace.path);
+        expect(output).toContain(`Sync is off for ${workspace.path} (${syncOffHint(workspace.path)}).`);
+        expect(output).toContain(`\`ghostpm config set sync_policy auto --workspace "${workspace.path}"\``);
+        expect(failed).toBe(false);
+    });
+
+    it('says how to turn sync on when no workspace syncs, wherever it runs (F2)', async () => {
+        deleteSetting(ledger.db, SETTING_SYNC_POLICY);   // the shipped default: every workspace off
+        const outside = path.join(ledger.dir, 'not-a-repo');
+        fs.mkdirSync(outside);
+        const { output, failed } = await runSyncCommand(ledger.db, [], deps, outside);
+        expect(output).toContain('`ghostpm config set sync_policy auto --workspace "');
+        expect(failed).toBe(false);
+    });
+
+    it('says nothing about turning sync on where it is on (F2)', async () => {
+        const { output } = await runSyncCommand(ledger.db, [], deps, workspace.path);
+        expect(output).not.toContain('ghostpm config set sync_policy');
+    });
+
+    it('continues a full page on its next tick instead of after sync_pull_minutes (F10)', async () => {
+        for (let i = 0; i <= PULL_PAGE_LIMIT; i++) vendor.seed({ title: `Item ${i}` });   // one more than a page
+        let clock = Date.now();
+        const runner = startSyncRunner(ledger.db, { ...deps, now: () => clock }, IDLE_POLL_MS);
+        try {
+            await runner.tick();   // a full page: the watermark moves to its newest change
+            clock += PUSH_POLL_MS;
+            await runner.tick();   // the rest, at once
+            expect(listCalls()).toBe(2);
+            expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM vendor_links').get()).toEqual({ n: PULL_PAGE_LIMIT + 1 });
+            clock += PUSH_POLL_MS;
+            await runner.tick();   // caught up: the wait applies again
+            expect(listCalls()).toBe(2);
+        } finally {
+            runner.stop();
+        }
     });
 
     it('works only while it holds the lease, and gives it back when stopped', async () => {

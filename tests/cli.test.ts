@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import child_process = require('child_process');
 import osModule = require('os');
-import { runCli, freeText, CliError, COMMAND_OVERRIDE_ENV } from '../src/cli';
+import { runCli, freeText, sweepArgDirs, CliError, COMMAND_OVERRIDE_ENV } from '../src/cli';
 import { removeTempDir } from './temp-dir';
 
 const HOSTILE = 'a&b | "q" %PATH% ^ <x> (p)\nsecond line';
@@ -24,6 +24,7 @@ const TIMEOUT_SLACK_MS = 2000;
 /** Long enough for cmd.exe to start node, which records its pid before hanging. */
 const BATCH_TIMEOUT_MS = 3000;
 const POLL_MS = 50;
+const SWEEP_AGE_MS = 90 * 1000;
 const isAlive = (pid: number): boolean => {
     try {
         process.kill(pid, 0);
@@ -156,6 +157,28 @@ describe('runCli', () => {
             if (fs.existsSync(pidFile)) try { process.kill(Number(fs.readFileSync(pidFile, 'utf8'))); } catch { /* already gone */ }
         }
     }, LINGER_TEST_TIMEOUT_MS);
+
+    it('sweeps argument folders left behind, past the given age, and nothing else (F11)', async () => {
+        jest.spyOn(osModule, 'tmpdir').mockReturnValue(dir);
+        const now = Date.now();
+        const folder = (name: string, ageMs: number): string => {
+            const at = path.join(dir, name);
+            fs.mkdirSync(at);
+            fs.writeFileSync(path.join(at, 'arg0.txt'), 'redacted free text');
+            const when = new Date(now - ageMs);
+            fs.utimesSync(at, when, when);
+            return at;
+        };
+        const stale = folder('ghostpm-args-stale', SWEEP_AGE_MS * 2);
+        const fresh = folder('ghostpm-args-fresh', SWEEP_AGE_MS / 2);
+        const unrelated = folder('someone-else-stale', SWEEP_AGE_MS * 2);
+
+        expect(await sweepArgDirs(SWEEP_AGE_MS, now)).toBe(1);
+
+        expect(fs.existsSync(stale)).toBe(false);
+        expect(fs.existsSync(fresh)).toBe(true);
+        expect(fs.existsSync(unrelated)).toBe(true);
+    });
 
     it('reports a missing override as not found instead of falling back to PATH', async () => {
         override('gh', path.join(dir, 'missing', 'gh.exe'));

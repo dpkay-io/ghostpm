@@ -3,8 +3,9 @@ import {
     getSyncPause, readSetting, setSyncPause, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP,
 } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
+import { findWorkspace } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
-import { Runner, runCli } from '../cli';
+import { Runner, runCli, sweepArgDirs } from '../cli';
 import { AzureAdapter } from './azure';
 import { GitHubAdapter } from './github';
 import { identityOf } from './identity';
@@ -12,8 +13,8 @@ import { acquireLease, leaseHolder, leaseHolderId, releaseLease } from './lease'
 import { hasDueWork, outboxHealth, rearmFailed, releaseStaleClaims } from './outbox';
 import { PullSummary, pullWorkspace } from './pull';
 import { PushDeps, PushSummary, pushDue } from './push';
-import { BACKGROUND_FLAG, pullIsDue, SYNC_COMMAND, syncIsOff } from './schedule';
-import { SyncPausedError, VendorAdapter } from './vendor';
+import { BACKGROUND_FLAG, pullIsDue, SYNC_COMMAND, syncIsOff, syncOffHint } from './schedule';
+import { SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter } from './vendor';
 
 /** Spec §8.1: the lease holder polls the outbox every ~2 s. */
 export const PUSH_POLL_MS = 2 * 1000;
@@ -88,7 +89,10 @@ export async function pullWorkspaces(
         if (!acquireLease(db, deps.holder, deps.now())) break;
         attempts.set(workspace.id, deps.now());
         try {
-            reports.push({ workspace, summary: await pullWorkspace(db, workspace, deps) });
+            const summary = await pullWorkspace(db, workspace, deps);
+            // Ruling F10: the rest of a full page that moved the watermark is read on the next pass, not a schedule later.
+            if (summary.more) attempts.delete(workspace.id);
+            reports.push({ workspace, summary });
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             appendLog(SYNC_LOG_FILE, `pull ${workspace.path}: ${message}`);
@@ -169,6 +173,8 @@ export function startSyncRunner(db: Ledger, deps: PushDeps, pollMs: number = PUS
 const plural = (count: number, noun: string, suffix = 's'): string => `${count} ${noun}${count === 1 ? '' : suffix}`;
 const isBackground = (argv: readonly string[]): boolean => argv.indexOf(BACKGROUND_FLAG) >= 0;
 const LEASE_LOST_NOTE = 'Stopped part way: another sync runner took the lease and carries on from there.';
+/** Where no workspace of its own is known: the folder a person names. */
+const ANY_REPO = '<repo folder>';
 
 function clearPauses(db: Ledger, workspaces: readonly WorkspaceRow[]): number {
     let resumed = 0;
@@ -203,14 +209,32 @@ export interface SyncCommandResult {
 }
 
 /**
- * `ghostpm sync`. Run by a person it first resumes paused workspaces and re-arms failed pushes, of the workspaces
- * that sync only (spec §8.8, ruling I1); `--background` (SessionStart's spawn) does neither and pulls only what is due.
- * Another runner holding the lease is not a failure: it does the work.
+ * Ruling F2: when the workspace `ghostpm sync` runs in is off, or no workspace syncs at all, how to turn sync on
+ * (the wording get_project_state uses).
  */
-export async function runSyncCommand(db: Ledger, argv: string[], deps: PushDeps = defaultSyncDeps(db)): Promise<SyncCommandResult> {
+function syncOffLine(db: Ledger, cwd: string, syncing: readonly WorkspaceRow[]): string | undefined {
+    const here = findWorkspace(db, cwd);
+    if (here !== undefined && here.vendor !== NO_VENDOR && syncIsOff(db, here)) return `Sync is off for ${here.path} (${syncOffHint(here.path)}).`;
+    return syncing.length === 0 ? `No workspace syncs (${syncOffHint(ANY_REPO)}).` : undefined;
+}
+
+/**
+ * `ghostpm sync`, run in `cwd`. Run by a person it first resumes paused workspaces and re-arms failed pushes, of the
+ * workspaces that sync only (spec §8.8, ruling I1); `--background` (SessionStart's spawn) does neither and pulls only
+ * what is due. Another runner holding the lease is not a failure: it does the work.
+ */
+export async function runSyncCommand(
+    db: Ledger,
+    argv: string[],
+    deps: PushDeps = defaultSyncDeps(db),
+    cwd: string = process.cwd(),
+): Promise<SyncCommandResult> {
     const background = isBackground(argv);
     const syncing = vendorWorkspaces(db);
     const lines: string[] = [];
+    // Nobody reads a background run's output.
+    const offLine = background ? undefined : syncOffLine(db, cwd, syncing);
+    const answer = (failed: boolean): SyncCommandResult => ({ output: lines.concat(offLine ?? []).join('\n'), failed });
     if (!background) {
         const resumed = clearPauses(db, syncing);
         const rearmed = rearmFailed(db, deps.now(), syncing.map(workspace => workspace.id));
@@ -220,7 +244,7 @@ export async function runSyncCommand(db: Ledger, argv: string[], deps: PushDeps 
     const result = await syncOnce(db, deps, !background);
     if ('heldBy' in result) {
         lines.push(`Sync is already running in ${result.heldBy}; it pushes every ${PUSH_POLL_MS / MS_PER_SECOND} s and pulls on schedule.`);
-        return { output: lines.join('\n'), failed: false };
+        return answer(false);
     }
     lines.push(...describePush(result.push), ...result.pulls.map(describePull));
     // Ruling I2: name each workspace with pushes left failed, so a person knows where to look.
@@ -231,10 +255,15 @@ export async function runSyncCommand(db: Ledger, argv: string[], deps: PushDeps 
         lines.push(`${workspace.path}: ${plural(failed, 'push', 'es')} failed (see ${SYNC_LOG_FILE} in the ghostpm home).`);
     }
     if (result.leaseLost) lines.push(LEASE_LOST_NOTE);
-    const failed = leftFailed.length > 0 || result.leaseLost || result.push.paused.length > 0
-        || result.pulls.some(pull => pull.error !== undefined);
-    return { output: lines.join('\n'), failed };
+    return answer(leftFailed.length > 0 || result.leaseLost || result.push.paused.length > 0
+        || result.pulls.some(pull => pull.error !== undefined));
 }
+
+/** A vendor call is killed at VENDOR_CALL_TIMEOUT_MS: an argument folder twice that old belongs to no call still running. */
+const STALE_ARG_DIR_MS = 2 * VENDOR_CALL_TIMEOUT_MS;
+
+/** Ruling F11: at the start of every runner and every `ghostpm sync`, the argument folders vendor calls left behind go. */
+export const sweepStaleArgDirs = (): Promise<number> => sweepArgDirs(STALE_ARG_DIR_MS);
 
 /**
  * `ghostpm sync` as the command line runs it. `--background` is SessionStart's spawn, whose output nobody reads:

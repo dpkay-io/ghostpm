@@ -1,6 +1,7 @@
 import { Ledger } from '../ledger/db';
 import {
-    getSyncPause, getWorkspaceSetting, readSetting, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SETTING_SYNC_PULL_MINUTES, SYNC_POLICY_OFF,
+    getSyncPause, getWorkspaceSetting, readSetting, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SETTING_SYNC_PULL_MINUTES, SYNC_POLICY_AUTO,
+    SYNC_POLICY_OFF,
 } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
 import { leaseHolder } from './lease';
@@ -15,6 +16,10 @@ const MS_PER_MINUTE = 60 * 1000;
 export function syncIsOff(db: Ledger, workspace: WorkspaceRow): boolean {
     return readSetting(db, workspace.id, SETTING_SYNC_POLICY) === SYNC_POLICY_OFF;
 }
+
+/** Why sync is off and how a person turns it on, worded once for every place that says so (ruling F2). */
+export const syncOffHint = (workspacePath: string): string =>
+    `${SETTING_SYNC_POLICY} ${SYNC_POLICY_OFF}; \`ghostpm config set ${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO} --workspace "${workspacePath}"\` turns it on`;
 
 /**
  * Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. Counted from when the

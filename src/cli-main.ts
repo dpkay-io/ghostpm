@@ -199,7 +199,8 @@ async function main() {
         }
 
         case 'sync': {
-            const { syncCommandMain } = await import('./sync/runner');
+            const { syncCommandMain, sweepStaleArgDirs } = await import('./sync/runner');
+            await sweepStaleArgDirs();
             const result = await syncCommandMain(process.argv.slice(3));
             if (result.output.length > 0) console.log(result.output);
             if (result.failed) process.exitCode = EXIT_FAILURE;

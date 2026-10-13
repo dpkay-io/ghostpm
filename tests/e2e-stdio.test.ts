@@ -7,6 +7,10 @@ import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
 const STARTUP_TIMEOUT_MS = 30000;
+/** Older than any vendor call can run (twice the 45 s call timeout), and then some. */
+const STALE_ARGS_AGE_MS = 10 * 60 * 1000;
+const SWEEP_WAIT_MS = 10000;
+const POLL_MS = 50;
 // The built CLI is what this test drives; `npm run build` must run first.
 const describeBuilt = fs.existsSync(CLI) ? describe : describe.skip;
 
@@ -22,6 +26,7 @@ function inheritedEnv(extra: Record<string, string>): Record<string, string> {
 describeBuilt('ghostpm serve over stdio', () => {
     let home: string;
     let workspace: string;
+    let staleArgs: string;
     let client: Client;
 
     const callText = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
@@ -32,13 +37,18 @@ describeBuilt('ghostpm serve over stdio', () => {
     beforeAll(async () => {
         home = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-e2e-home-'));
         workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-e2e-ws-'));
+        staleArgs = path.join(home, 'ghostpm-args-left');
+        fs.mkdirSync(staleArgs);
+        const longAgo = new Date(Date.now() - STALE_ARGS_AGE_MS);
+        fs.utimesSync(staleArgs, longAgo, longAgo);
         client = new Client({ name: 'e2e', version: '1.0.0' });
         await client.connect(new StdioClientTransport({
             command: process.execPath,
             args: [CLI, 'serve'],
             cwd: workspace,
-            // HOME/USERPROFILE keep the legacy import away from the real ~/.claude.json.
-            env: inheritedEnv({ GHOSTPM_HOME: home, HOME: home, USERPROFILE: home }),
+            // HOME/USERPROFILE keep the legacy import away from the real ~/.claude.json, and the temporary folder
+            // keeps the start-up sweep of argument folders away from the real one.
+            env: inheritedEnv({ GHOSTPM_HOME: home, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, TMPDIR: home }),
         }));
     }, STARTUP_TIMEOUT_MS);
 
@@ -59,5 +69,12 @@ describeBuilt('ghostpm serve over stdio', () => {
 
         expect(await callText('query_tasks')).toContain('Smoke test task');
         expect(fs.existsSync(path.join(home, 'ledger.db'))).toBe(true);
+    }, STARTUP_TIMEOUT_MS);
+
+    it('sweeps argument folders a vendor call left behind when its sync runner starts (F11)', async () => {
+        for (const end = Date.now() + SWEEP_WAIT_MS; fs.existsSync(staleArgs) && Date.now() < end;) {
+            await new Promise(resolve => setTimeout(resolve, POLL_MS));
+        }
+        expect(fs.existsSync(staleArgs)).toBe(false);
     }, STARTUP_TIMEOUT_MS);
 });
