@@ -1,4 +1,4 @@
-import { ChildProcess, execFile, execFileSync, ExecFileException } from 'child_process';
+import { ChildProcess, execFile, execFileSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -16,6 +16,10 @@ const systemTool = (name: string): string => path.join(process.env.SystemRoot ||
 const systemDir = (): string => path.dirname(systemTool('where.exe'));
 /** taskkill: the process tree (/T), forcibly (/F); the pid follows. */
 const TASKKILL_TREE = ['/T', '/F', '/PID'];
+/** What ends a timed-out command's process group on Linux and macOS: nothing in it can catch or ignore it. */
+const KILL_SIGNAL: NodeJS.Signals = 'SIGKILL';
+const EXIT_OK = 0;
+const UTF8: BufferEncoding = 'utf8';
 /** No AutoRun, no delayed expansion, strip the outer quotes, run. */
 const CMD_SWITCHES = ['/d', '/v:off', '/s', '/c'];
 /** What cmd.exe passes through untouched: no quotes, metacharacters, whitespace or leading @. */
@@ -220,29 +224,85 @@ function plan(command: string, args: CliArg[]): Invocation {
 }
 
 /**
- * A timed-out call: end the process tree while the child lives (on Windows killing cmd.exe alone leaves az.cmd's
- * python running, free to finish a create after the retry), and stop reading the pipes either way: a descendant
- * can hold them long after the child itself has exited.
+ * A timed-out call: end the process tree while the child lives, and stop reading the pipes either way: a descendant
+ * can hold them long after the child itself has exited. Killing the child alone leaves what it started running, free
+ * to finish a create after the retry: on Windows cmd.exe's az.cmd python, so taskkill ends the tree; on Linux and macOS
+ * az is a script whose python outlives it, so the child leads a process group of its own and the group is signalled
+ * whole (ruling F7). `windows` picks the way.
  */
-function stopTimedOut(child: ChildProcess): void {
+export function stopTimedOut(child: ChildProcess, windows: boolean = IS_WINDOWS): void {
     if (child.exitCode === null && child.pid !== undefined) {
-        if (IS_WINDOWS) {
+        if (windows) {
             execFile(systemTool('taskkill.exe'), [...TASKKILL_TREE, String(child.pid)], { windowsHide: true, cwd: systemDir() }, error => {
                 if (error) child.kill();
             });
         } else {
-            child.kill();
+            try {
+                process.kill(-child.pid, KILL_SIGNAL);
+            } catch {
+                child.kill(KILL_SIGNAL);   // no group to signal: the child at least
+            }
         }
     }
     child.stdout?.destroy();
     child.stderr?.destroy();
 }
 
-function toCliError(command: string, error: ExecFileException, stderr: string): CliError {
-    const exitCode = typeof error.code === 'number' ? error.code : null;
-    const notFound = error.code === NOT_FOUND_CODE || NOT_FOUND_TEXT.test(stderr);
-    const detail = stderr.trim().split(LINE_BREAK)[0] || error.message;
+function toCliError(command: string, exitCode: number | null, stderr: string, runError: NodeJS.ErrnoException | null): CliError {
+    const notFound = runError?.code === NOT_FOUND_CODE || NOT_FOUND_TEXT.test(stderr);
+    const detail = stderr.trim().split(LINE_BREAK)[0] || runError?.message || `exited with code ${exitCode}`;
     return new CliError(`${command} failed${exitCode === null ? '' : ` (exit ${exitCode})`}: ${detail}`, exitCode, stderr, notFound, false);
+}
+
+/** How a launched command ended: its exit code (null when a signal or a failed start ended it) and what it printed. */
+interface Ended {
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    /** It never started, or printed more than MAX_BUFFER. */
+    runError: NodeJS.ErrnoException | null;
+}
+
+/**
+ * execFile's run-and-collect, except that on Linux and macOS the command leads a process group of its own (`detached`),
+ * which execFile never passes on to spawn (Node 20). `ended` is called once, after the command's output closes.
+ */
+function launch(invocation: Invocation, ended: (result: Ended) => void): ChildProcess {
+    const child = spawn(invocation.file, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
+        windowsHide: true,
+        windowsVerbatimArguments: invocation.verbatim,
+        detached: !IS_WINDOWS,
+    });
+    const output = { stdout: '', stderr: '' };
+    let size = 0;
+    let runError: NodeJS.ErrnoException | null = null;
+    let done = false;
+    const finish = (exitCode: number | null): void => {
+        if (done) return;
+        done = true;
+        ended({ exitCode, stdout: output.stdout, stderr: output.stderr, runError });
+    };
+    const collect = (stream: 'stdout' | 'stderr') => (chunk: string): void => {
+        size += Buffer.byteLength(chunk);
+        if (size <= MAX_BUFFER) {
+            output[stream] += chunk;
+            return;
+        }
+        runError = new Error(`${stream} passed ${MAX_BUFFER} bytes`);
+        stopTimedOut(child);
+    };
+    child.stdout?.setEncoding(UTF8).on('data', collect('stdout'));
+    child.stderr?.setEncoding(UTF8).on('data', collect('stderr'));
+    child.on('error', error => {
+        runError = error;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(null);
+    });
+    child.on('close', exitCode => finish(exitCode));
+    return child;
 }
 
 /**
@@ -284,21 +344,14 @@ export const runCli: Runner = (command, args, options = {}) => new Promise<strin
     let finished = false;
     let timedOut = false;
     let timer: NodeJS.Timeout | undefined;
-    const child = execFile(invocation.file, invocation.args, {
-        encoding: 'utf8',
-        maxBuffer: MAX_BUFFER,
-        windowsHide: true,
-        windowsVerbatimArguments: invocation.verbatim,
-        cwd: invocation.cwd,
-        env: invocation.env,
-    }, (error, stdout, stderr) => {
+    const child = launch(invocation, ({ exitCode, stdout, stderr, runError }) => {
         finished = true;
         if (timer !== undefined) clearTimeout(timer);
         // Best effort: a process that inherited the folder as its cwd can keep it busy on Windows.
         if (argDir !== null) try { fs.rmSync(argDir, { recursive: true, force: true }); } catch { /* left behind */ }
         if (timedOut) return;   // already rejected
-        if (error) reject(toCliError(command, error, String(stderr)));
-        else resolve(String(stdout).trim());
+        if (runError !== null || exitCode !== EXIT_OK) reject(toCliError(command, exitCode, stderr, runError));
+        else resolve(stdout.trim());
     });
     const timeoutMs = options.timeoutMs;
     if (timeoutMs !== undefined && !finished) {

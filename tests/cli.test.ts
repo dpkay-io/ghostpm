@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
 import child_process = require('child_process');
 import osModule = require('os');
-import { runCli, freeText, sweepArgDirs, CliError, COMMAND_OVERRIDE_ENV } from '../src/cli';
+import { runCli, freeText, stopTimedOut, sweepArgDirs, CliError, COMMAND_OVERRIDE_ENV } from '../src/cli';
 import { removeTempDir } from './temp-dir';
 
 const HOSTILE = 'a&b | "q" %PATH% ^ <x> (p)\nsecond line';
@@ -40,7 +42,23 @@ const diesWithin = async (pid: number, ms: number): Promise<boolean> => {
     return !isAlive(pid);
 };
 const MSI_AZ_SCRIPT = '@IF EXIST "%~dp0\\..\\python.exe" (\r\n  SET AZ_INSTALLER=MSI\r\n  "%~dp0\\..\\python.exe" -IBm azure.cli %*\r\n)\r\n';
-const itOnWindows = process.platform === 'win32' ? it : it.skip;
+const IS_WINDOWS = process.platform === 'win32';
+const itOnWindows = IS_WINDOWS ? it : it.skip;
+/** Process groups are POSIX: this one cannot run on Windows, where the taskkill tests cover the same. */
+const itOnPosix = IS_WINDOWS ? it.skip : it;
+/** A pid no test process has: the kill selection test only records the signal. */
+const FAKE_PID = 4321;
+/** What spawn answers in a test that must not start anything: stdout as given, then a clean exit. */
+function finishedChild(stdout: string): child_process.ChildProcess {
+    const child = new EventEmitter() as child_process.ChildProcess;
+    Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), pid: FAKE_PID, exitCode: null });
+    child.stdout!.on('end', () => setImmediate(() => child.emit('close', 0, null)));
+    process.nextTick(() => {
+        (child.stdout as PassThrough).end(stdout);
+        (child.stderr as PassThrough).end();
+    });
+    return child;
+}
 
 /** Prints what it received: argv (expanding @file the way az does) and stdin. */
 const ECHO_SOURCE = `
@@ -158,6 +176,44 @@ describe('runCli', () => {
         }
     }, LINGER_TEST_TIMEOUT_MS);
 
+    it('starts a vendor CLI in a process group of its own on Linux and macOS, never on Windows (F7)', async () => {
+        override('gh', echo);
+        const spawned = jest.spyOn(child_process, 'spawn');
+        await runCli('gh', ['x']);
+        expect((spawned.mock.calls[0][2] as { detached?: boolean }).detached).toBe(!IS_WINDOWS);
+    });
+
+    it('ends a timed-out call with its whole process group on Linux and macOS, and its tree through taskkill on Windows (F7)', () => {
+        const child = { pid: FAKE_PID, exitCode: null, kill: jest.fn(), stdout: null, stderr: null } as unknown as child_process.ChildProcess;
+        const signalled = jest.spyOn(process, 'kill').mockImplementation(() => true);
+        const launched = jest.spyOn(child_process, 'execFile').mockImplementation((() => undefined) as never);
+
+        stopTimedOut(child, false);
+        expect(signalled.mock.calls).toEqual([[-FAKE_PID, 'SIGKILL']]);
+        expect(launched).not.toHaveBeenCalled();
+
+        stopTimedOut(child, true);
+        expect(path.basename(launched.mock.calls[0][0] as string).toLowerCase()).toBe('taskkill.exe');
+        expect(launched.mock.calls[0][1]).toEqual(['/T', '/F', '/PID', String(FAKE_PID)]);
+        expect(signalled).toHaveBeenCalledTimes(1);
+    });
+
+    itOnPosix("ends what a timed-out command started, not only the command (an az script's python)", async () => {
+        const pidFile = path.join(dir, 'worker-pid.txt');
+        const worker = path.join(dir, 'worker.js');
+        fs.writeFileSync(worker, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, ${HANG_MS});`);
+        const script = path.join(dir, 'script.js');
+        fs.writeFileSync(script, `require('child_process').spawn(process.execPath, [${JSON.stringify(worker)}], { stdio: 'ignore' }); setTimeout(() => {}, ${HANG_MS});`);
+        override('gh', script);
+        try {
+            const error = await runCli('gh', ['issue', 'list'], { timeoutMs: BATCH_TIMEOUT_MS }).catch((e: unknown) => e) as CliError;
+            expect(error.timedOut).toBe(true);
+            expect(await diesWithin(Number(fs.readFileSync(pidFile, 'utf8')), BATCH_TIMEOUT_MS)).toBe(true);
+        } finally {
+            if (fs.existsSync(pidFile)) try { process.kill(Number(fs.readFileSync(pidFile, 'utf8'))); } catch { /* already gone */ }
+        }
+    }, LINGER_TEST_TIMEOUT_MS);
+
     it('sweeps argument folders left behind, past the given age, and nothing else (F11)', async () => {
         jest.spyOn(osModule, 'tmpdir').mockReturnValue(dir);
         const now = Date.now();
@@ -262,7 +318,7 @@ describe('runCli', () => {
         });
 
         itOnWindows('never puts free text on the cmd.exe command line, yet az receives it intact', async () => {
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             const result = await echoed('az', ['boards', 'work-item', 'update', '--id', '42', '--title', freeText(HOSTILE)]);
             expect(result.args).toEqual(['boards', 'work-item', 'update', '--id', '42', '--title', HOSTILE]);
             const commandLine = (spawned.mock.calls[0][1] as string[]).join(' ');
@@ -283,7 +339,7 @@ describe('runCli', () => {
         });
 
         itOnWindows('refuses text that starts with @ and holds non-ASCII characters, which that launcher would garble', async () => {
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             const error = await runCli('az', [freeText(`@${NON_ASCII}`)]).catch((e: unknown) => e) as CliError;
             expect(error.refused).toBe(true);
             expect(spawned).not.toHaveBeenCalled();
@@ -294,7 +350,7 @@ describe('runCli', () => {
         });
 
         itOnWindows('removes the argument files once the command has finished', async () => {
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             await runCli('az', ['--title', freeText(HOSTILE)]);
             const cwd = (spawned.mock.calls[0][2] as { cwd?: string }).cwd;
             expect(cwd).toBeDefined();
@@ -308,7 +364,7 @@ describe('runCli', () => {
             const busyAz = path.join(dir, 'busy-az.cmd');
             fs.writeFileSync(busyAz, `@"${process.execPath}" "${spawner}" %*\r\n`);
             override('az', busyAz);
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             await expect(runCli('az', ['--title', freeText('x')])).resolves.toBe('');
             const argDir = (spawned.mock.calls[0][2] as { cwd: string }).cwd;
             await new Promise(resolve => setTimeout(resolve, lingerMs * 2));
@@ -331,13 +387,13 @@ describe('runCli', () => {
         itOnWindows('runs an override given as a relative path by its absolute path', async () => {
             process.chdir(dir);
             override('az', 'az.cmd');
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             await runCli('az', ['version']);
             expect(spawned.mock.calls[0][1]).toEqual(expect.arrayContaining([expect.stringContaining(`"${path.join(dir, 'az.cmd')}"`)]));
         });
 
         itOnWindows('refuses a plain argument cmd.exe would parse, without running anything', async () => {
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             const error = await runCli('az', ['--title', 'a&b']).catch((e: unknown) => e) as CliError;
             expect(error).toBeInstanceOf(CliError);
             expect(error.refused).toBe(true);
@@ -353,10 +409,9 @@ describe('runCli', () => {
             fs.writeFileSync(python, '');
             override('az', msiAz);
             let atFileContent = '';
-            const spawned = jest.spyOn(child_process, 'execFile').mockImplementation(((...call: any[]) => {
+            const spawned = jest.spyOn(child_process, 'spawn').mockImplementation(((...call: any[]) => {
                 atFileContent = fs.readFileSync(call[1].find((a: string) => a.startsWith('@')).slice(1), 'utf8');
-                call[call.length - 1](null, 'ok', '');
-                return { stdin: { on: () => undefined, end: () => undefined } };
+                return finishedChild('ok');
             }) as any);
             expect(await runCli('az', ['boards', '--title', freeText(HOSTILE)])).toBe('ok');
             const [file, args, options] = spawned.mock.calls[0] as any[];
@@ -378,10 +433,7 @@ describe('runCli', () => {
             const pipAz = path.join(bin, 'az.bat');
             fs.writeFileSync(pipAz, '@"%~dp0..\\python.exe" -m azure.cli %*\r\n');
             override('az', pipAz);
-            const spawned = jest.spyOn(child_process, 'execFile').mockImplementation(((...call: any[]) => {
-                call[call.length - 1](null, '', '');
-                return { stdin: { on: () => undefined, end: () => undefined } };
-            }) as any);
+            const spawned = jest.spyOn(child_process, 'spawn').mockImplementation((() => finishedChild('')) as any);
             await runCli('az', ['version']);
             expect(path.basename(spawned.mock.calls[0][0]).toLowerCase()).toBe('cmd.exe');
         });
@@ -397,7 +449,7 @@ describe('runCli', () => {
         });
 
         itOnWindows('falls back to cmd.exe when there is no python.exe next to the batch file', async () => {
-            const spawned = jest.spyOn(child_process, 'execFile');
+            const spawned = jest.spyOn(child_process, 'spawn');
             await runCli('az', ['version']);
             expect(path.basename(spawned.mock.calls[0][0]).toLowerCase()).toBe('cmd.exe');
         });

@@ -169,6 +169,24 @@ describe('GitHubAdapter', () => {
         expect(gh.calls.map(call => call.args[0])).toEqual(['pr', 'repo']);
     });
 
+    it('renames a closed duplicate as it is, never reopening it to close it again as not planned (F12)', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { number: 51, state: 'CLOSED', stateReason: 'DUPLICATE', labels: [] }) });
+        await new GitHubAdapter(repo, gh.run).syncState({ remoteId: '51', state: 'closed:duplicate', labels: [] }, { title: 'Renamed', phase: 'dropped' });
+        expect(gh.calls.map(call => call.args)).toEqual([
+            ['issue', 'edit', '51', '--repo', freeText(repo), '--title', freeText('Renamed')],
+            ['issue', 'view', '51', '--repo', freeText(repo), '--json', ISSUE_FIELDS],
+        ]);
+    });
+
+    it('still closes a duplicate again as completed when its task is done', async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { number: 51, state: 'CLOSED', stateReason: 'COMPLETED', labels: [] }) });
+        await new GitHubAdapter(repo, gh.run).syncState({ remoteId: '51', state: 'closed:duplicate', labels: [] }, { title: 'Done after all', phase: 'done' });
+        expect(gh.calls.map(call => `${call.args[0]} ${call.args[1]}`)).toEqual(['issue reopen', 'issue edit', 'issue close', 'issue view']);
+        expect(gh.calls[2].args).toContainEqual(freeText('completed'));
+    });
+
     it('answers a pull request GitHub cannot resolve as gone (F5)', async () => {
         const repo = freshRepo();
         const missing = new CliError('gh failed (exit 1)', 1, 'GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)', false, false);

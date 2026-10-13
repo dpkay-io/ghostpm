@@ -33,7 +33,6 @@ const MISSING_SCOPE = /HTTP 403[\s\S]*scope|scope[\s\S]*HTTP 403/i;
 const REFRESH_SCOPE = /gh auth refresh -s (\S+)/;
 const REFRESH_COMMAND = 'gh auth refresh';
 const SCOPE_FLAG = '-s';
-const CLOSE_REASON_DEFAULT = 'completed';
 const CREATED_ISSUE = /\/issues\/(\d+)\s*$/;
 const PULL_URL = /github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/i;
 const CLOSE_REASON: Partial<Record<Phase, string>> = { done: 'completed', dropped: 'not planned' };
@@ -44,10 +43,6 @@ export const ghRepoMissing = (repo: string): string => `GitHub repo ${repo} not 
 export const ghScopeMissing = (fix: string): string => `The GitHub token lacks a required scope. Run \`${fix}\`, then \`ghostpm sync\`.`;
 const ghRefused = (detail: string): string => `GhostPM will not run gh this way (${detail}). Fix that, then run \`ghostpm sync\`.`;
 
-/** `not planned` (gh's flag) and `not_planned` (its stateReason) name one reason. */
-const reasonKey = (reason: string): string => reason.replace(/ /g, '_').toLowerCase();
-/** The reason a stored `closed[:reason]` state carries; a bare `closed` is a completed one. */
-const closeReasonOf = (state: string | null): string => (state ?? '').split(REASON_SEPARATOR)[1] ?? CLOSE_REASON_DEFAULT;
 const repoKey = (repo: string): string => repo.toLowerCase();
 
 interface GhIssue {
@@ -216,8 +211,9 @@ export class GitHubAdapter implements VendorAdapter {
             }
             if (link.labels.indexOf(label) < 0) edit.push('--add-label', label);
         }
-        // `gh issue close` on a closed issue changes nothing, so a done <-> dropped move reopens first.
-        const needsClose = reason !== undefined && (!wasClosed || closeReasonOf(link.state) !== reasonKey(reason));
+        // `gh issue close` on a closed issue changes nothing, so a done <-> dropped move reopens first. A close that already
+        // means the phase stays: a duplicate is dropped, and closing it again as not planned would lose that (ruling F12).
+        const needsClose = reason !== undefined && (!wasClosed || githubPhaseOf(link.state ?? '', link.labels, desired.phase) !== desired.phase);
         if (wasClosed && (reason === undefined || needsClose)) await this.gh(['issue', 'reopen', link.remoteId, ...this.repoArgs()], undefined, true);
         await this.gh(edit, undefined, true);
         if (needsClose) {
