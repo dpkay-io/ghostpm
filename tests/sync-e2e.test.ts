@@ -119,10 +119,11 @@ describeBuilt('sync against a fake gh, end to end on the built CLI', () => {
         stateFile = path.join(home, 'gh-state.json');
         logFile = path.join(home, 'gh-calls.jsonl');
         fs.writeFileSync(logFile, '');
-        // HOME/USERPROFILE keep everything (settings, legacy discovery) away from the real profile.
+        // HOME/USERPROFILE keep everything (settings, legacy discovery) away from the real profile;
+        // TEMP/TMP/TMPDIR keep `ghostpm sync`'s argument-folder sweep away from the real temp folder.
         env = {
             ...process.env,
-            GHOSTPM_HOME: ghostpmHome, HOME: home, USERPROFILE: home,
+            GHOSTPM_HOME: ghostpmHome, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, TMPDIR: home,
             [COMMAND_OVERRIDE_ENV.gh!]: fakeGh, FAKE_GH_STATE: stateFile, FAKE_GH_LOG: logFile,
         };
     });
