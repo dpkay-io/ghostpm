@@ -166,9 +166,7 @@ export function migrate(db: Ledger, targetVersion: number = SCHEMA_VERSION): voi
     // no write lock at all, which matters when this runs on every hook invocation.
     const initialVersion = db.pragma('user_version', { simple: true }) as number;
     if (initialVersion > SCHEMA_VERSION) {
-        throw new Error(
-            `Ledger at ${db.name} is schema version ${initialVersion}, newer than this build's ${SCHEMA_VERSION}. Update GhostPM before opening it.`
-        );
+        throw new Error(newerSchemaMessage(db.name, initialVersion));
     }
     if (initialVersion >= targetVersion) return;
 
@@ -193,14 +191,14 @@ export const MISSING_BINDING_HELP =
     + 'Run `ghostpm bootstrap` to build it into the ghostpm home.';
 
 /** Falls back to a bootstrapped addon before giving up, so one build survives every update. */
-function openDatabase(filePath: string): Ledger {
+function openDatabase(filePath: string, options: Database.Options = {}): Ledger {
     try {
-        return new Database(filePath);
+        return new Database(filePath, options);
     } catch (error) {
         if (!isMissingBinding(error)) throw error;
         const bootstrapped = bootstrappedBindingPath();
         if (!fs.existsSync(bootstrapped)) throw new Error(MISSING_BINDING_HELP);
-        return new Database(filePath, { nativeBinding: bootstrapped });
+        return new Database(filePath, { ...options, nativeBinding: bootstrapped });
     }
 }
 
@@ -217,4 +215,72 @@ export function openLedger(filePath: string = ledgerPath()): Ledger {
         throw error;
     }
     return db;
+}
+
+function newerSchemaMessage(filePath: string, version: number): string {
+    return `Ledger at ${filePath} is schema version ${version}, newer than this build's ${SCHEMA_VERSION}. Update GhostPM before opening it.`;
+}
+
+function olderSchemaMessage(filePath: string, version: number): string {
+    return `Ledger at ${filePath} is schema version ${version}, older than this build's ${SCHEMA_VERSION}. `
+        + 'Start a Claude Code session or run `ghostpm sync` once so it upgrades, then try again.';
+}
+
+export type SchemaStatus = 'current' | 'older' | 'newer';
+
+export function schemaVersion(db: Ledger): number {
+    return db.pragma('user_version', { simple: true }) as number;
+}
+
+export function schemaStatus(db: Ledger): SchemaStatus {
+    const version = schemaVersion(db);
+    if (version === SCHEMA_VERSION) return 'current';
+    return version > SCHEMA_VERSION ? 'newer' : 'older';
+}
+
+/** Carries the next step, like MISSING_BINDING_HELP: a reader has nowhere else to explain itself. */
+export function noLedgerMessage(filePath: string): string {
+    return `No GhostPM ledger at ${filePath} yet. The first Claude Code session with the GhostPM plugin creates it, and so does \`ghostpm init\`.`;
+}
+
+/**
+ * For readers (dashboard, standup, tasks, status, statusline, doctor). It never creates the
+ * file or its folder, never switches the journal mode and never migrates. A missing ledger
+ * is an explained error, not a new empty file. It does not check the schema: callers that
+ * must survive any version (the statusline, doctor) use this directly.
+ */
+export function openLedgerReadOnly(filePath: string = ledgerPath()): Ledger {
+    if (!fs.existsSync(filePath)) throw new Error(noLedgerMessage(filePath));
+    const db = openDatabase(filePath, { readonly: true, fileMustExist: true });
+    db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    return db;
+}
+
+/** openLedgerReadOnly for code that reads the current schema: anything else is refused, never migrated. */
+export function openReader(filePath: string = ledgerPath()): Ledger {
+    const db = openLedgerReadOnly(filePath);
+    const version = schemaVersion(db);
+    if (version === SCHEMA_VERSION) return db;
+    db.close();
+    throw new Error(version > SCHEMA_VERSION ? newerSchemaMessage(filePath, version) : olderSchemaMessage(filePath, version));
+}
+
+/** Changes whenever another connection commits (SQLite `PRAGMA data_version`); this connection's own writes do not count. */
+export function dataVersion(db: Ledger): number {
+    return db.pragma('data_version', { simple: true }) as number;
+}
+
+/**
+ * The baseline is taken when the watcher is created. Each call then says whether another
+ * connection or process committed since the previous call. It is a single pragma, cheap
+ * enough to poll every second.
+ */
+export function changeWatcher(db: Ledger): () => boolean {
+    let last = dataVersion(db);
+    return () => {
+        const current = dataVersion(db);
+        const changed = current !== last;
+        last = current;
+        return changed;
+    };
 }
