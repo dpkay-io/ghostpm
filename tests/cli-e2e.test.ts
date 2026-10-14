@@ -208,6 +208,30 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
     });
 
+    it('unregisters a registered folder whose own .git is gone by its own row, never the repo around it', () => {
+        fs.mkdirSync(path.join(workspace, '.git'));
+        seed();
+        const keep = path.join(workspace, 'keep');
+        fs.mkdirSync(path.join(keep, '.git'), { recursive: true });
+        expect(cli(['init'], keep).status).toBe(EXIT_OK);
+        fs.rmSync(path.join(keep, '.git'), { recursive: true, force: true });
+
+        const preview = cli(['unregister', keep]);
+        expect(preview.status).toBe(EXIT_OK);
+        expect(preview.stdout).toContain(`ghostpm unregister "${normalizePath(keep)}" ${FLAG_YES}`);
+
+        const confirmed = cli(['unregister', keep, FLAG_YES]);
+        expect(confirmed.status).toBe(EXIT_OK);
+        expect(confirmed.stdout).toContain(`Forgot ${normalizePath(keep)}:`);
+        const db = openLedger(path.join(ghostpmHome, LEDGER_FILE));
+        try {
+            expect((db.prepare('SELECT path FROM workspaces').all() as { path: string }[]).map(row => row.path)).toEqual([normalizePath(workspace)]);
+        } finally {
+            db.close();
+        }
+        expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
+    });
+
     it('refuses to unregister a folder that is not a workspace', () => {
         seed();
         const elsewhere = path.join(root, 'elsewhere');

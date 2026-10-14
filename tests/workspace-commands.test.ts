@@ -346,6 +346,20 @@ describe('workspace commands', () => {
             expect(unregisterTarget(ledger.db, inner)?.id).toBe(innerWorkspace.id);
             expect(unregisterTarget(ledger.db, path.join(outer, 'never-registered'))).toBeUndefined();
         });
+
+        it('prefers a folder\'s own row to the repository around it, even once its own .git is gone', () => {
+            const outer = repo();
+            const keep = clonedRepo(outer, 'keep');
+            const outerWorkspace = ensureWorkspace(ledger.db, outer);
+            const keepWorkspace = ensureWorkspace(ledger.db, keep);
+            const inside = path.join(keep, 'src');
+            fs.mkdirSync(inside);
+            fs.rmSync(path.join(keep, '.git'), { recursive: true, force: true });
+
+            expect(unregisterTarget(ledger.db, keep)?.id).toBe(keepWorkspace.id);
+            // A folder with no row of its own still resolves as a session there would: to the git root above it.
+            expect(unregisterTarget(ledger.db, inside)?.id).toBe(outerWorkspace.id);
+        });
     });
 
     describe('describeUnregister', () => {

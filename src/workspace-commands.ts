@@ -204,11 +204,12 @@ export function unregisterWorkspace(db: Ledger, workspace: WorkspaceRow): Worksp
 }
 
 /**
- * The workspace `ghostpm unregister <folder>` names. An existing folder resolves as a session there would (to its git
- * root). A folder that is gone matches only its own row: climbing to a parent's git root would pick another workspace.
+ * The workspace `ghostpm unregister <folder>` names: the folder's own row first, even when its .git is gone, since
+ * climbing to a parent's git root would pick another workspace. Only an existing folder with no row of its own
+ * resolves as a session there would, to its git root.
  */
 export function unregisterTarget(db: Ledger, folder: string): WorkspaceRow | undefined {
-    return fs.existsSync(folder) ? findWorkspace(db, folder) : workspaceAtPath(db, folder);
+    return workspaceAtPath(db, folder) ?? (fs.existsSync(folder) ? findWorkspace(db, folder) : undefined);
 }
 
 export function describeUnregister(workspace: WorkspaceRow, footprint: WorkspaceFootprint, deleted: boolean): string {
