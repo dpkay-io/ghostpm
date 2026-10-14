@@ -3,6 +3,7 @@
 import * as path from 'path';
 
 const command = process.argv[2];
+const args = process.argv.slice(3);
 const MAX_COL_WIDTH = 50;
 const EXIT_FAILURE = 1;
 
@@ -127,8 +128,7 @@ async function main() {
         }
 
         case 'setup': {
-            const flags = process.argv.slice(3);
-            if (flags.includes('--restore')) {
+            if (args.includes('--restore')) {
                 const { restoreStatusline, userSettingsPath } = await import('./plugin-setup');
                 const { openLedger, ledgerPath } = await import('./ledger/db');
                 const settingsPath = userSettingsPath();
@@ -146,8 +146,8 @@ async function main() {
             }
             const { setup } = await import('./setup');
             await setup({
-                global: flags.includes('--global'),
-                statusline: flags.includes('--statusline'),
+                global: args.includes('--global'),
+                statusline: args.includes('--statusline'),
             });
             break;
         }
@@ -157,7 +157,7 @@ async function main() {
             const { openLedger, ledgerPath } = await import('./ledger/db');
             const db = openLedger(ledgerPath());
             try {
-                console.log(runConfigCommand(db, process.argv.slice(3), process.cwd()));
+                console.log(runConfigCommand(db, args, process.cwd()));
             } finally {
                 db.close();
             }
@@ -194,7 +194,7 @@ async function main() {
         case 'sync': {
             const { syncCommandMain, sweepStaleArgDirs } = await import('./sync/runner');
             await sweepStaleArgDirs();
-            const result = await syncCommandMain(process.argv.slice(3));
+            const result = await syncCommandMain(args);
             if (result.output.length > 0) console.log(result.output);
             if (result.failed) process.exitCode = EXIT_FAILURE;
             break;
@@ -252,78 +252,15 @@ async function main() {
         }
 
         case 'dashboard': {
-            const { getWorkspaces } = await import('./registry');
-            const { Db } = await import('./db');
-            const fs = await import('fs');
-
-            const workspaces = getWorkspaces();
-            if (workspaces.length === 0) {
-                console.log('No workspaces registered. Run `ghostpm init` in a project to register it.');
-                break;
-            }
-
-            const DONE_STATES = new Set(['closed', 'resolved', 'done']);
-            const MAX_PER_GROUP = 50;
-            const cols = ['id', 'state', 'title', 'assignee'];
-
-            for (const ws of workspaces) {
-                const name = path.basename(ws.path);
-                const dbPath = path.join(ws.path, '.mcp-pm.db');
-
-                if (!fs.existsSync(dbPath)) {
-                    console.log(`\n━━━ ${name} ━━━ (no database — run ghostpm sync)`);
-                    console.log(`  ${ws.vendor} · ${ws.path}`);
-                    continue;
-                }
-
-                let db: InstanceType<typeof Db>;
-                try {
-                    db = new Db(ws.path);
-                } catch {
-                    console.log(`\n━━━ ${name} ━━━ (unavailable)`);
-                    console.log(`  ${ws.path}`);
-                    continue;
-                }
-
-                const allTasks = db.getTasks();
-                const lastSync = db.getMetadata('last_sync');
-                const syncLabel = lastSync ? relativeTime(lastSync) : 'never synced';
-
-                const active = allTasks.filter(t => !DONE_STATES.has(t.state.toLowerCase()));
-                const done = allTasks.filter(t => DONE_STATES.has(t.state.toLowerCase()));
-
-                console.log(`\n━━━ ${name} ━━━ ${syncLabel} ━━━`);
-                console.log(`  ${ws.vendor} · ${ws.path}`);
-                console.log(`  ${active.length} active · ${done.length} done`);
-
-                const printGroup = (label: string, tasks: typeof allTasks) => {
-                    if (tasks.length === 0) return;
-                    const limited = tasks.slice(0, MAX_PER_GROUP);
-                    console.log(`\n  ${label}:`);
-
-                    const widths = cols.map(col =>
-                        Math.min(MAX_COL_WIDTH,
-                            Math.max(col.length, ...limited.map(t => String((t as any)[col] ?? '').length))
-                        )
-                    );
-                    const pad = (s: string, w: number) => truncate(s, w) + ' '.repeat(Math.max(0, w - truncate(s, w).length));
-
-                    console.log('  ' + cols.map((c, i) => pad(c.toUpperCase(), widths[i])).join('  '));
-                    console.log('  ' + widths.map(w => '─'.repeat(w)).join('  '));
-                    for (const task of limited) {
-                        console.log('  ' + cols.map((c, i) => pad(String((task as any)[c] ?? ''), widths[i])).join('  '));
-                    }
-                    if (tasks.length > MAX_PER_GROUP) {
-                        console.log(`  ... and ${tasks.length - MAX_PER_GROUP} more`);
-                    }
-                };
-
-                printGroup('Active', active);
-                printGroup('Done', done);
-
+            const { hasFlag, FLAG_ONCE } = await import('./cli-args');
+            const { openReader } = await import('./ledger/db');
+            const { runDashboard } = await import('./surfaces/live');
+            const db = openReader();
+            try {
+                await runDashboard(db, process.stdout, { once: hasFlag(args, FLAG_ONCE) });
+            } finally {
                 db.close();
             }
-            console.log('');
             break;
         }
 
