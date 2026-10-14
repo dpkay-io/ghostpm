@@ -19,10 +19,14 @@ const payload = load('hook/payload.js').readPayload(JSON.stringify({ hook_event_
 load('hook/handlers.js').handleWith(db, payload, { startSync: () => undefined });
 db.close();
 process.stdout.write(JSON.stringify(Object.keys(require.cache)));`;
-/** Spec §7.2, §15: the MCP SDK and zod cost 250 ms+; vendor adapters and the runner have no place in a hook. */
+/**
+ * Spec §7.2, §15: the MCP SDK and zod cost 250 ms+; vendor adapters, the runner and the Phase 4 surfaces (dashboard,
+ * standup, statusline) have no place in a hook. RELEASING.md names this suite as the release check for it.
+ */
 const FORBIDDEN = [
     /@modelcontextprotocol/, /[\\/]zod[\\/]/, /[\\/]js-yaml[\\/]/,
     /[\\/]dist[\\/]mcp-server\.js$/, /[\\/]dist[\\/]config\.js$/,
+    /[\\/]dist[\\/]surfaces[\\/]/, /[\\/]dist[\\/]statusline\.js$/,
     /[\\/]dist[\\/]sync[\\/](github|azure|runner|push|pull|reconcile|redact|identity)\.js$/,
 ];
 /** Ruling M5: only SessionStart decides whether to start a sync; the prompt hook, which runs on every prompt, never loads it. */

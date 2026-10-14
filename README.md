@@ -144,7 +144,7 @@ npm test
 claude --plugin-dir .
 ```
 
-The last command runs your working copy as a plugin.
+The last command runs your working copy as a plugin. To cut a release, follow [RELEASING.md](RELEASING.md).
 
 ## License
 
