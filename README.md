@@ -51,7 +51,7 @@ A plugin cannot add commands to your terminal, so `ghostpm dashboard` and the ot
 | `ghostpm bootstrap` | Build the SQLite addon into `~/.ghostpm`. The plugin runs this for you. |
 | `ghostpm help`, `ghostpm --version` | Usage, and the version. |
 
-The statusline reads `▶ T42 <title> · <phase>`, followed by `⚠<n>` when `<n>` pushes failed, and by the pause reason when sync is paused.
+The statusline reads `▶ T42 <title> · <phase>`, followed by `⚠<n>` when `<n>` pushes failed (`⚠<n> sync off` where sync is off, since nothing retries them until you turn it on), and by the pause reason when sync is paused.
 
 ## Inside Claude Code
 

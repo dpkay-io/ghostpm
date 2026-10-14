@@ -24,7 +24,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
 - **Claude Code plugin** (`claude plugin install ghostpm@ghostpm`). Hooks record sessions, edited files, commits and PRs. The session is told which task it is on. The plugin ships the MCP server and the `ghostpm:ghostpm` skill.
 - **`ghostpm dashboard`.** A live view of the machine: live sessions, tasks by workspace and phase, sync health, activity touching another workspace's task, and the recent timeline. It redraws only what changed, and prints one snapshot when piped or with `--once`. Inside Claude Code, ask for "the GhostPM dashboard".
 - **`ghostpm standup [--since 2d|36h|yesterday|2026-09-28]`.** Tasks touched, phase changes, files, commits and PRs, per workspace. No LLM involved.
-- **Statusline** (opt-in, `ghostpm setup --statusline`). Shows `▶ T42 <title> · <phase>`, `⚠<n>` for failed pushes, and a paused-sync reason, after your existing statusline.
+- **Statusline** (opt-in, `ghostpm setup --statusline`). Shows `▶ T42 <title> · <phase>`, `⚠<n>` for failed pushes, and a paused-sync reason, after your existing statusline, which stays in place if GhostPM's ledger cannot be read.
 - **Vendor sync v2** (`ghostpm sync`, `ghostpm config`):
   - one sync runner at a time;
   - a desired-state queue that retries with backoff;
@@ -33,18 +33,17 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
   - secrets are redacted before anything is sent to a vendor;
   - explicit `--repo` or `--org` and `--project` on every vendor call.
 - **`ghostpm doctor`.** Finds 1.4.0 MCP registrations in `~/.claude.json`, stale 1.4.0 skills, a ledger newer than the copy you are running and a Node.js older than 22, and prints the exact commands that fix them. It never changes anything itself.
+- **`ghostpm bootstrap`** builds the SQLite addon into the GhostPM home, and works when its path has spaces or symbols.
 - **`ghostpm --version`.**
 
 ### Fixed
 
-- The statusline keeps your own statusline when GhostPM's ledger cannot be read.
 - `open_attachment` opens only http and https links.
-- `ghostpm bootstrap` works when its path has spaces or symbols.
 
 ### Upgrading from 1.4.0
 
 1. Install the plugin: `claude plugin marketplace add dpkay-io/ghostpm`, then `claude plugin install ghostpm@ghostpm`. For the terminal commands, also run `npm install -g ghostpm@2`. Keep both on the same version.
-2. Start a Claude Code session. On its first start, the MCP server imports every 1.4.0 repo it can find: those in `~/.ghostpm/workspaces.json`, plus projects in `~/.claude.json` that have a `.mcp-pm.yml`. It brings over tasks, vendor links, comments, the detected user and the active sprint, and queues the changes 1.4.0 had not pushed yet. Those repos keep 1.4.0 behaviour (`linked-only`, no phase comments), and sync stays off for them until you opt in (`ghostpm init` in the repo, or `ghostpm config set sync_policy auto --workspace <repo folder>`). The old files stay where they were, untouched. For a repo it missed, run `ghostpm init` in that repo.
+2. Start a Claude Code session. On its first start, the MCP server imports every 1.4.0 repo it can find: those in `~/.ghostpm/workspaces.json`, plus projects in `~/.claude.json` that have a `.mcp-pm.yml`. It brings over tasks, vendor links, comments, the detected user and the active sprint, and queues the changes 1.4.0 had not pushed yet. Those repos sync as 1.4.0 did (`linked-only`: existing linked items only, no phase comments) until you move them to `auto` (`ghostpm init` there, or `ghostpm config set sync_policy auto --workspace <repo folder>`). The old files stay where they were, untouched. For a repo it missed, run `ghostpm init` in that repo.
 3. Run `ghostpm doctor`. It prints the commands that remove your 1.4.0 MCP registrations (`claude mcp remove ghostpm -s user`, and `claude mcp remove ghostpm -s local` per project) and the old `~/.claude/skills/ghostpm` folder. Nothing is removed until you run them.
 
 If you skip step 3, sessions keep starting the 1.4.0 server next to the plugin. That means two sets of GhostPM tools, and the old one writes to `.mcp-pm.db`, which nothing reads any more.
