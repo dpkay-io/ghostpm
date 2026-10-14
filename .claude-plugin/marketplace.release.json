@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ghostpm",
+  "description": "GhostPM: a local-first task ledger that captures work from your Claude Code sessions.",
+  "owner": {
+    "name": "dpkay"
+  },
+  "plugins": [
+    {
+      "name": "ghostpm",
+      "description": "Invisible project management: captures work from your sessions into a local task ledger shared by every tool on the machine.",
+      "source": { "source": "npm", "package": "ghostpm", "version": "2.0.0" },
+      "category": "productivity"
+    }
+  ]
+}

@@ -12,10 +12,6 @@ const CASE_LABEL = /case ['"]([^'"]+)['"]:/g;
 const SEPARATORS = /[\s,|[\]]+/;
 const USAGE_PREFIX = 'Usage: ghostpm ';
 
-function readJson(...segments: string[]): { name: string } {
-    return JSON.parse(fs.readFileSync(path.join(ROOT, ...segments), 'utf8'));
-}
-
 /** Every command cli-main.ts handles, read from its source so a new case cannot hide from help. */
 function handledCommands(): string[] {
     const source = fs.readFileSync(CLI_SOURCE, 'utf8');
@@ -67,10 +63,8 @@ describe('help', () => {
         expect(SETUP_USAGE).not.toContain('--global');
     });
 
-    it('names the plugin the way the marketplace and the manifest do', () => {
-        const marketplace = readJson('.claude-plugin', 'marketplace.json') as unknown as { name: string; plugins: Array<{ name: string }> };
-        expect(PLUGIN_ID).toBe(`${readJson('.claude-plugin', 'plugin.json').name}@${marketplace.name}`);
-        expect(marketplace.plugins.map(plugin => plugin.name)).toContain(PLUGIN_ID.split('@')[0]);
+    // tests/version.test.ts holds PLUGIN_ID to the release marketplace and plugin.json.
+    it('tells Claude Code users to install the plugin by its id', () => {
         expect(HELP_TEXT).toContain(`claude plugin install ${PLUGIN_ID}`);
     });
 });

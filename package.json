@@ -1,6 +1,6 @@
 {
   "name": "ghostpm",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Local-first task ledger for AI coding sessions: captures work from Claude Code, shows it machine-wide, and syncs it to GitHub Issues or Azure DevOps.",
   "main": "dist/mcp-server.js",
@@ -19,6 +19,7 @@
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "stage": "npm run build && node scripts/stage-release.js",
+    "verify-release": "npm run build && node scripts/verify-release.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "start": "node dist/cli-main.js serve",

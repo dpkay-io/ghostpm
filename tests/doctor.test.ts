@@ -9,6 +9,7 @@ import {
 } from '../src/doctor';
 import { PLUGIN_ID } from '../src/help';
 import { userSettingsPath } from '../src/plugin-setup';
+import { packageVersion } from '../src/package-info';
 import Database from 'better-sqlite3';
 import { SCHEMA_VERSION, ledgerPath } from '../src/ledger/db';
 import { homeDir } from '../src/registry';
@@ -221,6 +222,42 @@ describe('diagnose', () => {
                 expect(found.skills.map(skill => skill.skillMd)).toEqual([path.join(dir, 'SKILL.md')]);
                 expect(diagnose(found).map(finding => finding.code)).toEqual([FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL]);
                 expect(fs.existsSync(ghostpmHome)).toBe(false);
+            } finally {
+                if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
+                restore();
+            }
+        });
+    });
+
+    describe("GhostPM's own plugin, installed from either marketplace", () => {
+        const REPO = path.join(__dirname, '..');
+        const [PLUGIN_NAME, RELEASE_MARKETPLACE] = PLUGIN_ID.split('@');
+        /** The repository checkout's marketplace while developing (.claude-plugin/marketplace.json). */
+        const DEV_MARKETPLACE = 'ghostpm-local';
+        const PLUGIN_FILES = ['.claude-plugin/plugin.json', '.mcp.json', 'hooks/hooks.json', 'skills/ghostpm/SKILL.md'];
+
+        /**
+         * Claude Code copies a marketplace plugin to ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/, but a
+         * plugin from a marketplace added by local path loads in place: the checkout, which is a project as well.
+         */
+        const pluginRoot = (marketplace: string): string => (marketplace === DEV_MARKETPLACE
+            ? path.join(home, 'checkout')
+            : path.join(home, '.claude', 'plugins', 'cache', marketplace, PLUGIN_NAME, packageVersion()));
+
+        it.each([RELEASE_MARKETPLACE, DEV_MARKETPLACE])('reports nothing for the plugin from %s', marketplace => {
+            const restore = isolateHomes(home);
+            const previous = process.env.GHOSTPM_HOME;
+            process.env.GHOSTPM_HOME = path.join(home, '.ghostpm');
+            try {
+                const root = pluginRoot(marketplace);
+                PLUGIN_FILES.forEach(file => {
+                    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+                    fs.copyFileSync(path.join(REPO, file), path.join(root, file));
+                });
+                fs.mkdirSync(path.dirname(userSettingsPath()), { recursive: true });
+                fs.writeFileSync(userSettingsPath(), JSON.stringify({ enabledPlugins: { [`${PLUGIN_NAME}@${marketplace}`]: true } }));
+                fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ projects: { [root]: {} } }));
+                expect(diagnose(machineProbe())).toEqual([]);
             } finally {
                 if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
                 restore();

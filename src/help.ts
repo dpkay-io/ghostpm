@@ -4,8 +4,11 @@ import {
 import { CONFIG_USAGE } from './config-cli';
 import { DEFAULT_STANDUP_HOURS } from './surfaces/standup';
 
-/** The plugin as `claude plugin install` names it: the plugin in .claude-plugin/plugin.json @ the marketplace in marketplace.json. */
-export const PLUGIN_ID = 'ghostpm@ghostpm-local';
+/**
+ * The released plugin as `claude plugin install` names it: the plugin in .claude-plugin/plugin.json @ the marketplace in
+ * .claude-plugin/marketplace.release.json (tests/version.test.ts holds it to both).
+ */
+export const PLUGIN_ID = 'ghostpm@ghostpm';
 const USAGE_PREFIX = 'Usage: ghostpm ';
 
 /** The `setup` lines: the one place they are written, so a setup usage message can print the same ones. */
