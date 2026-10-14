@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawnSync, SpawnSyncReturns } from 'child_process';
+import Database from 'better-sqlite3';
 import { openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask } from '../src/ledger/tasks';
@@ -22,6 +23,8 @@ const HOOK_CLIENT = 'claude-code';
 const ESCAPE = '\u001b[';
 const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
+/** SQLite's rollback-journal mode, as `PRAGMA journal_mode` names it. */
+const DELETE_JOURNAL = 'delete';
 
 describeBuilt('ghostpm CLI on the ledger', () => {
     let root: string;
@@ -150,6 +153,35 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         const confirmed = cli(['unregister', FLAG_YES]);
         expect(confirmed.status).toBe(EXIT_OK);
         expect(cli(['status']).stdout).toContain(NOT_A_WORKSPACE);
+    });
+
+    it('previews an unregister without creating a ledger that does not exist', () => {
+        const result = cli(['unregister']);
+
+        expect(result.status).toBe(EXIT_FAILURE);
+        expect(result.stderr).toContain('No GhostPM ledger');
+        expect(fs.existsSync(ghostpmHome)).toBe(false);
+    });
+
+    it('previews an unregister through a read-only connection', () => {
+        seed();
+        const ledgerFile = path.join(ghostpmHome, LEDGER_FILE);
+        // A write connection switches the ledger to WAL as it opens; a reader leaves the journal mode alone.
+        const plain = new Database(ledgerFile);
+        plain.pragma(`journal_mode = ${DELETE_JOURNAL}`);
+        plain.close();
+
+        const preview = cli(['unregister']);
+
+        expect(preview.status).toBe(EXIT_OK);
+        expect(preview.stdout).toContain(FLAG_YES);
+        const after = new Database(ledgerFile, { readonly: true });
+        try {
+            expect(after.pragma('journal_mode', { simple: true })).toBe(DELETE_JOURNAL);
+        } finally {
+            after.close();
+        }
+        expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
     });
 
     it('refuses to unregister a folder that is not a workspace', () => {

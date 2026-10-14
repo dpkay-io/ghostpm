@@ -8,8 +8,8 @@ import {
 } from './ledger/legacy-import';
 import {
     DEFAULT_ADO_WORK_ITEM_TYPE, PROGRESS_COMMENTS_NONE, PROGRESS_COMMENTS_PHASE, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP,
-    SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_OFF, SyncPolicy, getWorkspaceSetting, readSetting,
-    setWorkspaceSetting,
+    SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SyncPolicy,
+    getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from './ledger/settings';
 import { WorkspaceFootprint, deleteWorkspace, ensureWorkspace, refreshWorkspaceRemote } from './ledger/workspaces';
 import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
@@ -20,6 +20,8 @@ import { syncOffHint } from './sync/schedule';
 /** How far back init samples work items to learn the process template's states and types. */
 export const AZURE_SAMPLE_DAYS = 90;
 const NO_REMOTE = 'none';
+/** How init names a sync_policy the workspace never had. */
+const NOT_SET = 'not set';
 
 export type SniffAzure = (identity: AzureIdentity) => Promise<AzureProcess>;
 
@@ -37,6 +39,8 @@ export interface InitResult {
     warnings: string[];
     /** The workspace's sync_policy after init, wherever it comes from. */
     syncPolicy: SyncPolicy;
+    /** Set when init switched the workspace to auto: what the workspace had before (null: nothing). */
+    optedIn: { from: SyncPolicy | null } | null;
     /** Its progress_comments after init: a 1.4.0 repo's import turns them off unless a person set them. */
     progressComments: string;
 }
@@ -91,12 +95,20 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
     }
 }
 
+/**
+ * Init is the explicit opt-in: no policy, or the linked-only stamp a 1.4.0 import leaves, becomes auto; anything else
+ * a person chose (off, promote) stays. Runs before the 1.4.0 import, whose stamp only fills a gap (ruling P41).
+ */
+function optIn(db: Ledger, workspaceId: number): InitResult['optedIn'] {
+    const before = getWorkspaceSetting<SyncPolicy>(db, workspaceId, SETTING_SYNC_POLICY);
+    if (before !== undefined && before !== SYNC_POLICY_LINKED_ONLY) return null;
+    setWorkspaceSetting(db, workspaceId, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+    return { from: before ?? null };
+}
+
 export async function initWorkspace(db: Ledger, cwd: string, sniff: SniffAzure = sampleAzureProcess): Promise<InitResult> {
     const registered = ensureWorkspace(db, cwd);
-    // Ruling P41: init opts the repo in to sync. Before the 1.4.0 import, whose linked-only stamp only fills a gap.
-    if (getWorkspaceSetting(db, registered.id, SETTING_SYNC_POLICY) === undefined) {
-        setWorkspaceSetting(db, registered.id, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
-    }
+    const optedIn = optIn(db, registered.id);
     const warnings: string[] = [];
     const imported = importLegacyFolder(db, cwd, warnings);
     // The git remote wins over the 1.4.0 config: it is what vendor calls will target.
@@ -104,6 +116,7 @@ export async function initWorkspace(db: Ledger, cwd: string, sniff: SniffAzure =
     const result: InitResult = {
         workspace, imported, applied: [], kept: [], warnings,
         syncPolicy: readSetting(db, workspace.id, SETTING_SYNC_POLICY),
+        optedIn,
         progressComments: readSetting(db, workspace.id, SETTING_PROGRESS_COMMENTS),
     };
     if (workspace.vendor === AZURE_DEVOPS) await detectAzureSettings(db, sniff, result);
@@ -114,7 +127,9 @@ export async function initWorkspace(db: Ledger, cwd: string, sniff: SniffAzure =
 function syncLines(result: InitResult): string[] {
     const where = result.workspace.path;
     if (result.syncPolicy === SYNC_POLICY_OFF) return [`Sync:      ${SYNC_POLICY_OFF} (${syncOffHint(where)})`];
-    const lines = [`Sync:      on (${SETTING_SYNC_POLICY} ${result.syncPolicy})`];
+    const lines = [result.optedIn === null
+        ? `Sync:      on (${SETTING_SYNC_POLICY} ${result.syncPolicy})`
+        : `Sync:      on (${SETTING_SYNC_POLICY} was ${result.optedIn.from ?? NOT_SET}; now ${result.syncPolicy})`];
     if (result.progressComments === PROGRESS_COMMENTS_NONE) {
         lines.push(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE}); `
             + `\`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace "${where}"\` turns them on`);

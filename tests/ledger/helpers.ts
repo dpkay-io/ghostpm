@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+// The module object itself, not an import wrapper: a spy on it is what src code calling os.homedir() sees.
+import os = require('os');
 import { Ledger, openLedger, LEDGER_FILE } from '../../src/ledger/db';
 import { LEGACY_DB_FILE } from '../../src/ledger/legacy-import';
 import { OP_SYNC_STATE, OutboxRow, OutboxStatus } from '../../src/ledger/projection';
@@ -32,21 +33,25 @@ export function tempLedger(): TempLedger {
     };
 }
 
-/** The ghostpm home (ledger, 1.4.0 registry, sync.log) and the user home a spawned child resolves. */
+/** The ghostpm home (ledger, 1.4.0 registry, sync.log) and the user home code reads from the environment. */
 const HOME_VARIABLES = ['GHOSTPM_HOME', 'HOME', 'USERPROFILE'];
 
 /**
- * Points every home variable at `home`. Returns the restore. Jest's process.env is a sandbox copy: it never
- * reaches os.homedir(), so code that reads ~/.claude.json (claudeConfigPath) must be handed a path instead.
+ * Points every home at `home`: the variables, and os.homedir() (~/.claude.json, the ghostpm home's fallback), which
+ * never reads Jest's process.env (a sandbox copy). Returns the restore.
  */
 export function isolateHomes(home: string): () => void {
     const originals = HOME_VARIABLES.map(name => process.env[name]);
     HOME_VARIABLES.forEach(name => { process.env[name] = home; });
-    return () => HOME_VARIABLES.forEach((name, index) => {
-        const original = originals[index];
-        if (original !== undefined) process.env[name] = original;
-        else delete process.env[name];
-    });
+    const homedir = jest.spyOn(os, 'homedir').mockReturnValue(home);
+    return () => {
+        homedir.mockRestore();
+        HOME_VARIABLES.forEach((name, index) => {
+            const original = originals[index];
+            if (original !== undefined) process.env[name] = original;
+            else delete process.env[name];
+        });
+    };
 }
 
 export const GITHUB_REMOTE = 'https://github.com/acme/widgets.git';

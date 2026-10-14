@@ -6,9 +6,13 @@ import {
 } from './ledger/helpers';
 import {
     getWorkspaceSetting, setWorkspaceSetting, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP, SETTING_PROGRESS_COMMENTS,
-    SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_OFF, PROGRESS_COMMENTS_NONE, PROGRESS_COMMENTS_PHASE,
+    SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SYNC_POLICY_PROMOTE, PROGRESS_COMMENTS_NONE,
+    PROGRESS_COMMENTS_PHASE,
 } from '../src/ledger/settings';
-import { LEGACY_CONFIG_FILE, discoverLegacyRoots, phaseStateMapFrom, runLegacyImport } from '../src/ledger/legacy-import';
+import {
+    LEGACY_CONFIG_FILE, claudeConfigPath, discoverLegacyRoots, phaseStateMapFrom, runLegacyImport,
+} from '../src/ledger/legacy-import';
+import { getGhostpmHome } from '../src/registry';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { listTasks } from '../src/ledger/tasks';
 import { FLAG_YES } from '../src/cli-args';
@@ -25,6 +29,9 @@ const LEGACY_TASK: LegacyTask = { id: '42', title: 'Legacy issue', state: 'open'
 /** A comment 1.4.0 queued and never pushed: imported, it becomes a vendor comment the next sync posts. */
 const UNPUSHED: LegacyOutboxItem = { taskId: '42', action: 'updateTask', payload: JSON.stringify({ comment: 'from 1.4.0' }), status: 'pending' };
 const SYNC_ON = `Sync:      on (${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO})`;
+/** What init prints when it switched the workspace to auto. */
+const switchedFrom = (before: string): string => `Sync:      on (${SETTING_SYNC_POLICY} was ${before}; now ${SYNC_POLICY_AUTO})`;
+const NOT_SET = 'not set';
 const NEXT_SYNC = 'Next: `ghostpm sync`';
 const CLAUDE_JSON = '.claude.json';
 
@@ -73,6 +80,12 @@ describe('workspace commands', () => {
         removeTempDir(parent);
     });
 
+    it('keeps every home this code can reach inside the scratch folder', () => {
+        // os.homedir() never reads Jest's process.env: isolateHomes must redirect it too.
+        expect(claudeConfigPath()).toBe(path.join(home, CLAUDE_JSON));
+        expect(getGhostpmHome()).toBe(home);
+    });
+
     describe('initWorkspace', () => {
         it('registers a plain folder with no vendor and calls no vendor CLI', async () => {
             const folder = path.join(parent, PROJECT_FOLDER);
@@ -90,12 +103,18 @@ describe('workspace commands', () => {
             expect(sniffed).toEqual([]);
         });
 
-        it('opts a repo with no sync policy in to sync (ruling P41)', async () => {
-            const result = await initWorkspace(ledger.db, repo(), sniff);
+        it('opts a repo with no sync policy in to sync and says so, once (ruling P41)', async () => {
+            const folder = repo();
+            const result = await initWorkspace(ledger.db, folder, sniff);
             expect(getWorkspaceSetting(ledger.db, result.workspace.id, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_AUTO);
             expect(result.syncPolicy).toBe(SYNC_POLICY_AUTO);
-            expect(describeInit(result)).toContain(SYNC_ON);
+            expect(result.optedIn).toEqual({ from: null });
+            expect(describeInit(result)).toContain(switchedFrom(NOT_SET));
             expect(describeInit(result)).toContain(NEXT_SYNC);
+
+            const again = await initWorkspace(ledger.db, folder, sniff);
+            expect(again.optedIn).toBeNull();
+            expect(describeInit(again)).toContain(SYNC_ON);
         });
 
         it('keeps sync off when a person turned it off, and says how to turn it on', async () => {
@@ -106,8 +125,36 @@ describe('workspace commands', () => {
             const result = await initWorkspace(ledger.db, folder, sniff);
 
             expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_OFF);
+            expect(result.optedIn).toBeNull();
             expect(describeInit(result)).toContain(syncOffHint(workspace.path));
             expect(describeInit(result)).not.toContain(NEXT_SYNC);
+        });
+
+        it('keeps promote when a person chose it', async () => {
+            const folder = repo();
+            const workspace = ensureWorkspace(ledger.db, folder);
+            setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_PROMOTE);
+
+            const result = await initWorkspace(ledger.db, folder, sniff);
+
+            expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_PROMOTE);
+            expect(result.optedIn).toBeNull();
+            expect(describeInit(result)).toContain(`Sync:      on (${SETTING_SYNC_POLICY} ${SYNC_POLICY_PROMOTE})`);
+        });
+
+        it('switches a 1.4.0 repo an earlier start stamped linked-only to auto, and says so', async () => {
+            const folder = legacyRepo();
+            const [stamped] = runLegacyImport(ledger.db, [folder]);
+            expect(getWorkspaceSetting(ledger.db, stamped.workspaceId, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_LINKED_ONLY);
+
+            const result = await initWorkspace(ledger.db, folder, sniff);
+
+            expect(getWorkspaceSetting(ledger.db, stamped.workspaceId, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_AUTO);
+            expect(result.optedIn).toEqual({ from: SYNC_POLICY_LINKED_ONLY });
+            expect(result.imported).toBe(0);
+            const text = describeInit(result);
+            expect(text).toContain(`${SETTING_SYNC_POLICY} was ${SYNC_POLICY_LINKED_ONLY}; now ${SYNC_POLICY_AUTO}`);
+            expect(text).toContain(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE})`);
         });
 
         it('opts a 1.4.0 repo in too, before its import can stamp linked-only, and says phase comments stay off', async () => {
@@ -117,7 +164,7 @@ describe('workspace commands', () => {
             expect(getWorkspaceSetting(ledger.db, result.workspace.id, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_AUTO);
             expect(getWorkspaceSetting(ledger.db, result.workspace.id, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_NONE);
             const text = describeInit(result);
-            expect(text).toContain(SYNC_ON);
+            expect(text).toContain(switchedFrom(NOT_SET));
             expect(text).toContain(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE})`);
             expect(text).toContain(`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace "${result.workspace.path}"`);
         });
