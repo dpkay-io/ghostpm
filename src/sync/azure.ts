@@ -16,13 +16,17 @@ const FIELD = {
     id: 'System.Id', title: 'System.Title', state: 'System.State', assignedTo: 'System.AssignedTo',
     changed: 'System.ChangedDate', tags: 'System.Tags', iteration: 'System.IterationPath',
     description: 'System.Description', project: 'System.TeamProject', history: 'System.History',
-    createdBy: 'System.CreatedBy', createdDate: 'System.CreatedDate',
+    createdBy: 'System.CreatedBy', createdDate: 'System.CreatedDate', type: 'System.WorkItemType',
 };
 /** WIQL's macro for the signed-in user. */
 const ME_MACRO = '@Me';
+/** WIQL's macro for the current date; `@Today - n` is n days back. */
+const TODAY_MACRO = '@Today';
 /** How far back a retried create looks for the work item its earlier attempt made. */
 const ADOPT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 const QUERY_FIELDS = [FIELD.id, FIELD.title, FIELD.state, FIELD.assignedTo, FIELD.changed, FIELD.tags, FIELD.iteration, FIELD.description, FIELD.project];
+/** A process sample reads no descriptions: months of them would be most of the answer. */
+const SAMPLE_FIELDS = [FIELD.id, FIELD.state, FIELD.type];
 /** WIQL compares dates, not times, unless the REST call asks for time precision, which az cannot. */
 const WIQL_DATE_LENGTH = 10;
 /** WIQL date literals are read in the user's time zone, so the bound starts a day before the UTC date of `since`; a pull de-dupes by baseline. */
@@ -62,6 +66,14 @@ const noState = (phase: Phase): string =>
 interface AzWorkItem {
     id: number;
     fields?: { [name: string]: unknown };
+}
+
+/** What a project's recent work items say about its process template. */
+export interface AzureProcess {
+    /** Distinct (ignoring case), most recently changed first. */
+    states: string[];
+    /** Most frequent first. */
+    workItemTypes: string[];
 }
 
 /** `itemLevel` calls name one work item or PR: "does not exist" there means it is gone. Anywhere else it means the project or type is wrong. */
@@ -197,8 +209,8 @@ export class AzureAdapter implements VendorAdapter {
     }
 
     /** This project's work items matching every condition. */
-    private async query(conditions: string[], orderBy: string): Promise<AzWorkItem[]> {
-        const wiql = `SELECT ${QUERY_FIELDS.map(field => `[${field}]`).join(', ')} FROM workitems`
+    private async query(conditions: string[], orderBy: string, fields: readonly string[] = QUERY_FIELDS): Promise<AzWorkItem[]> {
+        const wiql = `SELECT ${fields.map(field => `[${field}]`).join(', ')} FROM workitems`
             + ` WHERE ${[`[${FIELD.project}] = ${wiqlText(this.project)}`, ...conditions].join(' AND ')}`
             + ` ORDER BY ${orderBy}`;
         const result = await this.az<AzWorkItem[] | { items?: AzWorkItem[] }>([
@@ -209,6 +221,22 @@ export class AzureAdapter implements VendorAdapter {
 
     private show(remoteId: string): Promise<AzWorkItem> {
         return this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
+    }
+
+    /** The states and work item types of the items changed in the last `days` days, for `ghostpm init`. Throws when az fails. */
+    async sampleProcess(days: number): Promise<AzureProcess> {
+        const items = await this.query([`[${FIELD.changed}] >= ${TODAY_MACRO} - ${days}`], `[${FIELD.changed}] DESC`, SAMPLE_FIELDS);
+        const states: string[] = [];
+        const typeCounts = new Map<string, number>();
+        for (const item of items) {
+            const state = item.fields?.[FIELD.state];
+            if (typeof state === 'string' && !states.some(known => known.toLowerCase() === state.toLowerCase())) states.push(state);
+            const type = item.fields?.[FIELD.type];
+            if (typeof type === 'string') typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
+        }
+        // A stable sort: equally frequent types keep the order they were first seen in.
+        const workItemTypes = Array.from(typeCounts.keys()).sort((a, b) => typeCounts.get(b)! - typeCounts.get(a)!);
+        return { states, workItemTypes };
     }
 
     /** Every match, whatever `_limit` says (`pages` is false). */

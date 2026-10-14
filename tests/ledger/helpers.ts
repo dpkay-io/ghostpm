@@ -1,7 +1,9 @@
+import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Ledger, openLedger, LEDGER_FILE } from '../../src/ledger/db';
+import { LEGACY_DB_FILE } from '../../src/ledger/legacy-import';
 import { OP_SYNC_STATE, OutboxRow, OutboxStatus } from '../../src/ledger/projection';
 import { SYNC_LEASE } from '../../src/sync/lease';
 import { removeTempDir } from '../temp-dir';
@@ -30,6 +32,23 @@ export function tempLedger(): TempLedger {
     };
 }
 
+/** The ghostpm home (ledger, 1.4.0 registry, sync.log) and the user home a spawned child resolves. */
+const HOME_VARIABLES = ['GHOSTPM_HOME', 'HOME', 'USERPROFILE'];
+
+/**
+ * Points every home variable at `home`. Returns the restore. Jest's process.env is a sandbox copy: it never
+ * reaches os.homedir(), so code that reads ~/.claude.json (claudeConfigPath) must be handed a path instead.
+ */
+export function isolateHomes(home: string): () => void {
+    const originals = HOME_VARIABLES.map(name => process.env[name]);
+    HOME_VARIABLES.forEach(name => { process.env[name] = home; });
+    return () => HOME_VARIABLES.forEach((name, index) => {
+        const original = originals[index];
+        if (original !== undefined) process.env[name] = original;
+        else delete process.env[name];
+    });
+}
+
 export const GITHUB_REMOTE = 'https://github.com/acme/widgets.git';
 
 /** A folder that looks like a clone of `remote`, so ensureWorkspace detects its vendor. */
@@ -52,4 +71,70 @@ export function seedOutboxRow(db: Ledger, taskId: number, status: OutboxStatus):
 /** The sync runner's lease, held by `holder` until `expiresAt`. */
 export function seedLease(db: Ledger, holder: string, expiresAt: string): void {
     db.prepare('INSERT OR REPLACE INTO leases (name, holder, expires_at) VALUES (?, ?, ?)').run(SYNC_LEASE, holder, expiresAt);
+}
+
+/** A valid 1.4.0 `.mcp-pm.yml` for a GitHub repo. */
+export const LEGACY_GITHUB_CONFIG = `vendor: "github"
+workflow:
+  states: ["open", "closed"]
+  transitions:
+    start_task: "in_progress"
+views:
+  list_columns: ["id", "state", "title", "assignee"]
+  detail_fields: ["id", "title", "body", "comments"]
+`;
+
+/** 1.4.0's `.mcp-pm.db` schema: src/db.ts initSchema plus migrateSchema, frozen here so tests outlive that file. */
+const LEGACY_SCHEMA = `
+    CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, assignee TEXT, body TEXT,
+        comments TEXT, updatedAt TEXT, labels TEXT, milestone TEXT, url TEXT
+    );
+    CREATE TABLE outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, taskId TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', errorMsg TEXT, createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`;
+
+export interface LegacyTask {
+    id: string;
+    title: string;
+    state: string;
+    assignee?: string;
+    body?: string;
+    comments?: string;
+    updatedAt?: string;
+    labels?: string;
+    milestone?: string;
+    url?: string;
+}
+
+/** A change 1.4.0 queued for an issue (`payload` is its `{ state?, comment? }` JSON). */
+export interface LegacyOutboxItem {
+    taskId: string;
+    action: string;
+    payload: string;
+    status: string;
+}
+
+export function seedLegacyDb(
+    root: string, tasks: LegacyTask[], metadata: { [key: string]: string } = {}, outbox: LegacyOutboxItem[] = [],
+): void {
+    const legacy = new Database(path.join(root, LEGACY_DB_FILE));
+    try {
+        legacy.exec(LEGACY_SCHEMA);
+        const insert = legacy.prepare(`
+            INSERT INTO tasks (id, title, state, assignee, body, comments, updatedAt, labels, milestone, url)
+            VALUES (@id, @title, @state, @assignee, @body, @comments, @updatedAt, @labels, @milestone, @url)`);
+        tasks.forEach(task => insert.run({
+            assignee: null, body: null, comments: null, updatedAt: null, labels: null, milestone: null, url: null, ...task,
+        }));
+        const meta = legacy.prepare('INSERT INTO metadata (key, value) VALUES (?, ?)');
+        Object.keys(metadata).forEach(key => meta.run(key, metadata[key]));
+        const queue = legacy.prepare('INSERT INTO outbox (taskId, action, payload, status) VALUES (@taskId, @action, @payload, @status)');
+        outbox.forEach(item => queue.run(item));
+    } finally {
+        legacy.close();
+    }
 }

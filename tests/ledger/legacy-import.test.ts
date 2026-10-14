@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { tempLedger, TempLedger, eventKinds, outboxRows } from './helpers';
+import { tempLedger, TempLedger, eventKinds, isolateHomes, outboxRows, LEGACY_GITHUB_CONFIG } from './helpers';
 import { Db } from '../../src/db';
 import { listTasks, getVendorLink, insertTaskRow, insertVendorLink } from '../../src/ledger/tasks';
 import { ensureWorkspace, getWorkspace, normalizePath, setWorkspaceVendor } from '../../src/ledger/workspaces';
@@ -19,15 +19,6 @@ import {
     LEGACY_CONFIG_FILE, LEGACY_DB_FILE, LEGACY_IMPORT_SETTING, LEGACY_SOURCE,
 } from '../../src/ledger/legacy-import';
 
-const LEGACY_CONFIG = `vendor: "github"
-workflow:
-  states: ["open", "closed"]
-  transitions:
-    start_task: "in_progress"
-views:
-  list_columns: ["id", "state", "title", "assignee"]
-  detail_fields: ["id", "title", "body", "comments"]
-`;
 const ADO_CONFIG = `vendor: "azure_devops"
 workflow:
   states: ["new", "active", "resolved", "closed", "removed"]
@@ -38,8 +29,6 @@ views:
   list_columns: ["id", "state", "title", "assignee"]
   detail_fields: ["id", "title", "body", "comments"]
 `;
-/** Discovery reads ~/.claude.json through os.homedir(): every home variable points at a scratch folder. */
-const HOME_VARIABLES = ['GHOSTPM_HOME', 'HOME', 'USERPROFILE'];
 /** The per-workspace stamp a build before per-root tracking wrote (one time, no roots). */
 const WORKSPACE_STAMP = '2026-10-01T00:00:00.000Z';
 const PRE_RELEASE_STAMP = '2026-09-20T00:00:00.000Z';
@@ -57,9 +46,9 @@ describe('legacy import', () => {
     let ledger: TempLedger;
     let repo: string;
     let tmpHome: string;
-    let originalHomes: (string | undefined)[];
+    let restoreHomes: () => void;
 
-    const createLegacyRepo = (config: string = LEGACY_CONFIG): string => {
+    const createLegacyRepo = (config: string = LEGACY_GITHUB_CONFIG): string => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-legacy-'));
         fs.mkdirSync(path.join(root, '.git'));
         fs.writeFileSync(path.join(root, LEGACY_CONFIG_FILE), config, 'utf8');
@@ -87,7 +76,7 @@ describe('legacy import', () => {
         fs.writeFileSync(path.join(gitDir, 'commondir'), '../..\n');
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-legacy-wt-'));
         fs.writeFileSync(path.join(root, '.git'), `gitdir: ${gitDir}\n`);
-        fs.writeFileSync(path.join(root, LEGACY_CONFIG_FILE), LEGACY_CONFIG, 'utf8');
+        fs.writeFileSync(path.join(root, LEGACY_CONFIG_FILE), LEGACY_GITHUB_CONFIG, 'utf8');
         const legacy = new Db(root);
         legacy.upsertTask({ id: '7', title: 'Worktree only', state: 'open' });
         legacy.addOutboxItem({ taskId: '7', action: 'updateTask', payload: JSON.stringify({ comment: 'from the worktree' }), status: 'pending' });
@@ -107,17 +96,12 @@ describe('legacy import', () => {
         ledger = tempLedger();
         repo = createLegacyRepo();
         tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-home-'));
-        originalHomes = HOME_VARIABLES.map(name => process.env[name]);
-        HOME_VARIABLES.forEach(name => { process.env[name] = tmpHome; });
+        restoreHomes = isolateHomes(tmpHome);
     });
 
     afterEach(() => {
         jest.restoreAllMocks();
-        HOME_VARIABLES.forEach((name, index) => {
-            const original = originalHomes[index];
-            if (original !== undefined) process.env[name] = original;
-            else delete process.env[name];
-        });
+        restoreHomes();
         ledger.cleanup();
         fs.rmSync(repo, { recursive: true, force: true });
         fs.rmSync(tmpHome, { recursive: true, force: true });

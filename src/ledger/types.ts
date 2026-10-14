@@ -19,6 +19,8 @@ export type EventKind = typeof EVENT_KINDS[number];
 
 export type Vendor = 'github' | 'azure_devops' | 'none';
 export const NO_VENDOR: Vendor = 'none';
+/** Its own literal type, so comparing a vendor identity's `vendor` with it narrows the identity. */
+export const AZURE_DEVOPS = 'azure_devops';
 export type Origin = 'local' | 'vendor';
 /** A task that came from GitHub or Azure DevOps. */
 export const VENDOR_ORIGIN: Origin = 'vendor';

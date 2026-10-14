@@ -23,3 +23,10 @@ export function flagValue(args: readonly string[], name: string): string | undef
 }
 
 export const FLAG_ALL = '--all';
+export const FLAG_YES = '--yes';
+
+/** The first argument that is not a flag, e.g. `ghostpm unregister [path] --yes`. */
+export function firstPositional(args: readonly string[]): string | undefined {
+    for (const arg of args) if (arg.indexOf(FLAG_PREFIX) !== 0) return arg;
+    return undefined;
+}

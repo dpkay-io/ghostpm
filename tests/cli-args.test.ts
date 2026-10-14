@@ -1,4 +1,11 @@
-import { FLAG_SINCE, flagValue } from '../src/cli-args';
+import { FLAG_SINCE, FLAG_YES, flagValue, firstPositional } from '../src/cli-args';
+
+describe('firstPositional', () => {
+    it('skips flags', () => {
+        expect(firstPositional([FLAG_YES, 'C:/work/app'])).toBe('C:/work/app');
+        expect(firstPositional([FLAG_YES])).toBeUndefined();
+    });
+});
 
 describe('flagValue', () => {
     it('reads a value given as the next argument or after =', () => {

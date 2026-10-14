@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { findGitRoot, detectRemote, readGitdirLink } from '../init';
-import { Ledger } from './db';
+import { Ledger, write } from './db';
 import { NO_VENDOR, Vendor, WorkspaceRow } from './types';
 
 const GIT_ENTRY = '.git';
@@ -55,4 +55,51 @@ export function ensureWorkspace(db: Ledger, cwd: string): WorkspaceRow {
 
 export function setWorkspaceVendor(db: Ledger, id: number, vendor: Vendor): void {
     db.prepare('UPDATE workspaces SET vendor = ? WHERE id = ?').run(vendor, id);
+}
+
+/**
+ * Re-reads the git remote: a folder first seen before `git remote add` would otherwise stay vendor none forever.
+ * No readable remote keeps what is stored. Answers the row as stored now.
+ */
+export function refreshWorkspaceRemote(db: Ledger, workspace: WorkspaceRow): WorkspaceRow {
+    const remote = detectRemote(workspace.path);
+    if (remote) db.prepare('UPDATE workspaces SET git_remote = ?, vendor = ? WHERE id = ?').run(remote.url, remote.vendor, workspace.id);
+    return getWorkspace(db, workspace.id)!;
+}
+
+export interface WorkspaceFootprint {
+    tasks: number;
+    events: number;
+    vendorLinks: number;
+    outbox: number;
+    sessions: number;
+}
+
+const WORKSPACE_TASK_IDS = 'SELECT id FROM tasks WHERE workspace_id = ?';
+
+export function workspaceFootprint(db: Ledger, id: number): WorkspaceFootprint {
+    const count = (sql: string): number => (db.prepare(sql).get(id) as { n: number }).n;
+    return {
+        tasks: count('SELECT COUNT(*) AS n FROM tasks WHERE workspace_id = ?'),
+        events: count(`SELECT COUNT(*) AS n FROM events WHERE task_id IN (${WORKSPACE_TASK_IDS})`),
+        vendorLinks: count(`SELECT COUNT(*) AS n FROM vendor_links WHERE task_id IN (${WORKSPACE_TASK_IDS})`),
+        outbox: count(`SELECT COUNT(*) AS n FROM outbox WHERE task_id IN (${WORKSPACE_TASK_IDS})`),
+        sessions: count('SELECT COUNT(*) AS n FROM sessions WHERE workspace_id = ?'),
+    };
+}
+
+/** Forgets a workspace and everything recorded under it, in one transaction. The vendor is never touched. */
+export function deleteWorkspace(db: Ledger, id: number): WorkspaceFootprint {
+    return write(db, () => {
+        const footprint = workspaceFootprint(db, id);
+        db.prepare(`DELETE FROM events WHERE task_id IN (${WORKSPACE_TASK_IDS})`).run(id);
+        db.prepare(`DELETE FROM vendor_links WHERE task_id IN (${WORKSPACE_TASK_IDS})`).run(id);
+        db.prepare(`DELETE FROM outbox WHERE task_id IN (${WORKSPACE_TASK_IDS})`).run(id);
+        // A session in another workspace can hold one of these tasks through a T-ref.
+        db.prepare(`UPDATE sessions SET task_id = NULL WHERE task_id IN (${WORKSPACE_TASK_IDS})`).run(id);
+        db.prepare('DELETE FROM sessions WHERE workspace_id = ?').run(id);
+        db.prepare('DELETE FROM tasks WHERE workspace_id = ?').run(id);
+        db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+        return footprint;
+    });
 }

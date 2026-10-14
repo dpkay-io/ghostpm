@@ -7,14 +7,14 @@ import { loadConfig, McpPmConfig } from '../config';
 import { Ledger, write, nowIso } from './db';
 import { ensureWorkspace, findWorkspace, normalizePath, setWorkspaceVendor } from './workspaces';
 import {
-    getSetting, getWorkspaceSetting, setWorkspaceSetting, PhaseStateMap, PROGRESS_COMMENTS_NONE,
+    getSetting, getWorkspaceSetting, setSetting, setWorkspaceSetting, PhaseStateMap, PROGRESS_COMMENTS_NONE,
     SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_PHASE_STATE_MAP, SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY,
     SYNC_POLICY_LINKED_ONLY,
 } from './settings';
 import { getTask, insertTaskRow, insertVendorLink } from './tasks';
 import { recordEvent } from './events';
 import { enqueueComment, projectTask } from './projection';
-import { Phase, VENDOR_SOURCE, Vendor, WorkspaceRow } from './types';
+import { AZURE_DEVOPS, Phase, VENDOR_SOURCE, Vendor, WorkspaceRow } from './types';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 
 export const LEGACY_DB_FILE = '.mcp-pm.db';
@@ -25,6 +25,12 @@ export const LEGACY_CONFIG_FILE = '.mcp-pm.yml';
  * stored one time here; it covers the workspace's own root.
  */
 export const LEGACY_IMPORT_SETTING = 'legacy_import_at';
+/**
+ * Global setting: legacy roots `ghostpm unregister` forgot, by normalized root, with when. The start-up import skips
+ * them, or the next start would import the repo again and queue its 1.4.0 comments a second time (C38).
+ * `ghostpm init` in the folder lifts it.
+ */
+export const LEGACY_FORGOTTEN_SETTING = 'legacy_forgotten_roots';
 export const LEGACY_SOURCE = VENDOR_SOURCE;
 const LEGACY_COMMENT_SEPARATOR = '\n---\n';
 const CLAUDE_CONFIG_FILE = '.claude.json';
@@ -35,7 +41,6 @@ const LEGACY_PENDING = 'pending';
 const START_TRANSITION = 'start_task';
 const PUSH_TRANSITION = 'code_push';
 const WORD_START = /\b[a-z]/g;
-const AZURE_DEVOPS: Vendor = 'azure_devops';
 
 /** Spec §11. Anything unknown lands in the fallback phase. */
 const STATE_PHASE: Record<string, Phase> = {
@@ -157,21 +162,60 @@ function markImported(db: Ledger, workspace: WorkspaceRow, root: string): void {
         { ...importedRoots(db, workspace), [normalizePath(root)]: nowIso() }));
 }
 
+type ForgottenRoots = Record<string, string>;
+
+const forgottenRoots = (db: Ledger): ForgottenRoots => getSetting<ForgottenRoots>(db, LEGACY_FORGOTTEN_SETTING) ?? {};
+
+/**
+ * `ghostpm unregister`, before the workspace is deleted: its folder and every legacy root imported into it stay out
+ * of later start-up imports.
+ */
+export function forgetLegacyRoots(db: Ledger, workspace: WorkspaceRow): void {
+    write(db, () => {
+        const at = nowIso();
+        const forgotten = forgottenRoots(db);
+        for (const root of [workspace.path, ...Object.keys(importedRoots(db, workspace))]) forgotten[normalizePath(root)] = at;
+        setSetting(db, LEGACY_FORGOTTEN_SETTING, forgotten);
+    });
+}
+
+/** `ghostpm init`: a root `ghostpm unregister` forgot may be imported again. */
+export function unforgetLegacyRoot(db: Ledger, root: string): void {
+    write(db, () => {
+        const forgotten = forgottenRoots(db);
+        const key = normalizePath(root);
+        if (forgotten[key] === undefined) return;
+        delete forgotten[key];
+        setSetting(db, LEGACY_FORGOTTEN_SETTING, forgotten);
+    });
+}
+
 /** 1.4.0's sniffer lower-cased the state names; Azure Boards' stock names are title case ("To Do"). */
 const titleCase = (state: string): string => state.replace(WORD_START, letter => letter.toUpperCase());
 
+const asSampled = (state: string): string => state;
+
+/**
+ * Each phase takes the first of `states` the spec §11 table reads as it, as `rename` spells it. Vendors have no
+ * brainstorming stage, so it shares planned's state. Used for 1.4.0's sniffed states and for `ghostpm init`'s sample.
+ */
+export function phaseStateMapFrom(states: readonly string[], rename: (state: string) => string = asSampled): PhaseStateMap {
+    const map: PhaseStateMap = {};
+    for (const state of states) {
+        const phase = knownStatePhase(state);
+        if (phase !== undefined && map[phase] === undefined) map[phase] = rename(state);
+    }
+    if (map.brainstorming === undefined && map.planned !== undefined) map.brainstorming = map.planned;
+    return map;
+}
+
 /** Spec §11.1: the Azure DevOps state for each phase, from the states and transitions 1.4.0 sniffed. */
 export function legacyPhaseStateMap(config: McpPmConfig): PhaseStateMap {
-    const map: PhaseStateMap = {};
-    for (const state of config.workflow.states) {
-        const phase = knownStatePhase(state);
-        if (phase !== undefined && map[phase] === undefined) map[phase] = titleCase(state);
-    }
+    const map = phaseStateMapFrom(config.workflow.states, titleCase);
     const start = config.workflow.transitions[START_TRANSITION];
     if (start) map.in_progress = titleCase(start);
     const push = config.workflow.transitions[PUSH_TRANSITION];
     if (push) map.in_review = titleCase(push);
-    if (map.brainstorming === undefined && map.planned !== undefined) map.brainstorming = map.planned;
     return map;
 }
 
@@ -309,7 +353,9 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
  */
 export function runLegacyImport(db: Ledger, roots?: string[]): LegacyImportResult[] {
     const results: LegacyImportResult[] = [];
+    const forgotten = forgottenRoots(db);
     for (const root of roots ?? discoverLegacyRoots()) {
+        if (forgotten[normalizePath(root)] !== undefined) continue;
         try {
             const known = findWorkspace(db, root);
             if (known !== undefined && wasImported(db, known, root)) {

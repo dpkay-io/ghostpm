@@ -99,16 +99,13 @@ async function main() {
         }
 
         case 'init': {
-            const { initMcpPm, findGitRoot } = await import('./init');
-            await initMcpPm();
-            const { setup } = await import('./setup');
-            await setup();
-            const { registerWorkspace } = await import('./registry');
-            const { loadConfig } = await import('./config');
-            const gitRoot = findGitRoot();
-            if (gitRoot) {
-                const config = loadConfig(gitRoot);
-                registerWorkspace(gitRoot, config.vendor);
+            const { openLedger } = await import('./ledger/db');
+            const { initWorkspace, describeInit } = await import('./workspace-commands');
+            const db = openLedger();
+            try {
+                console.log(describeInit(await initWorkspace(db, process.cwd())));
+            } finally {
+                db.close();
             }
             break;
         }
@@ -224,15 +221,24 @@ async function main() {
         }
 
         case 'unregister': {
-            const { unregisterWorkspace } = await import('./registry');
-            const { findGitRoot } = await import('./init');
-            const targetPath = process.argv[3] || findGitRoot() || process.cwd();
-            const resolved = path.resolve(targetPath);
-            if (unregisterWorkspace(resolved)) {
-                console.log(`Unregistered workspace: ${resolved}`);
-            } else {
-                console.error(`Workspace not found in registry: ${resolved}`);
-                process.exit(1);
+            const { firstPositional, hasFlag, FLAG_YES } = await import('./cli-args');
+            const { openLedger } = await import('./ledger/db');
+            const { findWorkspace, workspaceFootprint } = await import('./ledger/workspaces');
+            const { describeUnregister, unregisterWorkspace } = await import('./workspace-commands');
+            const target = path.resolve(firstPositional(args) ?? process.cwd());
+            const db = openLedger();
+            try {
+                const workspace = findWorkspace(db, target);
+                if (!workspace) {
+                    console.error(`No GhostPM workspace at ${target}.`);
+                    process.exitCode = EXIT_FAILURE;
+                } else if (!hasFlag(args, FLAG_YES)) {
+                    console.log(describeUnregister(workspace, workspaceFootprint(db, workspace.id), false));
+                } else {
+                    console.log(describeUnregister(workspace, unregisterWorkspace(db, workspace), true));
+                }
+            } finally {
+                db.close();
             }
             break;
         }

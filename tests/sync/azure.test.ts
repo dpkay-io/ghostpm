@@ -293,6 +293,51 @@ describe('AzureAdapter retry lookups', () => {
     });
 });
 
+describe('AzureAdapter.sampleProcess', () => {
+    const SAMPLE_DAYS = 90;
+    const sampled = (fields: { [name: string]: string }[]): string =>
+        JSON.stringify(fields.map((item, index) => ({ id: index + 1, fields: item })));
+
+    it('queries only this project, by recent change, with --org, --project and the WIQL as free text (spec §8.1)', async () => {
+        const az = fakeAz({ 'boards query': '[]' });
+        await adapter(az.run).sampleProcess(SAMPLE_DAYS);
+
+        const [call] = az.calls;
+        expect(call.command).toBe('az');
+        expect(call.args.slice(0, 7)).toEqual(['boards', 'query', '--org', freeText(ORG), '--project', freeText(PROJECT), '--wiql']);
+        const wiql = (call.args[7] as { freeText: string }).freeText;
+        expect(wiql).toContain("[System.TeamProject] = 'Widgets ''Next'''");
+        expect(wiql).toContain(`[System.ChangedDate] >= @Today - ${SAMPLE_DAYS}`);
+        expect(wiql).toContain('[System.WorkItemType]');
+        expect(call.args).not.toContain('--top');
+    });
+
+    it('bounds the sample by the vendor timeout', async () => {
+        const timeouts: (number | undefined)[] = [];
+        await adapter(async (_command, _args, options) => { timeouts.push(options?.timeoutMs); return '[]'; }).sampleProcess(SAMPLE_DAYS);
+        expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS]);
+    });
+
+    it('collects distinct states in sampled order and types by frequency', async () => {
+        const az = fakeAz({
+            'boards query': sampled([
+                { 'System.State': 'New', 'System.WorkItemType': 'Bug' },
+                { 'System.State': 'Active', 'System.WorkItemType': 'Task' },
+                { 'System.State': 'active', 'System.WorkItemType': 'Task' },
+                { 'System.State': 'Closed', 'System.WorkItemType': 'Task' },
+            ]),
+        });
+        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS)).toEqual({ states: ['New', 'Active', 'Closed'], workItemTypes: ['Task', 'Bug'] });
+    });
+
+    it('lets an az failure reach the caller, worded like every other az failure', async () => {
+        const thrown = await adapter(fakeAz({ 'boards query': azFailure(LOGGED_OUT_STDERR) }).run).sampleProcess(SAMPLE_DAYS)
+            .catch((e: unknown) => e) as SyncPausedError;
+        expect(thrown).toBeInstanceOf(SyncPausedError);
+        expect(thrown.reason).toBe(AZ_LOGGED_OUT);
+    });
+});
+
 describe('AzureAdapter call timeout', () => {
     it('bounds every az call by the vendor timeout', async () => {
         const timeouts: (number | undefined)[] = [];

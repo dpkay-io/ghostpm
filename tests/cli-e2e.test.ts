@@ -9,6 +9,8 @@ import { startSession, setSessionTask } from '../src/ledger/sessions';
 import { TaskRow, formatTaskId } from '../src/ledger/types';
 import { NOT_A_WORKSPACE } from '../src/surfaces/task-views';
 import { SINCE_HELP } from '../src/surfaces/since';
+import { LEGACY_CONFIG_FILE } from '../src/ledger/legacy-import';
+import { FLAG_YES } from '../src/cli-args';
 import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
@@ -123,5 +125,42 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         } finally {
             db.close();
         }
+    });
+
+    it('registers a GitHub workspace on init without writing .mcp-pm.yml', () => {
+        fs.mkdirSync(path.join(workspace, '.git'));
+        fs.writeFileSync(path.join(workspace, '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/acme/app.git\n');
+
+        const result = cli(['init']);
+
+        expect(result.status).toBe(EXIT_OK);
+        expect(result.stdout).toContain('Vendor:    github');
+        expect(fs.existsSync(path.join(workspace, LEGACY_CONFIG_FILE))).toBe(false);
+        expect(cli(['status']).stdout).toContain('github (https://github.com/acme/app.git)');
+    });
+
+    it('forgets a workspace only after --yes', () => {
+        seed();
+
+        const dryRun = cli(['unregister']);
+        expect(dryRun.status).toBe(EXIT_OK);
+        expect(dryRun.stdout).toContain(FLAG_YES);
+        expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
+
+        const confirmed = cli(['unregister', FLAG_YES]);
+        expect(confirmed.status).toBe(EXIT_OK);
+        expect(cli(['status']).stdout).toContain(NOT_A_WORKSPACE);
+    });
+
+    it('refuses to unregister a folder that is not a workspace', () => {
+        seed();
+        const elsewhere = path.join(root, 'elsewhere');
+        fs.mkdirSync(elsewhere);
+
+        const result = cli(['unregister', elsewhere, FLAG_YES]);
+
+        expect(result.status).toBe(EXIT_FAILURE);
+        expect(result.stderr).toContain('No GhostPM workspace at');
+        expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
     });
 });
