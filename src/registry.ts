@@ -8,8 +8,13 @@ export interface WorkspaceEntry {
     addedAt: string;
 }
 
+/** The one answer to "where is home": setup, doctor and the ledger must agree, and os.homedir() is what tests can isolate. */
+export function homeDir(): string {
+    return os.homedir();
+}
+
 export function getGhostpmHome(): string {
-    return process.env.GHOSTPM_HOME || path.join(os.homedir(), '.ghostpm');
+    return process.env.GHOSTPM_HOME || path.join(homeDir(), '.ghostpm');
 }
 
 function getRegistryPath(): string {

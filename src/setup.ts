@@ -4,6 +4,7 @@ import { findGitRoot } from './init';
 import { SKILL_CONTENT, PLUGIN_JSON } from './skill';
 import { openLedger, ledgerPath } from './ledger/db';
 import { chainStatusline, userSettingsPath } from './plugin-setup';
+import { homeDir } from './registry';
 
 interface SetupOptions {
     global?: boolean;
@@ -15,10 +16,6 @@ interface SetupOptions {
 const CLAUDE_DIR = '.claude';
 const SKILL_FILE = 'SKILL.md';
 const LEGACY_SKILL_FILE = 'ghostpm.md';
-
-function homeDir(): string {
-    return process.env.HOME || process.env.USERPROFILE || '';
-}
 
 function skillDir(options: SetupOptions, gitRoot: string | null): string | null {
     const base = options.global ? homeDir() : gitRoot;

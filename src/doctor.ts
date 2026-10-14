@@ -1,12 +1,12 @@
 // src/doctor.ts
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { Ledger, SCHEMA_VERSION, openLedgerReadOnly, schemaVersion } from './ledger/db';
 import { claudeConfigPath } from './ledger/legacy-import';
 import { normalizePath } from './ledger/workspaces';
 import { PLUGIN_ID } from './help';
+import { homeDir } from './registry';
 import { SERVER_NAME, packageVersion } from './package-info';
 import { userSettingsPath } from './plugin-setup';
 
@@ -116,7 +116,7 @@ const DUPLICATE_SERVER = `The plugin already provides the ${MCP_SERVER_KEY} MCP 
     + `A 1.4.0 copy also offers ${REMOVED_TOOLS.join(' and ')} and writes to the per-repo database the agent no longer reads.`;
 
 /** 1.4.0 ran `claude mcp add ghostpm -s user|local`: top-level mcpServers, or projects[path].mcpServers (Claude Code MCP docs). */
-function claudeJsonRegistrations(claude: ClaudeJson): Finding[] {
+function claudeJsonRegistrations(claude: ClaudeJson, platform: string): Finding[] {
     const findings: Finding[] = [];
     if (registersGhostpm(claude.mcpServers)) {
         findings.push({
@@ -133,14 +133,23 @@ function claudeJsonRegistrations(claude: ClaudeJson): Finding[] {
             code: FINDING_CLAUDE_JSON_REGISTRATION,
             message: `~/.claude.json registers a "${MCP_SERVER_KEY}" MCP server for ${projectPath}. ${DUPLICATE_SERVER}`,
             // Local scope is keyed by the project folder, so the removal runs from inside it.
-            fix: `cd "${projectPath}"; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+            fix: `cd ${quoteForShell(projectPath, platform)}; claude mcp remove ${MCP_SERVER_KEY} -s local`,
         });
     });
     return findings;
 }
 
+/**
+ * A path pasted into a shell. Paths are untrusted (a repo folder can be named anything), so
+ * single quotes: nothing inside them expands in PowerShell or in POSIX shells.
+ */
+export function quoteForShell(value: string, platform: string): string {
+    return platform === WINDOWS ? `'${value.split("'").join("''")}'` : `'${value.split("'").join("'\\''")}'`;
+}
+
 export function removeDirCommand(dir: string, platform: string): string {
-    return platform === WINDOWS ? `Remove-Item -Recurse -Force "${dir}"` : `rm -rf "${dir}"`;
+    // -LiteralPath: without it Remove-Item reads [ and ] in the folder name as wildcards.
+    return platform === WINDOWS ? `Remove-Item -Recurse -Force -LiteralPath ${quoteForShell(dir, platform)}` : `rm -rf ${quoteForShell(dir, platform)}`;
 }
 
 /** SKILL.md paths a 1.4.0 `setup` could have written: the home, then every project Claude Code or GhostPM knows. */
@@ -193,7 +202,7 @@ export function diagnose(probe: DiagnosisProbe): Finding[] {
     const findings: Finding[] = [];
     const stale = staleRegistration(readSettings(probe.settingsPath), probe);
     if (stale !== null) findings.push(stale);
-    findings.push(...claudeJsonRegistrations(parseClaudeJson(probe.claudeJson)));
+    findings.push(...claudeJsonRegistrations(parseClaudeJson(probe.claudeJson), probe.platform));
     findings.push(...staleSkills(probe.skills, probe.platform));
     const newer = newerLedger(probe);
     if (newer !== null) findings.push(newer);
@@ -224,7 +233,10 @@ function ledgerFacts(): { schema: number | null; workspacePaths: string[] } {
         let workspacePaths: string[] = [];
         try {
             workspacePaths = (db.prepare('SELECT path FROM workspaces').all() as { path: string }[]).map(row => row.path);
-        } catch { /* a schema this copy cannot read: skip the per-workspace skill check */ }
+        } catch {
+            // doctor must report on exactly the ledgers other commands refuse (older, newer, odd), so a
+            // table this copy cannot read only skips the per-workspace skill check; it never fails doctor.
+        }
         return { schema: schemaVersion(db), workspacePaths };
     } catch {
         // Not a SQLite file: nothing to compare.
@@ -253,7 +265,7 @@ export function machineProbe(): DiagnosisProbe {
     const ledger = ledgerFacts();
     const projects = Object.keys(parseClaudeJson(claudeJson).projects ?? {});
     const skills: SkillFile[] = [];
-    skillCandidates(os.homedir(), projects.concat(ledger.workspacePaths)).forEach(skillMd => {
+    skillCandidates(homeDir(), projects.concat(ledger.workspacePaths)).forEach(skillMd => {
         const content = readText(skillMd);
         if (content !== null) skills.push({ skillMd, content, pluginJson: readText(path.join(path.dirname(skillMd), SKILL_PLUGIN_JSON)) });
     });

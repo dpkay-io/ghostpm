@@ -4,6 +4,7 @@ import * as os from 'os';
 import { setup } from '../src/setup';
 import { statuslineCommand } from '../src/plugin-setup';
 import { removeTempDir } from './temp-dir';
+import { isolateHomes } from './ledger/helpers';
 
 // Mocking init also keeps cli.ts — and with it child_process — out of the test graph:
 // setup imports findGitRoot from init, and init imports runCli from cli. setup never
@@ -25,8 +26,7 @@ const PREVIOUS_STATUSLINE = 'claude-ticker';
 describe('setup', () => {
     let tmpDir: string;
     let userSettingsPath: string;
-    const origHome = process.env.HOME;
-    const origUserProfile = process.env.USERPROFILE;
+    let restoreHomes: () => void;
     const origGhostpmHome = process.env.GHOSTPM_HOME;
 
     const readJson = (file: string): any => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -45,16 +45,14 @@ describe('setup', () => {
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-setup-'));
         userSettingsPath = path.join(tmpDir, '.claude', 'settings.json');
-        process.env.HOME = tmpDir;
-        process.env.USERPROFILE = tmpDir;
+        restoreHomes = isolateHomes(tmpDir);
         process.env.GHOSTPM_HOME = path.join(tmpDir, '.ghostpm');
         jest.clearAllMocks();
         (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
     });
 
     afterEach(() => {
-        process.env.HOME = origHome;
-        process.env.USERPROFILE = origUserProfile;
+        restoreHomes();
         if (origGhostpmHome === undefined) delete process.env.GHOSTPM_HOME;
         else process.env.GHOSTPM_HOME = origGhostpmHome;
         removeTempDir(tmpDir);

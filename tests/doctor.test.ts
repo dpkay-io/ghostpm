@@ -4,10 +4,13 @@ import * as path from 'path';
 import { removeTempDir } from './temp-dir';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
-    FINDING_NEWER_LEDGER, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, removeDirCommand, skillCandidates,
+    FINDING_NEWER_LEDGER, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, quoteForShell, removeDirCommand, skillCandidates,
 } from '../src/doctor';
 import { PLUGIN_ID } from '../src/help';
-import { SCHEMA_VERSION } from '../src/ledger/db';
+import { userSettingsPath } from '../src/plugin-setup';
+import Database from 'better-sqlite3';
+import { SCHEMA_VERSION, ledgerPath } from '../src/ledger/db';
+import { homeDir } from '../src/registry';
 import { isolateHomes } from './ledger/helpers';
 
 const PLUGIN_ARGS = ['${CLAUDE_PLUGIN_ROOT}/dist/cli-main.js', 'serve'];
@@ -127,8 +130,8 @@ describe('diagnose', () => {
                 .filter(finding => finding.code === FINDING_CLAUDE_JSON_REGISTRATION)
                 .map(finding => finding.fix);
             expect(fixes).toEqual([
-                `cd "C:/work/app"; claude mcp remove ${MCP_SERVER_KEY} -s local`,
-                `cd "C:/work/site"; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+                `cd 'C:/work/app'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+                `cd 'C:/work/site'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
             ]);
         });
 
@@ -152,14 +155,14 @@ describe('diagnose', () => {
         it('flags a skill that still names removed tools, with the command that removes its folder', () => {
             const found = diagnose(probe({ skills: [{ skillMd: skillMd(), content: staleSkill }] })).filter(finding => finding.code === FINDING_STALE_SKILL);
             expect(found).toHaveLength(1);
-            expect(found[0].fix).toBe(`Remove-Item -Recurse -Force "${path.dirname(skillMd())}"`);
+            expect(found[0].fix).toBe(`Remove-Item -Recurse -Force -LiteralPath '${path.dirname(skillMd())}'`);
         });
 
         it('flags the skills-dir plugin that Phase 2 setup wrote, though its text names no removed tool (C45)', () => {
             const skills = [{ skillMd: skillMd(), content: '---\nname: ghostpm\n---\ncurrent text', pluginJson: SKILLS_DIR_PLUGIN }];
             const found = diagnose(probe({ skills })).filter(finding => finding.code === FINDING_STALE_SKILL);
             expect(found).toHaveLength(1);
-            expect(found[0].fix).toBe(`Remove-Item -Recurse -Force "${path.dirname(skillMd())}"`);
+            expect(found[0].fix).toBe(`Remove-Item -Recurse -Force -LiteralPath '${path.dirname(skillMd())}'`);
         });
 
         it('leaves a folder alone whose plugin.json names another plugin or is unreadable', () => {
@@ -169,7 +172,7 @@ describe('diagnose', () => {
         });
 
         it('uses rm outside Windows', () => {
-            expect(removeDirCommand('/home/dpk/.claude/skills/ghostpm', 'linux')).toBe('rm -rf "/home/dpk/.claude/skills/ghostpm"');
+            expect(removeDirCommand('/home/dpk/.claude/skills/ghostpm', 'linux')).toBe("rm -rf '/home/dpk/.claude/skills/ghostpm'");
         });
 
         it('leaves a skill alone when it names no removed tool', () => {
@@ -221,6 +224,75 @@ describe('diagnose', () => {
                 if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
                 restore();
             }
+        });
+    });
+
+    describe('quoting the paths it asks you to paste', () => {
+        const NASTY = 'C:/w/a $x `y` "q" it\'s [z]';
+
+        it('single-quotes for PowerShell and doubles an embedded quote', () => {
+            expect(quoteForShell(NASTY, 'win32')).toBe("'C:/w/a $x `y` \"q\" it''s [z]'");
+        });
+
+        it('single-quotes for POSIX and closes, escapes and reopens an embedded quote', () => {
+            expect(quoteForShell(NASTY, 'linux')).toBe("'C:/w/a $x `y` \"q\" it'\\''s [z]'");
+        });
+
+        it('uses the quoted, literal form in both removal commands', () => {
+            expect(removeDirCommand(NASTY, 'win32')).toBe(`Remove-Item -Recurse -Force -LiteralPath ${quoteForShell(NASTY, 'win32')}`);
+            expect(removeDirCommand(NASTY, 'linux')).toBe(`rm -rf ${quoteForShell(NASTY, 'linux')}`);
+        });
+
+        it('quotes the project folder in the local-scope fix on both platforms', () => {
+            const claudeJson = JSON.stringify({ projects: { [NASTY]: { mcpServers: { [MCP_SERVER_KEY]: {} } } } });
+            [ 'win32', 'linux' ].forEach(platform => {
+                const fix = diagnose(probe({ claudeJson, platform }))[0].fix;
+                expect(fix.startsWith(`cd ${quoteForShell(NASTY, platform)}`)).toBe(true);
+            });
+        });
+    });
+
+    describe('home is os.homedir() everywhere', () => {
+        it('ignores HOME and USERPROFILE', () => {
+            const restore = isolateHomes(path.join(home, 'real'));
+            process.env.HOME = path.join(home, 'env-home');
+            process.env.USERPROFILE = path.join(home, 'env-profile');
+            try {
+                expect(homeDir()).toBe(path.join(home, 'real'));
+                expect(userSettingsPath()).toBe(path.join(home, 'real', '.claude', 'settings.json'));
+            } finally {
+                restore();
+            }
+        });
+    });
+
+    describe('machineProbe on an odd ledger', () => {
+        const withScratchLedger = (write: (file: string) => void): ReturnType<typeof machineProbe> => {
+            const restore = isolateHomes(home);
+            const previous = process.env.GHOSTPM_HOME;
+            process.env.GHOSTPM_HOME = path.join(home, '.ghostpm');
+            try {
+                fs.mkdirSync(process.env.GHOSTPM_HOME, { recursive: true });
+                write(ledgerPath());
+                return machineProbe();
+            } finally {
+                if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
+                restore();
+            }
+        };
+
+        it('gives a null schema for a file that is not a database', () => {
+            expect(withScratchLedger(file => fs.writeFileSync(file, 'this is not sqlite, '.repeat(20))).ledgerSchema).toBeNull();
+        });
+
+        it('reports a newer schema, and then the update finding', () => {
+            const found = withScratchLedger(file => {
+                const db = new Database(file);
+                db.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+                db.close();
+            });
+            expect(found.ledgerSchema).toBe(SCHEMA_VERSION + 1);
+            expect(diagnose(found).map(finding => finding.code)).toEqual([FINDING_NEWER_LEDGER]);
         });
     });
 });

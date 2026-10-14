@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Ledger } from './ledger/db';
 import { getSetting, setSetting, SETTING_PREVIOUS_STATUSLINE } from './ledger/settings';
-import { getGhostpmHome } from './registry';
+import { getGhostpmHome, homeDir } from './registry';
 
 /** The CLI of the copy that is running: a plugin version's dist, or a global install's. */
 export const CLI_ENTRY_PATH = path.join(__dirname, 'cli-main.js');
@@ -18,8 +18,7 @@ const USER_SETTINGS_FILE = 'settings.json';
  * effect. Shared so chaining and restoring cannot end up pointing at different files.
  */
 export function userSettingsPath(): string {
-    const home = process.env.HOME || process.env.USERPROFILE || '';
-    return path.join(home, CLAUDE_DIR, USER_SETTINGS_FILE);
+    return path.join(homeDir(), CLAUDE_DIR, USER_SETTINGS_FILE);
 }
 
 interface Settings {

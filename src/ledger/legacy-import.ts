@@ -1,8 +1,7 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
-import { getWorkspaces } from '../registry';
+import { getWorkspaces, homeDir } from '../registry';
 import { loadConfig, McpPmConfig } from '../config';
 import { Ledger, write, nowIso } from './db';
 import { ensureWorkspace, findWorkspace, normalizePath, setWorkspaceVendor } from './workspaces';
@@ -63,7 +62,7 @@ export function vendorStateToPhase(state: string): Phase {
 }
 
 export function claudeConfigPath(): string {
-    return path.join(os.homedir(), CLAUDE_CONFIG_FILE);
+    return path.join(homeDir(), CLAUDE_CONFIG_FILE);
 }
 
 /** Registry entries plus ~/.claude.json project folders, keeping the ones that still have a legacy config. */
