@@ -295,12 +295,14 @@ describe('AzureAdapter retry lookups', () => {
 
 describe('AzureAdapter.sampleProcess', () => {
     const SAMPLE_DAYS = 90;
+    /** The command its caller wants a person to run once az works. */
+    const RETRY = 'ghostpm init';
     const sampled = (fields: { [name: string]: string }[]): string =>
         JSON.stringify(fields.map((item, index) => ({ id: index + 1, fields: item })));
 
     it('queries only this project, by recent change, with --org, --project and the WIQL as free text (spec §8.1)', async () => {
         const az = fakeAz({ 'boards query': '[]' });
-        await adapter(az.run).sampleProcess(SAMPLE_DAYS);
+        await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY);
 
         const [call] = az.calls;
         expect(call.command).toBe('az');
@@ -314,7 +316,7 @@ describe('AzureAdapter.sampleProcess', () => {
 
     it('bounds the sample by the vendor timeout', async () => {
         const timeouts: (number | undefined)[] = [];
-        await adapter(async (_command, _args, options) => { timeouts.push(options?.timeoutMs); return '[]'; }).sampleProcess(SAMPLE_DAYS);
+        await adapter(async (_command, _args, options) => { timeouts.push(options?.timeoutMs); return '[]'; }).sampleProcess(SAMPLE_DAYS, RETRY);
         expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS]);
     });
 
@@ -327,14 +329,27 @@ describe('AzureAdapter.sampleProcess', () => {
                 { 'System.State': 'Closed', 'System.WorkItemType': 'Task' },
             ]),
         });
-        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS)).toEqual({ states: ['New', 'Active', 'Closed'], workItemTypes: ['Task', 'Bug'] });
+        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY)).toEqual({ states: ['New', 'Active', 'Closed'], workItemTypes: ['Task', 'Bug'] });
     });
 
-    it('lets an az failure reach the caller, worded like every other az failure', async () => {
-        const thrown = await adapter(fakeAz({ 'boards query': azFailure(LOGGED_OUT_STDERR) }).run).sampleProcess(SAMPLE_DAYS)
-            .catch((e: unknown) => e) as SyncPausedError;
+    const sampleFailure = async (stderr: string): Promise<SyncPausedError> =>
+        await adapter(fakeAz({ 'boards query': azFailure(stderr) }).run).sampleProcess(SAMPLE_DAYS, RETRY).catch((e: unknown) => e) as SyncPausedError;
+
+    it('lets an az failure reach the caller, classified like every az failure but advising its own retry', async () => {
+        const thrown = await sampleFailure(LOGGED_OUT_STDERR);
         expect(thrown).toBeInstanceOf(SyncPausedError);
-        expect(thrown.reason).toBe(AZ_LOGGED_OUT);
+        expect(thrown.reason).toContain('az login');
+        expect(thrown.reason).toContain(`\`${RETRY}\``);
+        expect(thrown.reason).not.toContain('ghostpm sync');
+    });
+
+    it('blames only the project for a sample az cannot find: the sample names no work item type', async () => {
+        const thrown = await sampleFailure('ERROR: TF401232: Work item 42 does not exist, or you do not have permissions to read it.');
+        expect(thrown).toBeInstanceOf(SyncPausedError);
+        expect(thrown.reason).toContain(PROJECT);
+        expect(thrown.reason).not.toContain(TYPE);
+        expect(thrown.reason).not.toContain('ado_work_item_type');
+        expect(thrown.reason).toContain(`\`${RETRY}\``);
     });
 });
 

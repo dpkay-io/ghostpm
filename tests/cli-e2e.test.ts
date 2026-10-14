@@ -4,7 +4,7 @@ import * as path from 'path';
 import { spawnSync, SpawnSyncReturns } from 'child_process';
 import Database from 'better-sqlite3';
 import { openLedger, LEDGER_FILE } from '../src/ledger/db';
-import { ensureWorkspace } from '../src/ledger/workspaces';
+import { ensureWorkspace, normalizePath } from '../src/ledger/workspaces';
 import { createTask } from '../src/ledger/tasks';
 import { startSession, setSessionTask } from '../src/ledger/sessions';
 import { TaskRow, formatTaskId } from '../src/ledger/types';
@@ -180,6 +180,30 @@ describeBuilt('ghostpm CLI on the ledger', () => {
             expect(after.pragma('journal_mode', { simple: true })).toBe(DELETE_JOURNAL);
         } finally {
             after.close();
+        }
+        expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
+    });
+
+    it('unregisters a nested repo whose folder is gone, and never the repo around it (preview too)', () => {
+        fs.mkdirSync(path.join(workspace, '.git'));
+        seed();
+        const nested = path.join(workspace, 'nested');
+        fs.mkdirSync(path.join(nested, '.git'), { recursive: true });
+        expect(cli(['init'], nested).status).toBe(EXIT_OK);
+        fs.rmSync(nested, { recursive: true, force: true });
+
+        const preview = cli(['unregister', nested]);
+        expect(preview.status).toBe(EXIT_OK);
+        expect(preview.stdout).toContain(`ghostpm unregister "${normalizePath(nested)}" ${FLAG_YES}`);
+
+        const confirmed = cli(['unregister', nested, FLAG_YES]);
+        expect(confirmed.status).toBe(EXIT_OK);
+        expect(confirmed.stdout).toContain(`Forgot ${normalizePath(nested)}:`);
+        const db = openLedger(path.join(ghostpmHome, LEDGER_FILE));
+        try {
+            expect((db.prepare('SELECT path FROM workspaces').all() as { path: string }[]).map(row => row.path)).toEqual([normalizePath(workspace)]);
+        } finally {
+            db.close();
         }
         expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
     });

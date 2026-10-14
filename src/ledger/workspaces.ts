@@ -42,6 +42,11 @@ export function findWorkspace(db: Ledger, cwd: string): WorkspaceRow | undefined
     return getWorkspaceByPath(db, resolveWorkspaceRoot(cwd));
 }
 
+/** The workspace registered at exactly `folder`, with no git-root resolution: for a folder that may be gone. */
+export function workspaceAtPath(db: Ledger, folder: string): WorkspaceRow | undefined {
+    return getWorkspaceByPath(db, normalizePath(folder));
+}
+
 export function ensureWorkspace(db: Ledger, cwd: string): WorkspaceRow {
     const root = resolveWorkspaceRoot(cwd);
     const existing = getWorkspaceByPath(db, root);

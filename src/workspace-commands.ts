@@ -11,23 +11,28 @@ import {
     SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SyncPolicy,
     getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from './ledger/settings';
-import { WorkspaceFootprint, deleteWorkspace, ensureWorkspace, refreshWorkspaceRemote } from './ledger/workspaces';
+import {
+    WorkspaceFootprint, deleteWorkspace, ensureWorkspace, findWorkspace, refreshWorkspaceRemote, workspaceAtPath,
+} from './ledger/workspaces';
 import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
 import { AzureAdapter, AzureProcess } from './sync/azure';
 import { AzureIdentity, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
+import { SyncPausedError } from './sync/vendor';
 
 /** How far back init samples work items to learn the process template's states and types. */
 export const AZURE_SAMPLE_DAYS = 90;
 const NO_REMOTE = 'none';
 /** How init names a sync_policy the workspace never had. */
 const NOT_SET = 'not set';
+/** What a person runs again once whatever stopped init is fixed. */
+const INIT_COMMAND = 'ghostpm init';
 
 export type SniffAzure = (identity: AzureIdentity) => Promise<AzureProcess>;
 
 /** The real az, through the sync adapter's one WIQL path: free-text arguments and the vendor timeout. */
 const sampleAzureProcess: SniffAzure = identity =>
-    new AzureAdapter(identity.org, identity.project, DEFAULT_ADO_WORK_ITEM_TYPE, {}).sampleProcess(AZURE_SAMPLE_DAYS);
+    new AzureAdapter(identity.org, identity.project, DEFAULT_ADO_WORK_ITEM_TYPE, {}).sampleProcess(AZURE_SAMPLE_DAYS, INIT_COMMAND);
 
 export interface InitResult {
     workspace: WorkspaceRow;
@@ -61,8 +66,23 @@ function importLegacyFolder(db: Ledger, cwd: string, warnings: string[]): number
     }
 }
 
-/** Fills phase_state_map and ado_work_item_type from a sample of the project; a value already there always stays. */
+/** What init learns from an Azure DevOps sample, in the order it reports them. */
+const AZURE_SETTINGS = [SETTING_PHASE_STATE_MAP, SETTING_ADO_WORK_ITEM_TYPE];
+
+/** One piece of advice for any az failure: az's own (worded for init by the adapter), or fix it and run init again. */
+function sampleFailure(project: string, error: unknown): string {
+    if (error instanceof SyncPausedError) return `Could not sample work items in ${project}. ${error.reason}`;
+    return `Could not sample work items in ${project} (${(error as Error).message}). Fix that, then run \`${INIT_COMMAND}\`.`;
+}
+
+/**
+ * Fills phase_state_map and ado_work_item_type from a sample of the project. A value already there came from an
+ * earlier init, the 1.4.0 import or a person and always stays; when both are there, az is not asked at all.
+ */
 async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitResult): Promise<void> {
+    const missing = AZURE_SETTINGS.filter(key => getWorkspaceSetting(db, result.workspace.id, key) === undefined);
+    result.kept.push(...AZURE_SETTINGS.filter(key => missing.indexOf(key) < 0));
+    if (missing.length === 0) return;
     const identity = identityOf(result.workspace);
     if (identity === null || identity.vendor !== AZURE_DEVOPS) {
         result.warnings.push(`Could not read the Azure DevOps organization and project from the git remote (${result.workspace.git_remote ?? NO_REMOTE}).`);
@@ -73,21 +93,28 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
         // A network call: no transaction is open here (spec §5).
         sampled = await sniff(identity);
     } catch (error) {
-        result.warnings.push(`Could not sample work items in ${identity.project}; run \`ghostpm init\` again once this is fixed: ${(error as Error).message}`);
+        result.warnings.push(sampleFailure(identity.project, error));
         return;
     }
 
+    const noneChanged = (key: string): string =>
+        `No work items changed in the last ${AZURE_SAMPLE_DAYS} days in ${identity.project} to learn ${key} from.`;
+    const unrecognised = `None of the states sampled in ${identity.project} (${sampled.states.join(', ')}) reads as a GhostPM phase, `
+        + `so ${SETTING_PHASE_STATE_MAP} was not set: run \`ghostpm config set ${SETTING_PHASE_STATE_MAP} <phase>=<State>... `
+        + `--workspace "${result.workspace.path}"\`.`;
     const stateMap = phaseStateMapFrom(sampled.states);
-    const detected: [string, unknown][] = [
-        [SETTING_PHASE_STATE_MAP, Object.keys(stateMap).length > 0 ? stateMap : undefined],
-        [SETTING_ADO_WORK_ITEM_TYPE, sampled.workItemTypes.length > 0 ? sampled.workItemTypes[0] : undefined],
-    ];
-    for (const [key, value] of detected) {
-        // A value already there came from an earlier init, the 1.4.0 import or a person: never overwrite it.
-        if (getWorkspaceSetting(db, result.workspace.id, key) !== undefined) {
-            result.kept.push(key);
-        } else if (value === undefined) {
-            result.warnings.push(`No work items changed in the last ${AZURE_SAMPLE_DAYS} days to learn ${key} from.`);
+    // Each setting: what the sample says, or why it says nothing.
+    const learned: { [key: string]: [unknown, string] } = {
+        [SETTING_PHASE_STATE_MAP]: [
+            Object.keys(stateMap).length > 0 ? stateMap : undefined,
+            sampled.states.length === 0 ? noneChanged(SETTING_PHASE_STATE_MAP) : unrecognised,
+        ],
+        [SETTING_ADO_WORK_ITEM_TYPE]: [sampled.workItemTypes[0], noneChanged(SETTING_ADO_WORK_ITEM_TYPE)],
+    };
+    for (const key of missing) {
+        const [value, why] = learned[key];
+        if (value === undefined) {
+            result.warnings.push(why);
         } else {
             setWorkspaceSetting(db, result.workspace.id, key, value);
             result.applied.push(key);
@@ -123,13 +150,17 @@ export async function initWorkspace(db: Ledger, cwd: string, sniff: SniffAzure =
     return result;
 }
 
+/** `sync_policy was linked-only; now auto`. */
+const switched = (optedIn: { from: SyncPolicy | null }, now: SyncPolicy): string =>
+    `${SETTING_SYNC_POLICY} was ${optedIn.from ?? NOT_SET}; now ${now}`;
+
 /** What sync does here now, and how to change it: worded with the same hint every surface uses. */
 function syncLines(result: InitResult): string[] {
     const where = result.workspace.path;
     if (result.syncPolicy === SYNC_POLICY_OFF) return [`Sync:      ${SYNC_POLICY_OFF} (${syncOffHint(where)})`];
     const lines = [result.optedIn === null
         ? `Sync:      on (${SETTING_SYNC_POLICY} ${result.syncPolicy})`
-        : `Sync:      on (${SETTING_SYNC_POLICY} was ${result.optedIn.from ?? NOT_SET}; now ${result.syncPolicy})`];
+        : `Sync:      on (${switched(result.optedIn, result.syncPolicy)})`];
     if (result.progressComments === PROGRESS_COMMENTS_NONE) {
         lines.push(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE}); `
             + `\`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace "${where}"\` turns them on`);
@@ -148,8 +179,16 @@ export function describeInit(result: InitResult): string {
     if (result.applied.length > 0) lines.push(`Detected: ${result.applied.join(', ')}.`);
     if (result.kept.length > 0) lines.push(`Kept the existing ${result.kept.join(', ')} (change with \`ghostpm config set\`).`);
     result.warnings.forEach(warning => lines.push(`Warning: ${warning}`));
-    if (workspace.vendor === NO_VENDOR) lines.push('No GitHub or Azure DevOps remote: tasks stay local.');
-    else lines.push(...syncLines(result));
+    if (workspace.vendor !== NO_VENDOR) {
+        lines.push(...syncLines(result));
+        return lines.join('\n');
+    }
+    lines.push('No GitHub or Azure DevOps remote: tasks stay local.');
+    // Only init reads a remote added later, so the policy it set waits for the next init.
+    if (result.optedIn !== null) {
+        lines.push(`Sync:      waits for a remote (${switched(result.optedIn, result.syncPolicy)}): `
+            + `add a GitHub or Azure DevOps remote, then run \`${INIT_COMMAND}\` again.`);
+    }
     return lines.join('\n');
 }
 
@@ -164,12 +203,22 @@ export function unregisterWorkspace(db: Ledger, workspace: WorkspaceRow): Worksp
     });
 }
 
+/**
+ * The workspace `ghostpm unregister <folder>` names. An existing folder resolves as a session there would (to its git
+ * root). A folder that is gone matches only its own row: climbing to a parent's git root would pick another workspace.
+ */
+export function unregisterTarget(db: Ledger, folder: string): WorkspaceRow | undefined {
+    return fs.existsSync(folder) ? findWorkspace(db, folder) : workspaceAtPath(db, folder);
+}
+
 export function describeUnregister(workspace: WorkspaceRow, footprint: WorkspaceFootprint, deleted: boolean): string {
     const summary = `${footprint.tasks} task(s), ${footprint.events} event(s), ${footprint.vendorLinks} vendor link(s), `
         + `${footprint.outbox} queued vendor change(s) and ${footprint.sessions} session(s)`;
     if (deleted) {
+        // Every hook event (session start, prompt, tool calls) registers the folder it runs in.
         return `Forgot ${workspace.path}: ${summary}. Nothing was changed at the vendor. `
-            + 'The next session in this folder registers it again; `ghostpm init` there also brings back its 1.4.0 tasks, if it had any.';
+            + 'A Claude Code session in this folder, one already open included, registers it again as a new workspace on its '
+            + `next prompt or tool call; \`${INIT_COMMAND}\` there also turns sync on and brings back its 1.4.0 tasks, if it had any.`;
     }
     return `This deletes ${summary} recorded for ${workspace.path}. Nothing changes at the vendor, but queued changes that were never pushed are lost.\n`
         + `Run \`ghostpm unregister "${workspace.path}" ${FLAG_YES}\` to confirm.`;

@@ -2,6 +2,7 @@ import { CliArg, CliError, RunOptions, Runner, freeText, runCli } from '../cli';
 import { PhaseStateMap } from '../ledger/settings';
 import { vendorStateToPhase } from '../ledger/legacy-import';
 import { PHASES, Phase } from '../ledger/types';
+import { SYNC_COMMAND } from './schedule';
 import {
     DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf,
     stripMarkers,
@@ -54,12 +55,27 @@ const wiqlText = (text: string): string => `'${text.replace(WIQL_QUOTE, WIQL_ESC
 /** A WIQL date bound at or before `ms`, whatever time zone WIQL reads it in. */
 const wiqlDateFrom = (ms: number): string => wiqlText(new Date(ms - WIQL_LOOKBACK_MS).toISOString().slice(0, WIQL_DATE_LENGTH));
 
-export const AZ_MISSING = 'Azure CLI (az) was not found. Install it, or set GHOSTPM_AZ to its path, then run `ghostpm sync`.';
-export const AZ_LOGGED_OUT = 'Azure CLI is not logged in to Azure DevOps. Run `az login` (or `az devops login`), then `ghostpm sync`.';
-const azNotAuthenticated = (detail: string): string => `Azure DevOps refused the Azure CLI's credentials (${detail}). Run \`az login\` (or \`az devops login\`), then \`ghostpm sync\`.`;
-const azNotFound = (project: string, workItemType: string): string =>
-    `Azure DevOps does not know project "${project}" or work item type "${workItemType}". Check the remote and run: ghostpm config set ado_work_item_type <Type> --workspace <repo folder>, then \`ghostpm sync\`.`;
-const azRefused = (detail: string): string => `GhostPM will not run az this way (${detail}). Fix that, then run \`ghostpm sync\`.`;
+/**
+ * How an az failure is worded: the work item type the call named (none for a process sample, which filters by no
+ * type) and the command a person runs once it is fixed.
+ */
+interface Advice {
+    workItemType: string | null;
+    retry: string;
+}
+
+const SYNC_RETRY = `ghostpm ${SYNC_COMMAND}`;
+const azMissing = (retry: string): string => `Azure CLI (az) was not found. Install it, or set GHOSTPM_AZ to its path, then run \`${retry}\`.`;
+const azLoggedOut = (retry: string): string => `Azure CLI is not logged in to Azure DevOps. Run \`az login\` (or \`az devops login\`), then \`${retry}\`.`;
+export const AZ_MISSING = azMissing(SYNC_RETRY);
+export const AZ_LOGGED_OUT = azLoggedOut(SYNC_RETRY);
+const azNotAuthenticated = (detail: string, retry: string): string =>
+    `Azure DevOps refused the Azure CLI's credentials (${detail}). Run \`az login\` (or \`az devops login\`), then \`${retry}\`.`;
+const azNotFound = (project: string, advice: Advice): string => (advice.workItemType === null
+    ? `Azure DevOps does not know project "${project}". Check the git remote, then run \`${advice.retry}\`.`
+    : `Azure DevOps does not know project "${project}" or work item type "${advice.workItemType}". Check the remote and run: `
+        + `ghostpm config set ado_work_item_type <Type> --workspace <repo folder>, then \`${advice.retry}\`.`);
+const azRefused = (detail: string, retry: string): string => `GhostPM will not run az this way (${detail}). Fix that, then run \`${retry}\`.`;
 const noState = (phase: Phase): string =>
     `No Azure DevOps state is set for phase ${phase}. Run: ghostpm config set phase_state_map ${phase}=<State> --workspace <repo folder>`;
 
@@ -77,13 +93,13 @@ export interface AzureProcess {
 }
 
 /** `itemLevel` calls name one work item or PR: "does not exist" there means it is gone. Anywhere else it means the project or type is wrong. */
-function classify(error: unknown, itemLevel: boolean, project: string, workItemType: string): unknown {
+function classify(error: unknown, itemLevel: boolean, project: string, advice: Advice): unknown {
     if (!(error instanceof CliError)) return error;
-    if (error.refused) return new SyncPausedError(azRefused(error.message));
-    if (error.notFound) return new SyncPausedError(AZ_MISSING);
-    if (LOGGED_OUT.test(error.stderr)) return new SyncPausedError(AZ_LOGGED_OUT);
-    if (NOT_AUTHENTICATED.test(error.stderr)) return new SyncPausedError(azNotAuthenticated(error.message));
-    if (GONE.test(error.stderr)) return itemLevel ? new GoneError(error.message) : new SyncPausedError(azNotFound(project, workItemType));
+    if (error.refused) return new SyncPausedError(azRefused(error.message, advice.retry));
+    if (error.notFound) return new SyncPausedError(azMissing(advice.retry));
+    if (LOGGED_OUT.test(error.stderr)) return new SyncPausedError(azLoggedOut(advice.retry));
+    if (NOT_AUTHENTICATED.test(error.stderr)) return new SyncPausedError(azNotAuthenticated(error.message, advice.retry));
+    if (GONE.test(error.stderr)) return itemLevel ? new GoneError(error.message) : new SyncPausedError(azNotFound(project, advice));
     return error;
 }
 
@@ -120,16 +136,19 @@ export class AzureAdapter implements VendorAdapter {
         private readonly run: Runner = runCli,
     ) {}
 
-    private async azText(args: CliArg[], itemLevel = false): Promise<string> {
+    /** How the sync calls word an az failure. */
+    private readonly advice: Advice = { workItemType: this.workItemType, retry: SYNC_RETRY };
+
+    private async azText(args: CliArg[], itemLevel = false, advice: Advice = this.advice): Promise<string> {
         try {
             return await this.run(AZ, [...args, ...JSON_OUTPUT], TIMED);
         } catch (error) {
-            throw classify(error, itemLevel, this.project, this.workItemType);
+            throw classify(error, itemLevel, this.project, advice);
         }
     }
 
-    private async az<T>(args: CliArg[], itemLevel = false): Promise<T> {
-        return JSON.parse(await this.azText(args, itemLevel)) as T;
+    private async az<T>(args: CliArg[], itemLevel = false, advice: Advice = this.advice): Promise<T> {
+        return JSON.parse(await this.azText(args, itemLevel, advice)) as T;
     }
 
     private orgArgs(): CliArg[] {
@@ -209,13 +228,15 @@ export class AzureAdapter implements VendorAdapter {
     }
 
     /** This project's work items matching every condition. */
-    private async query(conditions: string[], orderBy: string, fields: readonly string[] = QUERY_FIELDS): Promise<AzWorkItem[]> {
+    private async query(
+        conditions: string[], orderBy: string, fields: readonly string[] = QUERY_FIELDS, advice: Advice = this.advice,
+    ): Promise<AzWorkItem[]> {
         const wiql = `SELECT ${fields.map(field => `[${field}]`).join(', ')} FROM workitems`
             + ` WHERE ${[`[${FIELD.project}] = ${wiqlText(this.project)}`, ...conditions].join(' AND ')}`
             + ` ORDER BY ${orderBy}`;
         const result = await this.az<AzWorkItem[] | { items?: AzWorkItem[] }>([
             'boards', 'query', ...this.orgArgs(), '--project', freeText(this.project), '--wiql', freeText(wiql),
-        ]);
+        ], false, advice);
         return Array.isArray(result) ? result : result.items ?? [];
     }
 
@@ -223,9 +244,14 @@ export class AzureAdapter implements VendorAdapter {
         return this.az<AzWorkItem>(['boards', 'work-item', 'show', ...this.orgArgs(), '--id', remoteId], true);
     }
 
-    /** The states and work item types of the items changed in the last `days` days, for `ghostpm init`. Throws when az fails. */
-    async sampleProcess(days: number): Promise<AzureProcess> {
-        const items = await this.query([`[${FIELD.changed}] >= ${TODAY_MACRO} - ${days}`], `[${FIELD.changed}] DESC`, SAMPLE_FIELDS);
+    /**
+     * The states and work item types of the items changed in the last `days` days, for `ghostpm init`. Throws when az
+     * fails, worded to run `retry` once that is fixed.
+     */
+    async sampleProcess(days: number, retry: string): Promise<AzureProcess> {
+        const items = await this.query(
+            [`[${FIELD.changed}] >= ${TODAY_MACRO} - ${days}`], `[${FIELD.changed}] DESC`, SAMPLE_FIELDS, { workItemType: null, retry },
+        );
         const states: string[] = [];
         const typeCounts = new Map<string, number>();
         for (const item of items) {
@@ -287,7 +313,7 @@ export class AzureAdapter implements VendorAdapter {
         try {
             return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'], TIMED)).trim();
         } catch (error) {
-            throw classify(error, false, this.project, this.workItemType);
+            throw classify(error, false, this.project, this.advice);
         }
     }
 

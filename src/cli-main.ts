@@ -223,14 +223,14 @@ async function main() {
         case 'unregister': {
             const { firstPositional, hasFlag, FLAG_YES } = await import('./cli-args');
             const { openLedger, openReader } = await import('./ledger/db');
-            const { findWorkspace, workspaceFootprint } = await import('./ledger/workspaces');
-            const { describeUnregister, unregisterWorkspace } = await import('./workspace-commands');
+            const { workspaceFootprint } = await import('./ledger/workspaces');
+            const { describeUnregister, unregisterTarget, unregisterWorkspace } = await import('./workspace-commands');
             const target = path.resolve(firstPositional(args) ?? process.cwd());
             const confirmed = hasFlag(args, FLAG_YES);
             // The preview only reads: it never creates, migrates or locks the ledger.
             const db = confirmed ? openLedger() : openReader();
             try {
-                const workspace = findWorkspace(db, target);
+                const workspace = unregisterTarget(db, target);
                 if (!workspace) {
                     console.error(`No GhostPM workspace at ${target}.`);
                     process.exitCode = EXIT_FAILURE;

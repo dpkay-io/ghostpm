@@ -64,6 +64,19 @@ export function clonedRepo(parent: string, name: string, remote: string = GITHUB
     return root;
 }
 
+/**
+ * A linked worktree of the repository at `main`, as git 2.28 lays it out: `<worktree>/.git` is a file naming
+ * `<main>/.git/worktrees/<name>`, whose `commondir` leads back to `<main>/.git`.
+ */
+export function linkedWorktree(main: string, worktree: string, name: string = path.basename(worktree)): string {
+    const gitDir = path.join(main, '.git', 'worktrees', name);
+    fs.mkdirSync(gitDir, { recursive: true });
+    fs.writeFileSync(path.join(gitDir, 'commondir'), '../..\n');
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${gitDir}\n`);
+    return worktree;
+}
+
 export function outboxRows(db: Ledger, taskId: number): OutboxRow[] {
     return db.prepare('SELECT * FROM outbox WHERE task_id = ? ORDER BY id').all(taskId) as OutboxRow[];
 }

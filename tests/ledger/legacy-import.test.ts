@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { tempLedger, TempLedger, eventKinds, isolateHomes, outboxRows, LEGACY_GITHUB_CONFIG } from './helpers';
+import { tempLedger, TempLedger, eventKinds, isolateHomes, linkedWorktree, outboxRows, LEGACY_GITHUB_CONFIG } from './helpers';
 import { Db } from '../../src/db';
 import { listTasks, getVendorLink, insertTaskRow, insertVendorLink } from '../../src/ledger/tasks';
 import { ensureWorkspace, getWorkspace, normalizePath, setWorkspaceVendor } from '../../src/ledger/workspaces';
@@ -71,11 +71,7 @@ describe('legacy import', () => {
 
     /** A linked worktree of `main` with its own 1.4.0 config and cache: it resolves to main's workspace. */
     const createLegacyWorktree = (main: string): string => {
-        const gitDir = path.join(main, '.git', 'worktrees', WORKTREE_NAME);
-        fs.mkdirSync(gitDir, { recursive: true });
-        fs.writeFileSync(path.join(gitDir, 'commondir'), '../..\n');
-        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-legacy-wt-'));
-        fs.writeFileSync(path.join(root, '.git'), `gitdir: ${gitDir}\n`);
+        const root = linkedWorktree(main, fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-legacy-wt-')), WORKTREE_NAME);
         fs.writeFileSync(path.join(root, LEGACY_CONFIG_FILE), LEGACY_GITHUB_CONFIG, 'utf8');
         const legacy = new Db(root);
         legacy.upsertTask({ id: '7', title: 'Worktree only', state: 'open' });
