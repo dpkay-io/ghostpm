@@ -150,6 +150,15 @@ BUILT('the staged real package', () => {
             .forEach(file => expect(fs.existsSync(path.join(stage, file))).toBe(true));
     });
 
+    it('names the shrinkwrap root as package.json does: name, version and license', () => {
+        const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+        const shrinkwrap = JSON.parse(fs.readFileSync(path.join(out, 'release', SHRINKWRAP), 'utf8'));
+        const identity = { name: manifest.name, version: manifest.version };
+
+        expect(shrinkwrap).toMatchObject(identity);
+        expect(shrinkwrap.packages['']).toMatchObject({ ...identity, license: manifest.license });
+    });
+
     it('leaves out development files and the marketplace', () => {
         const stage = path.join(out, 'release');
         ['src', 'tests', 'package-lock.json', 'tsconfig.json', '.claude-plugin/marketplace.json'].forEach(file =>
