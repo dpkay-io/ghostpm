@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 const MAX_BUFFER = 10 * 1024 * 1024;
-const IS_WINDOWS = process.platform === 'win32';
+export const IS_WINDOWS = process.platform === 'win32';
 const WIN_EXECUTABLE_EXTS = new Set(['.exe', '.cmd', '.bat', '.com']);
 const BATCH_EXTS = new Set(['.cmd', '.bat']);
 /** An override ending in .js runs under this node: an argv-safe stand-in for a CLI on Windows. */
@@ -25,7 +25,7 @@ const CMD_SWITCHES = ['/d', '/v:off', '/s', '/c'];
 /** What cmd.exe passes through untouched: no quotes, metacharacters, whitespace or leading @. */
 const CMD_SAFE_TOKEN = /^[A-Za-z0-9_.:/-]+$/;
 /** Characters cmd.exe acts on even inside double quotes. */
-const UNSAFE_IN_QUOTES = /["%!\r\n]/;
+export const UNSAFE_IN_QUOTES = /["%!\r\n]/;
 const ARG_DIR_PREFIX = 'ghostpm-args-';
 const argFile = (index: number): string => `arg${index}.txt`;
 const AT_FILE_PREFIX = '@';
@@ -89,7 +89,7 @@ const textOf = (arg: CliArg): string => (typeof arg === 'string' ? arg : arg.fre
 const resolvedCommands = new Map<string, string>();
 
 /** The override if set; else on Windows the first executable `where.exe` finds (cached once found). */
-function resolveCommand(command: string): string {
+export function resolveCommand(command: string): string {
     const envName = COMMAND_OVERRIDE_ENV[command];
     const override = envName === undefined ? undefined : process.env[envName];
     if (override) {

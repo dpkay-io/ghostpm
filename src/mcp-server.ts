@@ -52,6 +52,8 @@ export const OPENABLE_PROTOCOLS: ReadonlySet<string> = new Set(["http:", "https:
  */
 const WINDOWS_QUOTED = '"';
 const WINDOWS_URL_HANDLER = "url.dll,FileProtocolHandler";
+const MACOS_OPENER = "open";
+const XDG_OPENER = "xdg-open";
 /** What update_task says about a publish request, by what the ledger did with it. */
 const PUBLISH_NOTES: Record<ProjectionResult, string> = {
     no_vendor: 'not published: this workspace has no GitHub or Azure DevOps remote',
@@ -124,7 +126,8 @@ function openableLink(raw: string): string {
     if (!OPENABLE_PROTOCOLS.has(url.protocol)) {
         throw new Error(`Only http and https links can be opened; refusing a ${url.protocol} link.`);
     }
-    // The URL parser silently drops tabs and newlines; a bidi override disguises where the link leads.
+    // The URL parser silently drops tabs and newlines; a bidi override disguises where the link leads. zod's url()
+    // hands over the trimmed input, so this sees the link without leading or trailing whitespace and controls.
     if (cleanText(raw) !== raw) throw new Error("Refusing a link that contains control characters.");
     if (url.username !== "" || url.password !== "") {
         throw new Error("Refusing a link with a user name or password in it: it can disguise the real host.");
@@ -141,7 +144,7 @@ export interface Opener {
 /** The command that opens `link`, run without a shell; on Windows rundll32 from System32, never one planted on PATH. */
 export function openerFor(link: string, platform: NodeJS.Platform = process.platform): Opener {
     if (platform === "win32") return { file: systemTool("rundll32.exe"), args: [WINDOWS_URL_HANDLER, link] };
-    return { file: platform === "darwin" ? "open" : "xdg-open", args: [link] };
+    return { file: platform === "darwin" ? MACOS_OPENER : XDG_OPENER, args: [link] };
 }
 
 export class PmServer {
@@ -369,7 +372,7 @@ export class PmServer {
                     await execFileAsync(file, args);
                     return text('Attachment opened successfully in local browser.');
                 } catch (error) {
-                    return text(`Failed to open attachment: ${(error as Error).message}`);
+                    return failure(new Error(`Failed to open attachment: ${(error as Error).message}`));
                 }
             },
         );

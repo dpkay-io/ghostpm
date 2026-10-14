@@ -194,6 +194,13 @@ describe('mcp server on the ledger', () => {
         expect(child_process.execFile).toHaveBeenCalled();
     });
 
+    it('reports a launch that failed as an error', async () => {
+        mockExecFile(new Error('no handler for https'));
+        const failed = await client.callTool({ name: 'open_attachment', arguments: { url: 'https://example.invalid/x' } }) as { isError?: boolean; content: { text: string }[] };
+        expect(failed.isError).toBe(true);
+        expect(failed.content[0].text).toContain('Failed to open attachment: no handler for https');
+    });
+
     it('opens a vendor URL with shell metacharacters through the platform opener, never through a shell', async () => {
         mockExecFile(null);
         // A vendor-supplied URL (spec §8.9) can carry '&'; a shell-parsed cmd.exe form would

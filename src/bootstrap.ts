@@ -1,15 +1,19 @@
-import { execFileSync } from 'child_process';
+import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGhostpmHome } from './registry';
 import { BINDING_FILE, bootstrappedBindingPath } from './ledger/binding';
+import { IS_WINDOWS, UNSAFE_IN_QUOTES, resolveCommand } from './cli';
 
 const PACKAGE = 'better-sqlite3';
+const NPM = 'npm';
 export const BUILD_DIR = 'native-build';
 const BUILT_ADDON = path.join('node_modules', PACKAGE, 'build', 'Release', BINDING_FILE);
 const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+/** cmd.exe cannot start in a UNC folder: it falls back to the Windows folder, where `--prefix .` would then point. */
+const UNC_PREFIX = '\\\\';
 /**
- * `shell: true` is unavoidable (npm is a .cmd shim on Windows, which execFile cannot start),
+ * A shell is unavoidable (npm is a .cmd shim on Windows, which execFile cannot start),
  * so every argument must be inert to cmd.exe and sh: no spaces, & | < > ^ % ( ) or quotes.
  */
 export const SAFE_NPM_ARG = /^[A-Za-z0-9@._\/=-]+$/;
@@ -38,9 +42,16 @@ export function assertSafeNpmArgs(args: string[]): void {
     if (unsafe.length > 0) throw new Error(`Refusing to pass ${JSON.stringify(unsafe)} to npm through a shell.`);
 }
 
-const runNpm: NpmRunner = (args, cwd) => {
+/**
+ * One command line, never an args array beside a shell (Node 24 deprecates that, DEP0190). On Windows npm goes by the
+ * absolute path where.exe finds on PATH, quoted, so cmd.exe never runs an npm planted in the working folder; elsewhere
+ * resolveCommand answers the bare name, which sh looks up on PATH only.
+ */
+export const runNpm: NpmRunner = (args, cwd) => {
     assertSafeNpmArgs(args);
-    execFileSync('npm', args, { cwd, stdio: 'inherit', shell: true });
+    const npm = resolveCommand(NPM);
+    if (UNSAFE_IN_QUOTES.test(npm)) throw new Error(`Refusing to run npm from ${npm}: cmd.exe would reinterpret that path.`);
+    execSync([`"${npm}"`, ...args].join(' '), { cwd, stdio: 'inherit' });
 };
 
 /**
@@ -51,6 +62,9 @@ const runNpm: NpmRunner = (args, cwd) => {
  */
 export function bootstrapBinding(run: NpmRunner = runNpm, home: string = getGhostpmHome()): string {
     const buildDir = path.join(home, BUILD_DIR);
+    if (IS_WINDOWS && buildDir.startsWith(UNC_PREFIX)) {
+        throw new Error(`The GhostPM home ${home} is on a network share, where cmd.exe cannot run npm. Set GHOSTPM_HOME to a local folder and run \`ghostpm bootstrap\` again.`);
+    }
     fs.mkdirSync(buildDir, { recursive: true });
     run(npmInstallArgs(installedAddonVersion()), buildDir);
 
