@@ -4,7 +4,6 @@ import * as path from 'path';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
-const MAX_COL_WIDTH = 50;
 const EXIT_FAILURE = 1;
 
 function printHelp() {
@@ -36,19 +35,6 @@ Quick start:
   ghostpm init`;
 
     console.log(help);
-}
-
-function truncate(s: string, max: number): string {
-    if (s.length <= max) return s;
-    return s.slice(0, max - 1) + '…';
-}
-
-function relativeTime(isoDate: string): string {
-    const seconds = Math.round((Date.now() - new Date(isoDate).getTime()) / 1000);
-    if (seconds < 60) return `${seconds}s ago`;
-    if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
-    return `${Math.round(seconds / 86400)}d ago`;
 }
 
 async function main() {
@@ -165,28 +151,20 @@ async function main() {
         }
 
         case 'tasks': {
-            const { Engine } = await import('./engine');
-            const engine = new Engine();
-            const tasks = engine.getDb().getTasks();
-            const config = engine.getConfig();
-            const cols = config.views.list_columns;
-
-            if (tasks.length === 0) {
-                console.log('No tasks cached. Run `ghostpm sync` to fetch from remote.');
-                break;
-            }
-
-            const widths = cols.map(col =>
-                Math.min(MAX_COL_WIDTH,
-                    Math.max(col.length, ...tasks.map(t => String((t as any)[col] ?? '').length))
-                )
-            );
-            const pad = (s: string, w: number) => truncate(s, w) + ' '.repeat(Math.max(0, w - truncate(s, w).length));
-
-            console.log(cols.map((c, i) => pad(c.toUpperCase(), widths[i])).join('  '));
-            console.log(widths.map(w => '─'.repeat(w)).join('  '));
-            for (const task of tasks) {
-                console.log(cols.map((c, i) => pad(String((task as any)[c] ?? ''), widths[i])).join('  '));
+            const { hasFlag, FLAG_ALL } = await import('./cli-args');
+            const { openReader } = await import('./ledger/db');
+            const { findWorkspace } = await import('./ledger/workspaces');
+            const { renderTaskList, NOT_A_WORKSPACE } = await import('./surfaces/task-views');
+            const db = openReader();
+            try {
+                if (hasFlag(args, FLAG_ALL)) {
+                    console.log(renderTaskList(db, undefined));
+                } else {
+                    const workspace = findWorkspace(db, process.cwd());
+                    console.log(workspace ? renderTaskList(db, workspace.id) : NOT_A_WORKSPACE);
+                }
+            } finally {
+                db.close();
             }
             break;
         }
@@ -201,53 +179,17 @@ async function main() {
         }
 
         case 'status': {
-            const { findGitRoot } = await import('./init');
-            const fs = await import('fs');
-            const gitRoot = findGitRoot();
-            if (!gitRoot) {
-                console.error('Not a git repository.');
-                process.exit(1);
+            const { openReader, ledgerPath } = await import('./ledger/db');
+            const { findWorkspace } = await import('./ledger/workspaces');
+            const { renderStatus, NOT_A_WORKSPACE } = await import('./surfaces/task-views');
+            const ledgerFile = ledgerPath();
+            const db = openReader(ledgerFile);
+            try {
+                const workspace = findWorkspace(db, process.cwd());
+                console.log(workspace ? renderStatus(db, workspace, ledgerFile) : NOT_A_WORKSPACE);
+            } finally {
+                db.close();
             }
-
-            const configPath = path.join(gitRoot, '.mcp-pm.yml');
-            if (!fs.existsSync(configPath)) {
-                console.log('GhostPM not initialized. Run `ghostpm init`.');
-                break;
-            }
-
-            const dbPath = path.join(gitRoot, '.mcp-pm.db');
-            if (!fs.existsSync(dbPath)) {
-                const { loadConfig } = await import('./config');
-                const config = loadConfig();
-                console.log(`Vendor:   ${config.vendor}`);
-                console.log(`Config:   ${configPath}`);
-                console.log('Database: not yet created (run `ghostpm sync`)');
-                break;
-            }
-
-            const { Engine } = await import('./engine');
-            const engine = new Engine();
-            const state = engine.getProjectState();
-            const db = engine.getDb();
-            const pending = db.getPendingOutboxItems();
-            const conflicts = db.getConflictedOutboxItems();
-            const summary = engine.getSprintSummary(state.activeSprint?.name);
-            const sprints = engine.getAvailableSprints();
-
-            console.log(`Vendor:   ${state.vendor}`);
-            console.log(`User:     ${state.currentUser || '(not detected)'}`);
-            console.log(`Config:   ${configPath}`);
-            console.log(`Sprint:   ${state.activeSprint?.name || '(none)'}`);
-            if (sprints.length > 0) {
-                console.log(`Sprints:  ${sprints.join(', ')}`);
-            }
-            console.log(`Tasks:    ${summary.total} total` +
-                (Object.keys(summary.byState).length
-                    ? ` (${Object.entries(summary.byState).map(([s, n]) => `${n} ${s}`).join(', ')})`
-                    : ''));
-            console.log(`Outbox:   ${pending.length} pending, ${conflicts.length} conflicts`);
-            console.log(`Synced:   ${state.lastSync ? `${state.lastSync} (${relativeTime(state.lastSync)})` : 'never'}`);
-            db.close();
             break;
         }
 

@@ -148,3 +148,17 @@ export const ANSI = {
 export function cursorTo(row: number): string {
     return `${CSI}${row};1H`;
 }
+
+const COLUMN_GAP = '  ';
+const TRAILING_SPACE = /\s+$/;
+
+/** Left-aligned columns. Cells longer than maxCellWidth are truncated; the last column is never padded. */
+export function alignColumns(rows: string[][], maxCellWidth: number): string[] {
+    const cells = rows.map(row => row.map(cell => truncate(cell, maxCellWidth)));
+    const widths: number[] = [];
+    cells.forEach(row => row.forEach((cell, index) => { widths[index] = Math.max(widths[index] ?? 0, visibleLength(cell)); }));
+    return cells.map(row => row
+        .map((cell, index) => (index === row.length - 1 ? cell : padRight(cell, widths[index])))
+        .join(COLUMN_GAP)
+        .replace(TRAILING_SPACE, ''));
+}

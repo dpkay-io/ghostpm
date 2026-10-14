@@ -7,6 +7,7 @@ import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask } from '../src/ledger/tasks';
 import { startSession, setSessionTask } from '../src/ledger/sessions';
 import { TaskRow, formatTaskId } from '../src/ledger/types';
+import { NOT_A_WORKSPACE } from '../src/surfaces/task-views';
 import { SINCE_HELP } from '../src/surfaces/since';
 import { removeTempDir } from './temp-dir';
 
@@ -92,5 +93,35 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         const missing = cli(['standup', '--since']);
         expect(missing.status).toBe(EXIT_FAILURE);
         expect(missing.stderr).toContain('--since needs a value.');
+    });
+
+    it('lists this workspace tasks and status from the ledger', () => {
+        const task = seed();
+
+        const tasks = cli(['tasks']);
+        expect(tasks.status).toBe(EXIT_OK);
+        expect(tasks.stdout).toContain(`${formatTaskId(task.id)}`);
+        expect(tasks.stdout).toContain(TASK_TITLE);
+
+        const status = cli(['status']);
+        expect(status.status).toBe(EXIT_OK);
+        expect(status.stdout).toContain('Tasks:     1 total (1 in_progress)');
+    });
+
+    it('says a folder is not a workspace instead of registering it', () => {
+        seed();
+        const elsewhere = path.join(root, 'elsewhere');
+        fs.mkdirSync(elsewhere);
+
+        const result = cli(['status'], elsewhere);
+
+        expect(result.status).toBe(EXIT_OK);
+        expect(result.stdout).toContain(NOT_A_WORKSPACE);
+        const db = openLedger(path.join(ghostpmHome, LEDGER_FILE));
+        try {
+            expect(db.prepare('SELECT COUNT(*) AS n FROM workspaces').get()).toEqual({ n: 1 });
+        } finally {
+            db.close();
+        }
     });
 });

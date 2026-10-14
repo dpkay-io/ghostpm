@@ -21,3 +21,5 @@ export function flagValue(args: readonly string[], name: string): string | undef
     }
     return undefined;
 }
+
+export const FLAG_ALL = '--all';

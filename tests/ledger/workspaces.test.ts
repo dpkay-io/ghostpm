@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { tempLedger, TempLedger } from './helpers';
-import { normalizePath, resolveWorkspaceRoot, ensureWorkspace, getWorkspace, setWorkspaceVendor } from '../../src/ledger/workspaces';
+import { normalizePath, resolveWorkspaceRoot, ensureWorkspace, findWorkspace, getWorkspace, setWorkspaceVendor } from '../../src/ledger/workspaces';
 
 describe('workspaces', () => {
     let ledger: TempLedger;
@@ -97,6 +97,19 @@ describe('workspaces', () => {
             const ws = ensureWorkspace(ledger.db, root);
             setWorkspaceVendor(ledger.db, ws.id, 'azure_devops');
             expect(getWorkspace(ledger.db, ws.id)?.vendor).toBe('azure_devops');
+        });
+    });
+
+    describe('findWorkspace', () => {
+        it('finds an existing workspace from any folder inside it and never inserts one', () => {
+            fs.mkdirSync(path.join(root, '.git'));
+            const sub = path.join(root, 'sub');
+            fs.mkdirSync(sub);
+            expect(findWorkspace(ledger.db, sub)).toBeUndefined();
+            expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM workspaces').get()).toEqual({ n: 0 });
+
+            const created = ensureWorkspace(ledger.db, root);
+            expect(findWorkspace(ledger.db, sub)?.id).toBe(created.id);
         });
     });
 });

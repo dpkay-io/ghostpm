@@ -1,5 +1,5 @@
 import { fitToScreen } from '../../src/surfaces/dashboard';
-import { ELLIPSIS, formatClock, formatDateTime, padLeft, padRight, truncate, visibleLength, workspaceLabel, NO_WORKSPACE, cleanText } from '../../src/surfaces/text';
+import { ELLIPSIS, formatClock, formatDateTime, padLeft, padRight, truncate, visibleLength, workspaceLabel, NO_WORKSPACE, cleanText, alignColumns } from '../../src/surfaces/text';
 
 describe('text helpers', () => {
     it('leaves text that fits alone', () => {
@@ -82,3 +82,12 @@ describe('terminal columns and control characters (I2)', () => {
     });
 });
 
+
+describe('alignColumns', () => {
+    it('aligns every column but the last, truncating long cells', () => {
+        expect(alignColumns([['ID', 'TITLE', 'X'], ['T1', 'a much longer title', '']], 10)).toEqual([
+            'ID  TITLE       X',
+            `T1  a much lo${ELLIPSIS}`,
+        ]);
+    });
+});

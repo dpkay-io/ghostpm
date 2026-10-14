@@ -22,10 +22,11 @@ import {
 } from "./ledger/settings";
 import { runLegacyImport } from "./ledger/legacy-import";
 import { ProjectionResult, publishTask } from "./ledger/projection";
-import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
+import { INTENTS, PHASES, TaskRow, WorkspaceRow, formatTaskId } from "./ledger/types";
 import { SYNC_LOG_FILE } from "./hook/log";
 import { defaultSyncDeps, startSyncRunner, sweepStaleArgDirs } from "./sync/runner";
 import { describeSync } from "./surfaces/sync-health";
+import { TASK_COLUMNS, phaseSummary, taskCell } from "./surfaces/task-views";
 import { dashboardText } from "./surfaces/dashboard";
 
 const execFileAsync = promisify(execFile);
@@ -36,8 +37,6 @@ export const ALL_SPRINTS = "all";
 export const CLEAR_SPRINT = "__clear__";
 export const CURRENT_USER_REF = "@me";
 
-const TASK_COLUMNS = ["id", "phase", "title", "assignee", "remote"] as const;
-type TaskColumn = typeof TASK_COLUMNS[number];
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
@@ -151,28 +150,9 @@ export class PmServer {
         return activeTaskFor(this.db, this.sessionId, branch, workspaceId);
     }
 
-    private phaseSummary(tasks: TaskRow[]): string {
-        const counts = new Map<Phase, number>();
-        for (const task of tasks) counts.set(task.phase, (counts.get(task.phase) ?? 0) + 1);
-        return PHASES.filter(phase => counts.has(phase)).map(phase => `${counts.get(phase)} ${phase}`).join(', ');
-    }
-
-    private cell(task: TaskRow, column: TaskColumn): string {
-        switch (column) {
-            case 'id': return formatTaskId(task.id);
-            case 'phase': return task.phase;
-            case 'title': return task.title;
-            case 'assignee': return task.assignee ?? '';
-            case 'remote': {
-                const link = getVendorLink(this.db, task.id);
-                return link ? `#${link.remote_id}` : '';
-            }
-        }
-    }
-
     private renderTable(tasks: TaskRow[]): string {
         const header = `| ${TASK_COLUMNS.join(' | ')} |\n| ${TASK_COLUMNS.map(() => '---').join(' | ')} |\n`;
-        const rows = tasks.map(task => `| ${TASK_COLUMNS.map(column => this.cell(task, column).replace(/\|/g, '\\|')).join(' | ')} |`);
+        const rows = tasks.map(task => `| ${TASK_COLUMNS.map(column => taskCell(this.db, task, column).replace(/\|/g, '\\|')).join(' | ')} |`);
         return `${header}${rows.join('\n')}\n`;
     }
 
@@ -228,7 +208,7 @@ export class PmServer {
                 const branch = await this.currentBranch();
                 const active = this.activeTask(branch, workspace.id);
                 const tasks = listTasks(this.db, { workspaceId: workspace.id });
-                const summary = this.phaseSummary(tasks);
+                const summary = phaseSummary(tasks);
                 const staleMinutes = readSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES);
                 return text([
                     `**Workspace:** ${workspace.path} (vendor: ${workspace.vendor})`,
