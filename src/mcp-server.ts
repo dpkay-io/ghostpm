@@ -26,6 +26,7 @@ import { INTENTS, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from "./l
 import { SYNC_LOG_FILE } from "./hook/log";
 import { defaultSyncDeps, startSyncRunner, sweepStaleArgDirs } from "./sync/runner";
 import { describeSync } from "./surfaces/sync-health";
+import { dashboardText } from "./surfaces/dashboard";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,7 +63,7 @@ const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task l
 
 ## Reading
 
-1. \`get_project_state\` — workspace, user, sprint, branch, active task, counts, live sessions, pending sync. Call it first in a session.
+1. \`get_project_state\` — workspace, user, sprint, branch, active task, counts, live sessions, pending sync. Call it first in a session. Pass \`all_workspaces: true\` for the machine-wide dashboard (live sessions, tasks by workspace and phase, sync health, cross-workspace activity, recent timeline) when the user asks what is running on this machine or for the GhostPM dashboard; show it as returned.
 2. \`set_sprint\` — activate a milestone; omit the name to list them; '${CLEAR_SPRINT}' unsets it.
 3. \`query_tasks\` — markdown table. Defaults to the active sprint and this workspace; supports sprint='${ALL_SPRINTS}', assignee='${CURRENT_USER_REF}', phase and all_workspaces.
 4. \`get_task\` — full details, vendor link and comments.
@@ -73,7 +74,7 @@ const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task l
 6. \`track_work\` — call it when a prompt starts real work (brainstorm, plan, detail out, implement, fix). Attach to an existing task when one matches (pass task_id); otherwise omit task_id to create one. Ask the user once, inline, when you are unsure which task. Never call it for questions or lookups.
 7. \`update_task\` — phase, title or comment. Only change the phase when the user asks; phases otherwise follow evidence.
 8. \`merge_task\` — when two tasks turn out to be the same piece of work.
-9. \`timeline\` — what happened recently, for standups and recaps.
+9. \`timeline\` — what happened recently, for standups and recaps. \`since\` takes 36h, 2d, yesterday or a date; add \`all_workspaces\` for the whole machine.
 
 ## Important
 
@@ -217,10 +218,13 @@ export class PmServer {
     private registerTools(): void {
         this.server.tool(
             "get_project_state",
-            "Current workspace, user, sprint, branch, active task, task counts, live sessions and pending sync work. Call this first in a session.",
-            {},
-            async () => {
+            "Current workspace, user, sprint, branch, active task, task counts, live sessions and pending sync work. Call this first in a session. With all_workspaces, the machine-wide dashboard instead.",
+            {
+                all_workspaces: z.boolean().optional().describe('Machine-wide dashboard: live sessions, tasks by workspace and phase, sync health, cross-workspace activity, recent timeline.'),
+            },
+            async ({ all_workspaces }) => {
                 const workspace = this.context();
+                if (all_workspaces) return text(dashboardText(this.db));
                 const branch = await this.currentBranch();
                 const active = this.activeTask(branch, workspace.id);
                 const tasks = listTasks(this.db, { workspaceId: workspace.id });

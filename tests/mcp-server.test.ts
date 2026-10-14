@@ -92,6 +92,31 @@ describe('mcp server on the ledger', () => {
         expect(state).toContain('**Current Branch:** _unknown_');
     });
 
+    it('returns the machine-wide dashboard when asked for every workspace', async () => {
+        const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-other-'));
+        try {
+            const here = ensureWorkspace(db, dir);
+            const other = ensureWorkspace(db, otherDir);
+            task('Here task', { phase: 'in_progress' });
+            createTask(db, { title: 'There task', phase: 'planned', workspaceId: other.id, origin: 'local', source: 'test' });
+
+            const dashboard = await call('get_project_state', { all_workspaces: true });
+
+            expect(dashboard).toContain('LIVE SESSIONS');
+            expect(dashboard).toContain(path.basename(here.path));
+            expect(dashboard).toContain(path.basename(other.path));
+            expect(dashboard).toContain('There task');
+            expect(dashboard).not.toContain('[');
+            expect(dashboard).not.toContain('**Workspace:**');
+        } finally {
+            removeTempDir(otherDir);
+        }
+    });
+
+    it('still reports this workspace when all_workspaces is not set', async () => {
+        expect(await call('get_project_state', { all_workspaces: false })).toContain('**Workspace:**');
+    });
+
     it('reports sync as off in a workspace with no vendor', async () => {
         expect(await call('get_project_state')).toContain('**Sync:** off (no GitHub or Azure DevOps remote)');
     });
