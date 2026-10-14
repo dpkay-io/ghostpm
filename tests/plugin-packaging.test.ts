@@ -35,6 +35,10 @@ describe('plugin packaging', () => {
         expect(fs.existsSync(path.join(ROOT, 'hooks', 'hooks.json'))).toBe(true);
     });
 
+    it('ships the skill where Claude Code namespaces it as ghostpm:ghostpm', () => {
+        expect(fs.existsSync(path.join(ROOT, 'skills', 'ghostpm', 'SKILL.md'))).toBe(true);
+    });
+
     it('wires exactly the events the handler implements', () => {
         // Config drift both ways: an event wired to no handler fires for nothing, and a
         // handled event left unwired never fires at all.

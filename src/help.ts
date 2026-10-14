@@ -1,5 +1,5 @@
 import {
-    FLAG_ALL, FLAG_GLOBAL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
+    FLAG_ALL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
 } from './cli-args';
 import { CONFIG_USAGE } from './config-cli';
 import { DEFAULT_STANDUP_HOURS } from './surfaces/standup';
@@ -9,8 +9,10 @@ export const PLUGIN_ID = 'ghostpm@ghostpm-local';
 const USAGE_PREFIX = 'Usage: ghostpm ';
 
 /** The `setup` lines: the one place they are written, so a setup usage message can print the same ones. */
-export const SETUP_USAGE = `  setup [${FLAG_GLOBAL}]            Install the skill into this repo (${FLAG_GLOBAL}: for every project)
-  setup ${FLAG_STATUSLINE}          Show the active task in the Claude Code statusline
+/** What `ghostpm setup` says first: the plugin brings the server, the hooks and the skill. */
+export const SETUP_NOTE = 'The GhostPM plugin brings the MCP server, the hooks and the skill; there is nothing else to install for them.';
+
+export const SETUP_USAGE = `  setup ${FLAG_STATUSLINE}          Show the active task in the Claude Code statusline
   setup ${FLAG_RESTORE}             Put the statusline back the way it was`;
 
 /** Every command src/cli-main.ts handles. tests/help.test.ts fails when one is missing. */

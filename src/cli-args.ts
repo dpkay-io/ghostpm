@@ -32,6 +32,5 @@ export function firstPositional(args: readonly string[]): string | undefined {
 }
 export const FLAG_VERSION = '--version';
 export const FLAG_VERSION_SHORT = '-v';
-export const FLAG_GLOBAL = '--global';
 export const FLAG_STATUSLINE = '--statusline';
 export const FLAG_RESTORE = '--restore';

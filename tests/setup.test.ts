@@ -1,29 +1,18 @@
 import * as fs from 'fs';
-import * as path from 'path';
 import * as os from 'os';
-import { setup } from '../src/setup';
+import * as path from 'path';
+import { setupStatusline } from '../src/setup';
 import { statuslineCommand } from '../src/plugin-setup';
 import { removeTempDir } from './temp-dir';
 import { isolateHomes } from './ledger/helpers';
 
-// Mocking init also keeps cli.ts — and with it child_process — out of the test graph:
-// setup imports findGitRoot from init, and init imports runCli from cli. setup never
-// calls anything that shells out, but the import path exists, so this mock is what
-// makes that irrelevant here.
-jest.mock('../src/init', () => ({
-    findGitRoot: jest.fn(),
-}));
-
-import { findGitRoot } from '../src/init';
-
 const PREVIOUS_STATUSLINE = 'claude-ticker';
 
 /**
- * These test what setup is for, not how it works: the plugin declares the MCP server
- * and the hooks, so setup exists only to do what a plugin cannot — chain the statusline
- * and install the skill.
+ * What setup is for now: only what a plugin cannot do. The plugin declares the MCP server,
+ * the hooks and the skill, so setup chains the statusline and writes nothing else.
  */
-describe('setup', () => {
+describe('setupStatusline', () => {
     let tmpDir: string;
     let userSettingsPath: string;
     let restoreHomes: () => void;
@@ -36,19 +25,11 @@ describe('setup', () => {
         fs.writeFileSync(userSettingsPath, JSON.stringify(settings, null, 2), 'utf8');
     };
 
-    /** Every settings file setup could plausibly have written to. */
-    const allSettingsFiles = (): string[] => [
-        userSettingsPath,
-        path.join(tmpDir, '.claude', 'settings.local.json'),
-    ].filter(file => fs.existsSync(file));
-
     beforeEach(() => {
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-setup-'));
         userSettingsPath = path.join(tmpDir, '.claude', 'settings.json');
         restoreHomes = isolateHomes(tmpDir);
         process.env.GHOSTPM_HOME = path.join(tmpDir, '.ghostpm');
-        jest.clearAllMocks();
-        (findGitRoot as jest.Mock).mockReturnValue(tmpDir);
     });
 
     afterEach(() => {
@@ -58,74 +39,45 @@ describe('setup', () => {
         removeTempDir(tmpDir);
     });
 
-    it('registers no MCP server: the plugin declares it', async () => {
-        // Registering it here is what left this machine pointed at a global install
-        // predating the ledger. .mcp.json in the plugin is the single declaration now.
-        await setup({ silent: true });
-
-        for (const file of allSettingsFiles()) {
-            expect(readJson(file).mcpServers).toBeUndefined();
-        }
-    });
-
-    it('leaves the statusline alone by default', async () => {
-        // Chaining rewrites a statusline the user picked themselves, so it is opt-in.
+    it('chains the statusline', () => {
         writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
-        await setup({ silent: true });
-
-        expect(readJson(userSettingsPath).statusLine.command).toBe(PREVIOUS_STATUSLINE);
-    });
-
-    it('creates no settings file when it has nothing to write', async () => {
-        await setup({ silent: true });
-
-        expect(fs.existsSync(userSettingsPath)).toBe(false);
-    });
-
-    it('chains the statusline only when asked for it', async () => {
-        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
-
-        await setup({ silent: true, statusline: true });
+        setupStatusline({ silent: true });
 
         expect(readJson(userSettingsPath).statusLine.command).toBe(statuslineCommand());
     });
 
-    it('installs the skill so the model knows the workflow', async () => {
-        await setup({ silent: true });
+    it('is safe to run twice', () => {
+        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
-        const skillPath = path.join(tmpDir, '.claude', 'skills', 'ghostpm', 'SKILL.md');
-        expect(fs.readFileSync(skillPath, 'utf8')).toContain('name: ghostpm');
+        setupStatusline({ silent: true });
+        setupStatusline({ silent: true });
+
+        expect(readJson(userSettingsPath).statusLine.command).toBe(statuslineCommand());
     });
 
-    it('leaves the rest of the user settings alone', async () => {
-        writeUserSettings({
-            model: 'opus',
-            permissions: { allow: ['read'] },
-            statusLine: { type: 'command', command: PREVIOUS_STATUSLINE },
-        });
+    it('leaves the rest of the user settings alone', () => {
+        writeUserSettings({ model: 'opus', permissions: { allow: ['read'] }, statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
 
-        await setup({ silent: true });
+        setupStatusline({ silent: true });
 
         const settings = readJson(userSettingsPath);
         expect(settings.model).toBe('opus');
         expect(settings.permissions.allow).toEqual(['read']);
     });
 
-    it('is safe to run twice', async () => {
-        writeUserSettings({ statusLine: { type: 'command', command: PREVIOUS_STATUSLINE } });
+    // Regression guards: the new code has no path to either, so they cannot be red first.
+    it('registers no MCP server: the plugin declares it', () => {
+        writeUserSettings({});
 
-        await setup({ silent: true, statusline: true });
-        await setup({ silent: true, statusline: true });
+        setupStatusline({ silent: true });
 
-        // Still chained once, and the original is still recoverable rather than lost
-        // behind a second layer of ghostpm.
-        expect(readJson(userSettingsPath).statusLine.command).toBe(statuslineCommand());
+        expect(readJson(userSettingsPath).mcpServers).toBeUndefined();
     });
 
-    it('works outside a git repository', async () => {
-        (findGitRoot as jest.Mock).mockReturnValue(null);
+    it('writes no skill: the plugin ships it, and a second copy conflicts with it by name', () => {
+        setupStatusline({ silent: true });
 
-        await expect(setup({ silent: true })).resolves.not.toThrow();
+        expect(fs.existsSync(path.join(tmpDir, '.claude', 'skills'))).toBe(false);
     });
 });

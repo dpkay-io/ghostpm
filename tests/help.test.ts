@@ -3,7 +3,7 @@ import * as path from 'path';
 import { HELP_TEXT, PLUGIN_ID, SETUP_USAGE } from '../src/help';
 import { CONFIG_USAGE } from '../src/config-cli';
 import {
-    FLAG_ALL, FLAG_GLOBAL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
+    FLAG_ALL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
 } from '../src/cli-args';
 
 const ROOT = path.join(__dirname, '..');
@@ -64,7 +64,7 @@ describe('help', () => {
         expect(HELP_TEXT).toContain(SETUP_USAGE);
         expect(SETUP_USAGE).toContain(FLAG_STATUSLINE);
         expect(SETUP_USAGE).toContain(FLAG_RESTORE);
-        expect(SETUP_USAGE).toContain(FLAG_GLOBAL);
+        expect(SETUP_USAGE).not.toContain('--global');
     });
 
     it('names the plugin the way the marketplace and the manifest do', () => {

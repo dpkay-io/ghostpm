@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import * as path from 'path';
-import { FLAG_GLOBAL, FLAG_RESTORE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT } from './cli-args';
+import { FLAG_RESTORE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT } from './cli-args';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
@@ -85,11 +85,14 @@ async function main() {
                     : `Nothing to restore: the statusline in ${settingsPath} is not ghostpm's.`);
                 break;
             }
-            const { setup } = await import('./setup');
-            await setup({
-                global: args.includes(FLAG_GLOBAL),
-                statusline: args.includes(FLAG_STATUSLINE),
-            });
+            if (args.includes(FLAG_STATUSLINE)) {
+                const { setupStatusline } = await import('./setup');
+                setupStatusline();
+            } else {
+                const { SETUP_NOTE, SETUP_USAGE } = await import('./help');
+                console.log(`${SETUP_NOTE}
+${SETUP_USAGE}`);
+            }
             break;
         }
 
