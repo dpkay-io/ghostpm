@@ -68,6 +68,8 @@ They need another OS, a real terminal, Azure DevOps, Claude Code itself or your 
   Remove-Item -Recurse -Force $p95
   ```
 
+  Afterwards, switch back to your everyday Node.js and run `npm ci; npm run build` again: a checkout whose plugin hooks load this `dist/` and `node_modules` cannot load an addon built for another Node.js.
+
 - [ ] **End to end against a throwaway GitHub repository.** Only with the account owner's consent: it creates and deletes a real repository. The clone goes to a scratch folder outside this checkout, so run the 2.0 CLI by its full path (`node <checkout>\dist\cli-main.js`) unless 2.0 is installed globally.
 
   ```powershell
