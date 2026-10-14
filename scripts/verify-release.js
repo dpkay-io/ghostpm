@@ -18,11 +18,17 @@ const ROOT = path.join(__dirname, '..');
 // The bootstrap's own npm runner: one command line, absolute npm path, every argument checked first.
 const { runNpm } = require(path.join(ROOT, 'dist', 'bootstrap.js'));
 
-/** Claude Code kills the plugin dependency install at 60 s (plugins loading reference); keep half as margin. */
-const DEPENDENCY_BUDGET_MS = 30 * 1000;
+/** Claude Code kills the plugin dependency install at 60 s (plugins loading reference). */
+const CLAUDE_CODE_INSTALL_LIMIT_MS = 60 * 1000;
+/** Half of Claude Code's limit, as margin. */
+const DEPENDENCY_BUDGET_MS = CLAUDE_CODE_INSTALL_LIMIT_MS / 2;
+/** `npm ci` is stopped where Claude Code would stop it. ponytail: on Windows that ends cmd.exe; npm may outlive it. */
+const NPM_CI_TIMEOUT_MS = CLAUDE_CODE_INSTALL_LIMIT_MS;
 const BOOTSTRAP_TIMEOUT_MS = 5 * 60 * 1000;
 /** Ample for one hook, CLI command or process listing (Claude Code gives a hook 5 s); a hung one fails its check instead. */
 const COMMAND_TIMEOUT_MS = 30 * 1000;
+/** Packing the staged files touches no network. */
+const NPM_PACK_TIMEOUT_MS = COMMAND_TIMEOUT_MS;
 const POLL_MS = 1000;
 const WORK_PREFIX = 'ghostpm-verify-';
 const WINDOWS = 'win32';
@@ -128,6 +134,11 @@ function stopLeftovers(work) {
     const listing = process.platform === WINDOWS
         ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', LIST_WINDOWS_PROCESSES], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS, windowsHide: true })
         : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS });
+    if (listing.error || listing.status !== 0) {
+        const reason = listing.error ? listing.error.message : `exit ${listing.status}: ${String(listing.stderr || '').trim()}`;
+        console.log(`WARNING: could not list processes (${reason}), so nothing was stopped. Look for processes still running from ${work}.`);
+        return 0;
+    }
     const pids = String(listing.stdout || '').split(/\r?\n/)
         .map(line => line.trim())
         .filter(line => line.indexOf(marker) >= 0)
@@ -163,7 +174,7 @@ async function verify(work) {
 
     // 1. Stage and pack exactly what `npm publish ./release` would upload, then unpack it the way Claude Code's cache holds it.
     const staged = stageRelease(ROOT, path.join(work, RELEASE_DIR));
-    runNpm(['pack', '--pack-destination', '..', '--loglevel=warn'], staged);
+    runNpm(['pack', '--pack-destination', '..', '--loglevel=warn'], staged, NPM_PACK_TIMEOUT_MS);
     const tarball = fs.readdirSync(work).find(file => file.endsWith(TARBALL_EXTENSION));
     fs.mkdirSync(path.join(work, EXTRACT_DIR));
     // Relative paths: GNU tar would read "C:" in an absolute Windows path as a remote host.
@@ -184,14 +195,14 @@ async function verify(work) {
     const fetched = Object.keys(locked).filter(key => key !== '');
     check('every locked package downloads over https', fetched.every(key => String(locked[key].resolved).indexOf(HTTPS) === 0), `${fetched.length} packages`);
     const started = Date.now();
-    let installed = true;
+    let installError = '';
     try {
-        runNpm(['ci', '--ignore-scripts', '--no-audit', '--no-fund'], pkg);
+        runNpm(['ci', '--ignore-scripts', '--no-audit', '--no-fund'], pkg, NPM_CI_TIMEOUT_MS);
     } catch (error) {
-        installed = false;
+        installError = error.code || error.message;
     }
     const installMs = Date.now() - started;
-    check('npm ci --ignore-scripts succeeds on the shipped shrinkwrap', installed);
+    check('npm ci --ignore-scripts succeeds on the shipped shrinkwrap', installError === '', installError);
     check(`the dependency install stays under ${DEPENDENCY_BUDGET_MS} ms`, installMs < DEPENDENCY_BUDGET_MS, `${installMs} ms with an empty cache`);
     Object.keys(manifest.dependencies).forEach(dependency =>
         check(`installed ${dependency}`, fs.existsSync(path.join(pkg, 'node_modules', dependency, MANIFEST))));

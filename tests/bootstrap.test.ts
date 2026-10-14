@@ -86,7 +86,7 @@ describe('bootstrap', () => {
         expect(() => bootstrapBinding(() => undefined, home)).toThrow('produced no addon');
     });
 
-    describe('says why a build fails: a prebuilt addon only from the oldest supported Node.js up, a compiler before that', () => {
+    describe('says why a build fails: a prebuilt addon on the supported LTS lines, a compiler on any other Node.js', () => {
         const messageOf = (run: NpmRunner): string => {
             try {
                 bootstrapBinding(run, home);
@@ -96,7 +96,8 @@ describe('bootstrap', () => {
             throw new Error('bootstrapBinding did not fail');
         };
         const explains = (message: string): void => {
-            expect(message).toContain(`Node.js ${minimumNodeMajor()} or newer`);
+            // Even (LTS) majors from the minimum get prebuilts; the odd one between (23) has no Windows prebuilt.
+            expect(message).toContain(`Node.js ${minimumNodeMajor()} or ${minimumNodeMajor() + 2}+ downloads a prebuilt`);
             expect(message).toContain('Python');
             expect(message).toContain('C++ toolchain');
         };
@@ -125,6 +126,15 @@ describe('bootstrap', () => {
         ]]);
         expect(execFileSync).not.toHaveBeenCalled();
         expect(spawnSync).not.toHaveBeenCalled();
+    });
+
+    it('the default runner gives npm a time limit when asked for one, so a hung install fails instead of waiting forever', () => {
+        const limitMs = 60 * 1000;
+        jest.mocked(resolveCommand).mockReturnValue(NPM_PATH);
+
+        runNpm(['ci', '--ignore-scripts'], root, limitMs);
+
+        expect(jest.mocked(execSync).mock.calls).toEqual([[`"${NPM_PATH}" ci --ignore-scripts`, { cwd: root, stdio: 'inherit', timeout: limitMs }]]);
     });
 
     it('the default runner refuses an unsafe argument before npm runs', () => {

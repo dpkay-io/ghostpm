@@ -19,7 +19,8 @@ const UNC_PREFIX = '\\\\';
  */
 export const SAFE_NPM_ARG = /^[A-Za-z0-9@._\/=-]+$/;
 
-export type NpmRunner = (args: string[], cwd: string) => void;
+/** `timeoutMs`, when given, ends npm's command shell after that long (execSync's `timeout`). */
+export type NpmRunner = (args: string[], cwd: string, timeoutMs?: number) => void;
 
 /** The exact version installed beside this code: an addon built for another version may not match the JS that loads it. */
 export function installedAddonVersion(): string {
@@ -48,16 +49,23 @@ export function assertSafeNpmArgs(args: string[]): void {
  * absolute path where.exe finds on PATH, quoted, so cmd.exe never runs an npm planted in the working folder; elsewhere
  * resolveCommand answers the bare name, which sh looks up on PATH only.
  */
-export const runNpm: NpmRunner = (args, cwd) => {
+export const runNpm: NpmRunner = (args, cwd, timeoutMs) => {
     assertSafeNpmArgs(args);
     const npm = resolveCommand(NPM);
     if (UNSAFE_IN_QUOTES.test(npm)) throw new Error(`Refusing to run npm from ${npm}: cmd.exe would reinterpret that path.`);
-    execSync([`"${npm}"`, ...args].join(' '), { cwd, stdio: 'inherit' });
+    execSync([`"${npm}"`, ...args].join(' '), { cwd, stdio: 'inherit', timeout: timeoutMs });
 };
 
-/** The usual reason a build fails: better-sqlite3 publishes prebuilt addons only for the Node.js versions engines allows. */
+/** Node.js LTS majors are even, two apart. The odd release between (23) got no Windows prebuilt of better-sqlite3. */
+const NEXT_LTS_STEP = 2;
+
+/**
+ * The usual reason a build fails: no prebuilt addon for this Node.js. Both numbers come from engines: its minimum, an
+ * LTS major, and the next LTS major after it.
+ */
 export function prebuiltNote(): string {
-    return `Node.js ${minimumNodeMajor()} or newer downloads a prebuilt SQLite addon; an older Node.js has to compile it, which needs Python and a C++ toolchain.`;
+    const minimum = minimumNodeMajor();
+    return `Node.js ${minimum} or ${minimum + NEXT_LTS_STEP}+ downloads a prebuilt SQLite addon; any other Node.js has to compile it, which needs Python and a C++ toolchain.`;
 }
 
 /**
