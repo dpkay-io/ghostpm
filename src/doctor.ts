@@ -10,6 +10,7 @@ import { homeDir } from './registry';
 import { SERVER_NAME, minimumNodeMajor, packageVersion } from './package-info';
 import { userSettingsPath } from './plugin-setup';
 import { prebuiltNote } from './bootstrap';
+import { WINDOWS, changeDirCommand, quoteForShell } from './shell-quote';
 
 export const FINDING_STALE_REGISTRATION = 'stale_registration';
 export const FINDING_CLAUDE_JSON_REGISTRATION = 'claude_json_registration';
@@ -29,7 +30,6 @@ const SKILL_FILE = 'SKILL.md';
 /** Phase 2 `setup` also wrote this beside the skill, which makes the folder load as a skills-dir plugin. */
 const SKILL_PLUGIN_JSON = path.join('.claude-plugin', 'plugin.json');
 const SKILL_PLUGIN_NAME = 'ghostpm';
-const WINDOWS = 'win32';
 
 export interface Finding {
     code: string;
@@ -141,22 +141,6 @@ function claudeJsonRegistrations(claude: ClaudeJson, platform: string): Finding[
         });
     });
     return findings;
-}
-
-/** PowerShell reads these as single quotes too (U+2018, U+2019, U+201A, U+201B), so each must be doubled like the ASCII one. */
-const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g;
-
-/**
- * A path pasted into a shell. Paths are untrusted (a repo folder can be named anything), so
- * single quotes: nothing inside them expands in PowerShell or in POSIX shells.
- */
-export function quoteForShell(value: string, platform: string): string {
-    return platform === WINDOWS ? `'${value.replace(POWERSHELL_QUOTES, quote => quote + quote)}'` : `'${value.split("'").join("'\\''")}'`;
-}
-
-/** Local scope is keyed by the folder, so the next command must run in exactly it. -LiteralPath: `cd` reads [ and ] as wildcards and can land in a sibling. */
-export function changeDirCommand(dir: string, platform: string): string {
-    return platform === WINDOWS ? `Set-Location -LiteralPath ${quoteForShell(dir, platform)}` : `cd ${quoteForShell(dir, platform)}`;
 }
 
 /** Windows PowerShell 5.1 has no `&&`, so Windows keeps `;`; elsewhere a failed cd must not run the next command in the wrong folder. */

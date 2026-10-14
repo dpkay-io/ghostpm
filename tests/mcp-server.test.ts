@@ -15,6 +15,7 @@ import {
     SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SYNC_POLICY_PROMOTE,
 } from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
+import { quoteForShell } from '../src/shell-quote';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from './ledger/helpers';
 import { removeTempDir } from './temp-dir';
 
@@ -471,7 +472,7 @@ describe('mcp server in a GitHub workspace', () => {
         setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
         const workspacePath = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'widgets')).path;
         expect(await call('get_project_state')).toContain(
-            `**Sync:** off (sync_policy off; \`ghostpm config set sync_policy auto --workspace "${workspacePath}"\` turns it on)`,
+            `**Sync:** off (sync_policy off; \`ghostpm config set sync_policy auto --workspace ${quoteForShell(workspacePath)}\` turns it on)`,
         );
     });
 });

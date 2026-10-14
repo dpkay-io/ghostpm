@@ -12,7 +12,9 @@ import { NOT_A_WORKSPACE } from '../src/surfaces/task-views';
 import { SINCE_HELP } from '../src/surfaces/since';
 import { LEGACY_CONFIG_FILE } from '../src/ledger/legacy-import';
 import { FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES } from '../src/cli-args';
+import { WINDOWS, quoteForShell } from '../src/shell-quote';
 import { removeTempDir } from './temp-dir';
+import { POWERSHELL, runPowerShell } from './powershell';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
 // The built CLI is what users run; `npm run build` must run first.
@@ -25,6 +27,8 @@ const EXIT_OK = 0;
 const EXIT_FAILURE = 1;
 /** SQLite's rollback-journal mode, as `PRAGMA journal_mode` names it. */
 const DELETE_JOURNAL = 'delete';
+/** The command an unregister preview asks a person to paste. */
+const PASTED_COMMAND = /Run `([^`]+)` to confirm/;
 
 describeBuilt('ghostpm CLI on the ledger', () => {
     let root: string;
@@ -194,7 +198,7 @@ describeBuilt('ghostpm CLI on the ledger', () => {
 
         const preview = cli(['unregister', nested]);
         expect(preview.status).toBe(EXIT_OK);
-        expect(preview.stdout).toContain(`ghostpm unregister "${normalizePath(nested)}" ${FLAG_YES}`);
+        expect(preview.stdout).toContain(`ghostpm unregister ${quoteForShell(normalizePath(nested))} ${FLAG_YES}`);
 
         const confirmed = cli(['unregister', nested, FLAG_YES]);
         expect(confirmed.status).toBe(EXIT_OK);
@@ -218,7 +222,7 @@ describeBuilt('ghostpm CLI on the ledger', () => {
 
         const preview = cli(['unregister', keep]);
         expect(preview.status).toBe(EXIT_OK);
-        expect(preview.stdout).toContain(`ghostpm unregister "${normalizePath(keep)}" ${FLAG_YES}`);
+        expect(preview.stdout).toContain(`ghostpm unregister ${quoteForShell(normalizePath(keep))} ${FLAG_YES}`);
 
         const confirmed = cli(['unregister', keep, FLAG_YES]);
         expect(confirmed.status).toBe(EXIT_OK);
@@ -231,6 +235,31 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         }
         expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
     });
+
+    (process.platform === WINDOWS && POWERSHELL !== undefined ? it : it.skip)(
+        'runs the pasted unregister for a `$x` folder in PowerShell on exactly that folder, never the repo around it',
+        () => {
+            fs.mkdirSync(path.join(workspace, '.git'));
+            seed();
+            const dollar = path.join(workspace, '$x');
+            fs.mkdirSync(path.join(dollar, '.git'), { recursive: true });
+            expect(cli(['init'], dollar).status).toBe(EXIT_OK);
+            const pasted = PASTED_COMMAND.exec(cli(['unregister', dollar]).stdout)![1];
+
+            // `ghostpm` is the built CLI, as a global install would be.
+            const q = (value: string): string => quoteForShell(value, WINDOWS);
+            const ran = runPowerShell(`function ghostpm { & ${q(process.execPath)} ${q(CLI)} @args }; ${pasted}`, env);
+
+            expect(ran.stderr).toBe('');
+            expect(ran.stdout).toContain(`Forgot ${normalizePath(dollar)}:`);
+            const db = openLedger(path.join(ghostpmHome, LEDGER_FILE));
+            try {
+                expect((db.prepare('SELECT path FROM workspaces').all() as { path: string }[]).map(row => row.path)).toEqual([normalizePath(workspace)]);
+            } finally {
+                db.close();
+            }
+        },
+    );
 
     it('refuses to unregister a folder that is not a workspace', () => {
         seed();

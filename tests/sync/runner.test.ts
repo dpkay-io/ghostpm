@@ -23,6 +23,7 @@ import { PULL_PAGE_LIMIT } from '../../src/sync/pull';
 import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
 import { AzureAdapter } from '../../src/sync/azure';
 import { PermanentError, SyncPausedError } from '../../src/sync/vendor';
+import { quoteForShell } from '../../src/shell-quote';
 import { FakeVendor } from './fake-vendor';
 
 const SESSION_ID = 'runner-session';
@@ -285,7 +286,7 @@ describe('the sync runner', () => {
         setWorkspaceSetting(ledger.db, workspace.id, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
         const { output, failed } = await runSyncCommand(ledger.db, [], deps, workspace.path);
         expect(output).toContain(`Sync is off for ${workspace.path} (${syncOffHint(workspace.path)}).`);
-        expect(output).toContain(`\`ghostpm config set sync_policy auto --workspace "${workspace.path}"\``);
+        expect(output).toContain(`\`ghostpm config set sync_policy auto --workspace ${quoteForShell(workspace.path)}\``);
         expect(failed).toBe(false);
     });
 
@@ -294,7 +295,7 @@ describe('the sync runner', () => {
         const outside = path.join(ledger.dir, 'not-a-repo');
         fs.mkdirSync(outside);
         const { output, failed } = await runSyncCommand(ledger.db, [], deps, outside);
-        expect(output).toContain('`ghostpm config set sync_policy auto --workspace "');
+        expect(output).toContain("`ghostpm config set sync_policy auto --workspace '");
         expect(failed).toBe(false);
     });
 

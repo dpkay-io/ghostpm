@@ -20,6 +20,7 @@ import { FLAG_YES } from '../src/cli-args';
 import { AzureProcess } from '../src/sync/azure';
 import { AzureIdentity } from '../src/sync/identity';
 import { syncOffHint } from '../src/sync/schedule';
+import { quoteForShell } from '../src/shell-quote';
 import {
     AZURE_SAMPLE_DAYS, describeInit, describeUnregister, initWorkspace, unregisterTarget, unregisterWorkspace,
 } from '../src/workspace-commands';
@@ -191,7 +192,7 @@ describe('workspace commands', () => {
             const text = describeInit(result);
             expect(text).toContain(switchedFrom(NOT_SET));
             expect(text).toContain(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE})`);
-            expect(text).toContain(`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace "${result.workspace.path}"`);
+            expect(text).toContain(`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace ${quoteForShell(result.workspace.path)}`);
         });
 
         it('fills the Azure DevOps settings from a sample of this project, then keeps them', async () => {
@@ -238,6 +239,7 @@ describe('workspace commands', () => {
             const warnings = result.warnings.join('\n');
             expect(warnings).toContain('Ready, Doing Stuff');
             expect(warnings).toContain(`ghostpm config set ${SETTING_PHASE_STATE_MAP}`);
+            expect(warnings).toContain(`--workspace ${quoteForShell(result.workspace.path)}`);
             expect(warnings).not.toContain('No work items changed');
         });
 
@@ -369,11 +371,21 @@ describe('workspace commands', () => {
 
             const dryRun = describeUnregister(workspace, footprint, false);
             expect(dryRun).toContain('2 task(s), 3 event(s), 1 vendor link(s), 1 queued vendor change(s) and 1 session(s)');
-            expect(dryRun).toContain(`ghostpm unregister "${workspace.path}" ${FLAG_YES}`);
+            expect(dryRun).toContain(`ghostpm unregister ${quoteForShell(workspace.path)} ${FLAG_YES}`);
             const done = describeUnregister(workspace, footprint, true);
             expect(done).toContain('Nothing was changed at the vendor.');
             // Any hook event re-registers the folder, an already open session's included.
             expect(done).toContain('next prompt or tool call');
+        });
+
+        it('quotes the folder so a shell expands nothing in it: a `$x` folder is never read as its parent', () => {
+            ensureWorkspace(ledger.db, repo());
+            const dollar = ensureWorkspace(ledger.db, clonedRepo(path.join(parent, PROJECT_FOLDER), '$x'));
+
+            const dryRun = describeUnregister(dollar, { tasks: 0, events: 0, vendorLinks: 0, outbox: 0, sessions: 0 }, false);
+
+            expect(dryRun).toContain(`ghostpm unregister ${quoteForShell(dollar.path)} ${FLAG_YES}`);
+            expect(dryRun).not.toContain(`"${dollar.path}"`);
         });
     });
 });

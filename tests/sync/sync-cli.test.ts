@@ -50,7 +50,7 @@ describeBuilt('ghostpm sync from the command line (I2)', () => {
     it('exits 0 when there is nothing to sync, saying how to turn sync on (F2)', () => {
         const result = sync();
         expect(result.stdout).toContain('Pushed 0');
-        expect(result.stdout).toContain('`ghostpm config set sync_policy auto --workspace "');
+        expect(result.stdout).toContain("`ghostpm config set sync_policy auto --workspace '");
         expect(result.status).toBe(EXIT_OK);
     });
 

@@ -18,6 +18,7 @@ import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
 import { AzureAdapter, AzureProcess } from './sync/azure';
 import { AzureIdentity, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
+import { quoteForShell } from './shell-quote';
 import { SyncPausedError } from './sync/vendor';
 
 /** How far back init samples work items to learn the process template's states and types. */
@@ -101,7 +102,7 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
         `No work items changed in the last ${AZURE_SAMPLE_DAYS} days in ${identity.project} to learn ${key} from.`;
     const unrecognised = `None of the states sampled in ${identity.project} (${sampled.states.join(', ')}) reads as a GhostPM phase, `
         + `so ${SETTING_PHASE_STATE_MAP} was not set: run \`ghostpm config set ${SETTING_PHASE_STATE_MAP} <phase>=<State>... `
-        + `--workspace "${result.workspace.path}"\`.`;
+        + `--workspace ${quoteForShell(result.workspace.path)}\`.`;
     const stateMap = phaseStateMapFrom(sampled.states);
     // Each setting: what the sample says, or why it says nothing.
     const learned: { [key: string]: [unknown, string] } = {
@@ -163,7 +164,7 @@ function syncLines(result: InitResult): string[] {
         : `Sync:      on (${switched(result.optedIn, result.syncPolicy)})`];
     if (result.progressComments === PROGRESS_COMMENTS_NONE) {
         lines.push(`Phase comments: off (${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_NONE}); `
-            + `\`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace "${where}"\` turns them on`);
+            + `\`ghostpm config set ${SETTING_PROGRESS_COMMENTS} ${PROGRESS_COMMENTS_PHASE} --workspace ${quoteForShell(where)}\` turns them on`);
     }
     lines.push('Next: `ghostpm sync` pulls its issues, and Claude Code sessions here are captured by the GhostPM plugin.');
     return lines;
@@ -222,5 +223,5 @@ export function describeUnregister(workspace: WorkspaceRow, footprint: Workspace
             + `next prompt or tool call; \`${INIT_COMMAND}\` there also turns sync on and brings back its 1.4.0 tasks, if it had any.`;
     }
     return `This deletes ${summary} recorded for ${workspace.path}. Nothing changes at the vendor, but queued changes that were never pushed are lost.\n`
-        + `Run \`ghostpm unregister "${workspace.path}" ${FLAG_YES}\` to confirm.`;
+        + `Run \`ghostpm unregister ${quoteForShell(workspace.path)} ${FLAG_YES}\` to confirm.`;
 }

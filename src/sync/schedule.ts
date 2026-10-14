@@ -4,6 +4,7 @@ import {
     SYNC_POLICY_OFF,
 } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
+import { quoteForShell } from '../shell-quote';
 import { leaseHolder } from './lease';
 import { hasDueWork } from './outbox';
 
@@ -18,7 +19,7 @@ export function syncIsOff(db: Ledger, workspace: WorkspaceRow): boolean {
 
 /** Why sync is off and how a person turns it on, worded once for every place that says so (ruling F2). */
 export const syncOffHint = (workspacePath: string): string =>
-    `${SETTING_SYNC_POLICY} ${SYNC_POLICY_OFF}; \`ghostpm config set ${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO} --workspace "${workspacePath}"\` turns it on`;
+    `${SETTING_SYNC_POLICY} ${SYNC_POLICY_OFF}; \`ghostpm config set ${SETTING_SYNC_POLICY} ${SYNC_POLICY_AUTO} --workspace ${quoteForShell(workspacePath)}\` turns it on`;
 
 /**
  * Spec §8.1: every `sync_pull_minutes`, for a vendor workspace that syncs and is not paused. Counted from when the

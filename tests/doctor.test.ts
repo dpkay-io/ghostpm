@@ -1,13 +1,13 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
 import { removeTempDir } from './temp-dir';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
-    FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, MCP_SERVER_KEY, REMOVED_TOOLS, changeDirCommand, machineProbe, quoteForShell,
-    removeDirCommand, skillCandidates,
+    FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, removeDirCommand, skillCandidates,
 } from '../src/doctor';
+import { changeDirCommand, quoteForShell } from '../src/shell-quote';
+import { POWERSHELL, runPowerShell } from './powershell';
 import { PLUGIN_ID } from '../src/help';
 import { userSettingsPath } from '../src/plugin-setup';
 import { minimumNodeMajor, packageVersion } from '../src/package-info';
@@ -383,16 +383,13 @@ describe('diagnose', () => {
     });
 
     describe('the Windows hints run in a real PowerShell', () => {
-        const shell = ['pwsh', 'powershell'].find(name => spawnSync(name, ['-NoProfile', '-Command', '1']).status === 0);
-        const PROGRESS_OFF = "$ProgressPreference = 'SilentlyContinue'; ";
         const run = (script: string): void => {
-            const encoded = Buffer.from(PROGRESS_OFF + script,'utf16le').toString('base64');
-            const result = spawnSync(shell as string, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { encoding: 'utf8' });
+            const result = runPowerShell(script);
             expect(result.stderr).toBe('');
             expect(result.status).toBe(0);
         };
 
-        (shell === undefined ? it.skip : it)('removes and enters exactly the named folder, never a wildcard sibling', () => {
+        (POWERSHELL === undefined ? it.skip : it)('removes and enters exactly the named folder, never a wildcard sibling', () => {
             const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-doctor-ps-'));
             try {
                 const names = ['a[a]', 'a\u2019b', 'aa', "it's"];
