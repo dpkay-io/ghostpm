@@ -24,6 +24,7 @@ import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
 import { AzureAdapter } from '../../src/sync/azure';
 import { PermanentError, SyncPausedError } from '../../src/sync/vendor';
 import { quoteForShell } from '../../src/shell-quote';
+import { unregisterWorkspace } from '../../src/workspace-commands';
 import { FakeVendor } from './fake-vendor';
 
 const SESSION_ID = 'runner-session';
@@ -86,6 +87,21 @@ describe('the sync runner', () => {
         const thrown = (() => { try { adapterFor(ledger.db, odd); return null; } catch (error) { return error; } })() as SyncPausedError;
         expect(thrown).toBeInstanceOf(SyncPausedError);
         expect(thrown.reason).toContain('https://github.com/just-an-owner');
+    });
+
+    it('pauses no workspace that took the id of one unregistered while its pull was out', async () => {
+        let next: WorkspaceRow | undefined;
+        jest.spyOn(vendor, 'listChangedSince').mockImplementation(async () => {
+            unregisterWorkspace(ledger.db, workspace);
+            next = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'gadgets', GADGETS_REMOTE));
+            throw new SyncPausedError(GH_LOGGED_OUT);
+        });
+
+        const [report] = await pullWorkspaces(ledger.db, deps, true);
+
+        expect(next!.id).toBe(workspace.id);
+        expect(getSyncPause(ledger.db, next!.id)).toBeUndefined();
+        expect(report.paused).toBe(false);
     });
 
     it('builds its default adapters on the guarded runner, so every CLI call is checked first', async () => {

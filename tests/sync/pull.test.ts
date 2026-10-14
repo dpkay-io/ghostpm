@@ -13,7 +13,8 @@ import {
 import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
 import { acquireLease, LeaseLostError, LEASE_TTL_MS } from '../../src/sync/lease';
 import { PUSH_BACKOFF_BASE_MS } from '../../src/sync/outbox';
-import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT, PR_CHECK_LIMIT } from '../../src/sync/pull';
+import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT, PR_CHECK_LIMIT, WorkspaceGoneError } from '../../src/sync/pull';
+import { unregisterWorkspace } from '../../src/workspace-commands';
 import { pushDue, PushDeps } from '../../src/sync/push';
 import { pullIsDue } from '../../src/sync/schedule';
 import { GoneError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
@@ -57,6 +58,16 @@ describe('pulling a vendor workspace', () => {
         const before = vendor.calls.length;
         await pull(now);
         return vendor.calls.slice(before).filter(call => call.op === 'fetch').map(call => call.remoteId!);
+    };
+
+    /** Runs `during` at the start of each vendor call the pull loops make. */
+    const onEachCall = (during: (op: string) => void): void => {
+        const list = vendor.listChangedSince.bind(vendor);
+        const fetch = vendor.fetch.bind(vendor);
+        const mergedAt = vendor.mergedAt.bind(vendor);
+        jest.spyOn(vendor, 'listChangedSince').mockImplementation((since, limit) => { during('list'); return list(since, limit); });
+        jest.spyOn(vendor, 'fetch').mockImplementation(remoteId => { during('fetch'); return fetch(remoteId); });
+        jest.spyOn(vendor, 'mergedAt').mockImplementation(url => { during('mergedAt'); return mergedAt(url); });
     };
 
     beforeEach(() => {
@@ -462,6 +473,43 @@ describe('pulling a vendor workspace', () => {
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK)).toBe(tied);
     });
 
+    describe('racing `ghostpm unregister` of the workspace it pulls', () => {
+        /** Workspace ids are reused (INTEGER PRIMARY KEY without AUTOINCREMENT): the next folder registered takes this one's. */
+        const nextWorkspace = (): WorkspaceRow => ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'gadgets'));
+        const ownedBy = (id: number): { title: string; remote_id: string | null }[] => ledger.db.prepare(
+            'SELECT t.title, l.remote_id FROM tasks t LEFT JOIN vendor_links l ON l.task_id = t.id WHERE t.workspace_id = ?',
+        ).all(id) as { title: string; remote_id: string | null }[];
+        const count = (table: string): number => (ledger.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+        it('stops, writing nothing it listed, once the workspace is unregistered during the list', async () => {
+            vendor.seed({ title: 'Issue 1 from widgets' });
+            onEachCall(op => { if (op === 'list') unregisterWorkspace(ledger.db, workspace); });
+
+            await expect(pull()).rejects.toThrow(WorkspaceGoneError);
+
+            expect([count('tasks'), count('vendor_links')]).toEqual([0, 0]);
+            const next = nextWorkspace();
+            expect(next.id).toBe(workspace.id);
+            expect(ownedBy(next.id)).toEqual([]);
+        });
+
+        it('writes nothing into a workspace that took the unregistered one\'s id while the list was out', async () => {
+            vendor.seed({ title: 'Issue 1 from widgets' });
+            let next: WorkspaceRow | undefined;
+            onEachCall(op => {
+                if (op !== 'list') return;
+                unregisterWorkspace(ledger.db, workspace);
+                next = nextWorkspace();
+            });
+
+            await expect(pull()).rejects.toThrow(WorkspaceGoneError);
+
+            expect(next!.id).toBe(workspace.id);
+            expect(ownedBy(next!.id)).toEqual([]);
+            expect([SETTING_PULL_WATERMARK, SETTING_LAST_SYNC].map(key => getWorkspaceSetting(ledger.db, next!.id, key))).toEqual([undefined, undefined]);
+        });
+    });
+
     describe('holding the sync lease (rulings D7, F2)', () => {
         /** The pull's clock, which the tests move themselves. */
         let clock: number;
@@ -480,16 +528,6 @@ describe('pulling a vendor workspace', () => {
             // Nothing changed since: the list returns nothing, so the link is re-read.
             setWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK, new Date(clock).toISOString());
         };
-        /** Runs `during` at the start of each vendor call the pull loops make. */
-        const onEachCall = (during: (op: string) => void): void => {
-            const list = vendor.listChangedSince.bind(vendor);
-            const fetch = vendor.fetch.bind(vendor);
-            const mergedAt = vendor.mergedAt.bind(vendor);
-            jest.spyOn(vendor, 'listChangedSince').mockImplementation((since, limit) => { during('list'); return list(since, limit); });
-            jest.spyOn(vendor, 'fetch').mockImplementation(remoteId => { during('fetch'); return fetch(remoteId); });
-            jest.spyOn(vendor, 'mergedAt').mockImplementation(url => { during('mergedAt'); return mergedAt(url); });
-        };
-
         it('renews the lease before every vendor call, so a pull longer than the lease keeps it', async () => {
             await linkedWithPr();
             const before = vendor.calls.length;

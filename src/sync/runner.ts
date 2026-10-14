@@ -3,7 +3,7 @@ import {
     getSyncPause, readSetting, setSyncPause, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP,
 } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow, plural } from '../ledger/types';
-import { findWorkspace } from '../ledger/workspaces';
+import { findWorkspace, isStillRegistered } from '../ledger/workspaces';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { Runner, runCli, sweepArgDirs } from '../cli';
 import { AzureAdapter } from './azure';
@@ -60,10 +60,13 @@ function vendorWorkspaces(db: Ledger): WorkspaceRow[] {
 
 const describeError = (error: unknown): string => (error instanceof Error ? (error.stack ?? error.message) : String(error));
 
-/** Ruling M1: as a push pauses only while it holds its row, a pull pauses only while it holds the lease. Whether it did. */
+/**
+ * Ruling M1: as a push pauses only while it holds its row, a pull pauses only while it holds the lease, and only a
+ * workspace still registered (another folder may hold its id now). Whether it did.
+ */
 function pauseWhileHeld(db: Ledger, deps: PushDeps, workspace: WorkspaceRow, reason: string): boolean {
     return write(db, () => {
-        if (!acquireLease(db, deps.holder, deps.now())) return false;
+        if (!acquireLease(db, deps.holder, deps.now()) || !isStillRegistered(db, workspace)) return false;
         setSyncPause(db, workspace.id, reason);
         return true;
     });

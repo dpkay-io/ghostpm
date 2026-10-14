@@ -5,6 +5,7 @@ import {
 } from '../ledger/settings';
 import { bumpRevision, getTask, insertTaskRow, insertVendorLink } from '../ledger/tasks';
 import { advancePhase } from '../ledger/work';
+import { isStillRegistered } from '../ledger/workspaces';
 import { CLOSED_PHASES, EventKind, Phase, SYNC_SOURCE, VENDOR_SOURCE, VendorLinkRow, WorkspaceRow } from '../ledger/types';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { holdLease, LeaseLostError } from './lease';
@@ -34,6 +35,14 @@ export interface PullSummary {
     merged: number;
     /** The page came back full and moved the watermark: there is more to read now, not after sync_pull_minutes. */
     more: boolean;
+}
+
+/** `ghostpm unregister` forgot the workspace while its pull was out: stop at once, writing nothing (as a lost lease does). */
+export class WorkspaceGoneError extends Error {
+    constructor(workspace: WorkspaceRow) {
+        super(`${workspace.path} was unregistered while it was being pulled`);
+        this.name = 'WorkspaceGoneError';
+    }
 }
 
 type UpsertOutcome = 'created' | 'edited' | 'refreshed';
@@ -165,9 +174,11 @@ export async function pullWorkspace(
         return adapter;
     };
     // Ruling F2: every write checks the lease first, as the pusher checks its claim, so a lost lease stops the pull
-    // before anything it read lands, the watermark included.
+    // before anything it read lands, the watermark included. So does an unregister: the next folder registered would
+    // take this workspace's id, and with it whatever the pull went on to write.
     const leasedWrite = <T>(fn: () => T): T => write(db, () => {
         renew();
+        if (!isStillRegistered(db, workspace)) throw new WorkspaceGoneError(workspace);
         return fn();
     });
     const upsert = (item: RemoteItem): void => {

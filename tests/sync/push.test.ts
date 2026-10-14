@@ -20,6 +20,7 @@ import { outboxHealth, rearmFailed, releaseStaleClaims, DEFER_MS, PUSH_BACKOFF_B
 import { acquireLease, releaseLease, LEASE_TTL_MS } from '../../src/sync/lease';
 import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
 import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
+import { unregisterWorkspace } from '../../src/workspace-commands';
 import { FakeVendor } from './fake-vendor';
 
 const SESSION_ID = 'push-session';
@@ -108,6 +109,24 @@ describe('pushing the outbox', () => {
         });
         expect(statuses(task.id)).toEqual(['create:done']);
         expect(listEvents(ledger.db, { taskId: task.id, kinds: ['linked'] }).map(event => event.source)).toEqual(['sync']);
+    });
+
+    it('links nothing once the workspace is unregistered during the create, even for a workspace that took its id', async () => {
+        track('Login fix');
+        const create = vendor.create.bind(vendor);
+        let next: WorkspaceRow | undefined;
+        jest.spyOn(vendor, 'create').mockImplementation((desired, body) => {
+            unregisterWorkspace(ledger.db, workspace);
+            next = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'gadgets'));
+            return create(desired, body);
+        });
+
+        await push();
+
+        // The claim went with the workspace's outbox rows: the pusher records nothing for it.
+        expect(next!.id).toBe(workspace.id);
+        expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM vendor_links').get()).toEqual({ n: 0 });
+        expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 0 });
     });
 
     it('pushes a rename after reading the vendor first, and records what it pushed', async () => {

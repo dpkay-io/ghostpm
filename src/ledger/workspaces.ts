@@ -33,6 +33,11 @@ export function getWorkspace(db: Ledger, id: number): WorkspaceRow | undefined {
     return db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as WorkspaceRow | undefined;
 }
 
+/** Still registered as read: `ghostpm unregister` may have forgotten it since, and ids are reused, so the id alone proves nothing. */
+export function isStillRegistered(db: Ledger, workspace: WorkspaceRow): boolean {
+    return getWorkspace(db, workspace.id)?.path === workspace.path;
+}
+
 function getWorkspaceByPath(db: Ledger, root: string): WorkspaceRow | undefined {
     return db.prepare('SELECT * FROM workspaces WHERE path = ?').get(root) as WorkspaceRow | undefined;
 }
