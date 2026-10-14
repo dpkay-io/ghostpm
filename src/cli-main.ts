@@ -21,26 +21,8 @@ async function main() {
         }
 
         case 'doctor': {
-            const { diagnose } = await import('./doctor');
-            const fs = await import('fs');
-            const { execFileSync } = await import('child_process');
-            const home = process.env.HOME || process.env.USERPROFILE || '';
-            const findings = diagnose({
-                settingsPath: path.join(home, '.claude', 'settings.json'),
-                // The binary on PATH is a shim; the package sits beside it in node_modules.
-                resolveGlobal: () => {
-                    try {
-                        const finder = process.platform === 'win32' ? 'where.exe' : 'which';
-                        const shim = String(execFileSync(finder, ['ghostpm'])).split(/\r?\n/)[0].trim();
-                        if (shim.length === 0) return null;
-                        const installDir = path.join(path.dirname(shim), 'node_modules', 'ghostpm');
-                        return fs.existsSync(installDir) ? installDir : null;
-                    } catch {
-                        return null;
-                    }
-                },
-                hasLedgerCode: installDir => fs.existsSync(path.join(installDir, 'dist', 'ledger', 'db.js')),
-            });
+            const { diagnose, machineProbe } = await import('./doctor');
+            const findings = diagnose(machineProbe());
             if (findings.length === 0) {
                 console.log('No problems found.');
             } else {
@@ -49,6 +31,7 @@ async function main() {
                     console.log(`  ${finding.message}`);
                     console.log(`  fix: ${finding.fix}`);
                 });
+                console.log('\nNothing was changed. Run the fixes you agree with.');
             }
             break;
         }

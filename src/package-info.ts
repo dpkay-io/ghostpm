@@ -4,6 +4,9 @@ import * as path from 'path';
 /** package.json of the copy that is running: src/ (tests) and dist/ (installs) both sit one level below it. */
 export const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
 
+/** The MCP server's name: also what 1.4.0's `claude mcp add` registered. A leaf module so doctor need not load the MCP SDK. */
+export const SERVER_NAME = 'ghostpm';
+
 export interface PackageInfo {
     name: string;
     version: string;
