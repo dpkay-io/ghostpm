@@ -1,11 +1,13 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { tempLedger, TempLedger, eventKinds, isolateHomes, linkedWorktree, outboxRows, LEGACY_GITHUB_CONFIG } from './helpers';
-import { Db } from '../../src/db';
+import Database from 'better-sqlite3';
+import {
+    tempLedger, TempLedger, eventKinds, isolateHomes, linkedWorktree, outboxRows, seedLegacyDb, LEGACY_GITHUB_CONFIG, LegacyOutboxItem,
+} from './helpers';
 import { listTasks, getVendorLink, insertTaskRow, insertVendorLink } from '../../src/ledger/tasks';
 import { ensureWorkspace, getWorkspace, normalizePath, setWorkspaceVendor } from '../../src/ledger/workspaces';
-import { registerWorkspace } from '../../src/registry';
+import { REGISTRY_FILE } from '../../src/registry';
 import log = require('../../src/hook/log');
 import { SYNC_LOG_FILE } from '../../src/hook/log';
 import {
@@ -55,38 +57,45 @@ describe('legacy import', () => {
         return root;
     };
 
-    const seedLegacyDb = (root: string, extra: (legacy: Db) => void = () => undefined): void => {
-        const legacy = new Db(root);
-        legacy.upsertTask({
+    /** Two cached issues, 1.4.0's user and sprint, and whatever it left in its outbox. */
+    const seedLegacyRepo = (root: string, outbox: LegacyOutboxItem[] = []): void => seedLegacyDb(root, [
+        {
             id: '42', title: 'Login fix', state: 'in_progress', assignee: 'dpk',
             body: 'details', comments: 'first\n---\nsecond', updatedAt: '2026-09-10T00:00:00.000Z',
             labels: '["bug"]', milestone: 'Sprint 1', url: 'https://github.com/acme/app/issues/42',
-        });
-        legacy.upsertTask({ id: '43', title: 'Closed one', state: 'closed' });
-        legacy.setMetadata('current_user', 'dpk-jha');
-        legacy.setMetadata('active_sprint', JSON.stringify({ name: 'Sprint 1' }));
-        extra(legacy);
-        legacy.close();
+        },
+        { id: '43', title: 'Closed one', state: 'closed' },
+    ], { current_user: 'dpk-jha', active_sprint: JSON.stringify({ name: 'Sprint 1' }) }, outbox);
+
+    const writeRegistry = (paths: string[]): void => {
+        fs.writeFileSync(
+            path.join(tmpHome, REGISTRY_FILE),
+            JSON.stringify(paths.map(p => ({ path: p, vendor: 'github', addedAt: new Date().toISOString() }))),
+            'utf8',
+        );
     };
 
     /** A linked worktree of `main` with its own 1.4.0 config and cache: it resolves to main's workspace. */
     const createLegacyWorktree = (main: string): string => {
         const root = linkedWorktree(main, fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-legacy-wt-')), WORKTREE_NAME);
         fs.writeFileSync(path.join(root, LEGACY_CONFIG_FILE), LEGACY_GITHUB_CONFIG, 'utf8');
-        const legacy = new Db(root);
-        legacy.upsertTask({ id: '7', title: 'Worktree only', state: 'open' });
-        legacy.addOutboxItem({ taskId: '7', action: 'updateTask', payload: JSON.stringify({ comment: 'from the worktree' }), status: 'pending' });
-        legacy.close();
+        seedLegacyDb(root, [{ id: '7', title: 'Worktree only', state: 'open' }], {}, [
+            { taskId: '7', action: 'updateTask', payload: JSON.stringify({ comment: 'from the worktree' }), status: 'pending' },
+        ]);
         return root;
     };
 
     const titlesIn = (workspaceId: number): string[] => listTasks(ledger.db, { workspaceId }).map(t => t.title).sort();
 
     /** 1.4.0's outbox: a state change with a comment it never pushed, and a comment it gave up on. */
-    const seedUnpushed = (legacy: Db): void => {
-        legacy.addOutboxItem({ taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'in_review', comment: 'from 1.4.0' }), status: 'pending' });
-        legacy.addOutboxItem({ taskId: '42', action: 'updateTask', payload: JSON.stringify({ comment: 'gave up' }), status: 'failed' });
-    };
+    const UNPUSHED: LegacyOutboxItem[] = [
+        { taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'in_review', comment: 'from 1.4.0' }), status: 'pending' },
+        { taskId: '42', action: 'updateTask', payload: JSON.stringify({ comment: 'gave up' }), status: 'failed' },
+    ];
+    /** A change 1.4.0 queued for an issue its cache no longer holds. */
+    const UNCACHED: LegacyOutboxItem[] = [
+        { taskId: '99', action: 'updateTask', payload: JSON.stringify({ comment: 'uncached' }), status: 'pending' },
+    ];
 
     beforeEach(() => {
         ledger = tempLedger();
@@ -116,7 +125,7 @@ describe('legacy import', () => {
     });
 
     it('imports tasks, vendor links, comments and metadata', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         const result = importLegacyWorkspace(ledger.db, repo);
         expect(result).toMatchObject({ imported: 2, skipped: 0 });
 
@@ -136,7 +145,7 @@ describe('legacy import', () => {
     });
 
     it('skips tasks that are already imported when run again', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         importLegacyWorkspace(ledger.db, repo);
         const second = importLegacyWorkspace(ledger.db, repo);
         expect(second).toMatchObject({ imported: 0, skipped: 2 });
@@ -151,12 +160,15 @@ describe('legacy import', () => {
     });
 
     it('leaves the legacy database readable and unchanged', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         importLegacyWorkspace(ledger.db, repo);
         expect(fs.existsSync(path.join(repo, LEGACY_DB_FILE))).toBe(true);
-        const legacy = new Db(repo);
-        expect(legacy.getTasks()).toHaveLength(2);
-        legacy.close();
+        const legacy = new Database(path.join(repo, LEGACY_DB_FILE), { readonly: true });
+        try {
+            expect(legacy.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 2 });
+        } finally {
+            legacy.close();
+        }
     });
 
     it('discovers roots from ~/.claude.json, ignoring folders with no legacy config', () => {
@@ -174,14 +186,14 @@ describe('legacy import', () => {
     });
 
     it('falls back to registry-only roots when ~/.claude.json does not exist', () => {
-        registerWorkspace(repo, 'github');
+        writeRegistry([repo]);
         const missing = path.join(tmpHome, 'does-not-exist.json');
         const roots = discoverLegacyRoots(missing).map(normalizePath);
         expect(roots).toEqual([normalizePath(repo)]);
     });
 
     it('falls back to registry-only roots when ~/.claude.json is malformed', () => {
-        registerWorkspace(repo, 'github');
+        writeRegistry([repo]);
         const malformed = path.join(tmpHome, 'malformed.json');
         fs.writeFileSync(malformed, '{ not valid json', 'utf8');
         const roots = discoverLegacyRoots(malformed).map(normalizePath);
@@ -189,7 +201,7 @@ describe('legacy import', () => {
     });
 
     it('imports each repo once, and a repo set up later on the next start', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         expect(runLegacyImport(ledger.db, [repo])).toHaveLength(1);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         expect(getWorkspaceSetting(ledger.db, workspaceId, LEGACY_IMPORT_SETTING)).toBeDefined();
@@ -204,7 +216,7 @@ describe('legacy import', () => {
     });
 
     it('does not reopen the legacy database of a repo it already imported', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         runLegacyImport(ledger.db, [repo]);
         fs.writeFileSync(path.join(repo, LEGACY_DB_FILE), 'not a database');   // opening it now would throw
         const errorSpy = jest.spyOn(console, 'error').mockImplementation();
@@ -220,7 +232,7 @@ describe('legacy import', () => {
         const broken = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-broken-'));
         const errorSpy = jest.spyOn(console, 'error').mockImplementation();
         try {
-            seedLegacyDb(repo);
+            seedLegacyRepo(repo);
             expect(runLegacyImport(ledger.db, [broken, repo])).toHaveLength(1);
             expect(errorSpy).toHaveBeenCalled();
         } finally {
@@ -231,7 +243,7 @@ describe('legacy import', () => {
 
     it('queues the changes 1.4.0 left unpushed, once', () => {
         // No sync_policy is set anywhere: the queue projects only because the import stamps linked-only first.
-        seedLegacyDb(repo, seedUnpushed);
+        seedLegacyRepo(repo, UNPUSHED);
         const result = importLegacyWorkspace(ledger.db, repo);
         const task = listTasks(ledger.db, { workspaceId: result.workspaceId }).find(t => t.title === 'Login fix')!;
         expect(getWorkspaceSetting(ledger.db, result.workspaceId, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_LINKED_ONLY);
@@ -260,14 +272,14 @@ describe('legacy import', () => {
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         setWorkspaceSetting(ledger.db, workspaceId, SETTING_ACTIVE_SPRINT, 'Sprint 9');
         setWorkspaceSetting(ledger.db, workspaceId, SETTING_CURRENT_USER, 'someone-else');
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         importLegacyWorkspace(ledger.db, repo);
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_ACTIVE_SPRINT)).toBe('Sprint 9');
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_CURRENT_USER)).toBe('someone-else');
     });
 
     it('stamps linked-only on a legacy workspace with no sync policy, on import and on every later start', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         runLegacyImport(ledger.db, [repo]);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY)).toBe(SYNC_POLICY_LINKED_ONLY);
@@ -278,7 +290,7 @@ describe('legacy import', () => {
     });
 
     it('turns phase comments off on a legacy workspace with no setting for them, on import and on every later start (F8)', () => {
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         runLegacyImport(ledger.db, [repo]);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_NONE);
@@ -291,7 +303,7 @@ describe('legacy import', () => {
     it('keeps phase comments a person set for the workspace, or globally (F8)', () => {
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         setWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS, PROGRESS_COMMENTS_PHASE);
-        seedLegacyDb(repo);
+        seedLegacyRepo(repo);
         runLegacyImport(ledger.db, [repo]);
         expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PROGRESS_COMMENTS)).toBe(PROGRESS_COMMENTS_PHASE);
 
@@ -307,9 +319,7 @@ describe('legacy import', () => {
     });
 
     it('writes its log lines only once the import has committed (F16)', () => {
-        seedLegacyDb(repo, legacy => {
-            legacy.addOutboxItem({ taskId: '99', action: 'updateTask', payload: JSON.stringify({ comment: 'uncached' }), status: 'pending' });
-        });
+        seedLegacyRepo(repo, UNCACHED);
         const inTransaction: boolean[] = [];
         jest.spyOn(log, 'appendLog').mockImplementation(() => { inTransaction.push(ledger.db.inTransaction); });
 
@@ -323,7 +333,7 @@ describe('legacy import', () => {
         (policy, queued) => {
             const workspaceId = ensureWorkspace(ledger.db, repo).id;
             setWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY, policy);
-            seedLegacyDb(repo, seedUnpushed);
+            seedLegacyRepo(repo, UNPUSHED);
             expect(runLegacyImport(ledger.db, [repo]).map(result => result.queued)).toEqual([queued]);
             expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_SYNC_POLICY)).toBe(policy);
             expect(runLegacyImport(ledger.db, [repo])).toEqual([]);
@@ -333,7 +343,7 @@ describe('legacy import', () => {
 
     it('leaves a legacy workspace unset when a person set the global sync policy', () => {
         setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_OFF);
-        seedLegacyDb(repo, seedUnpushed);
+        seedLegacyRepo(repo, UNPUSHED);
         expect(runLegacyImport(ledger.db, [repo]).map(result => result.queued)).toEqual([0]);
         expect(runLegacyImport(ledger.db, [repo])).toEqual([]);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
@@ -344,7 +354,7 @@ describe('legacy import', () => {
     it.each([['main repo first', false], ['worktree first', true]])(
         'imports a repo and its linked worktree, each once (%s)',
         (_order, worktreeFirst) => {
-            seedLegacyDb(repo);
+            seedLegacyRepo(repo);
             const worktree = createLegacyWorktree(repo);
             try {
                 const roots = worktreeFirst ? [worktree, repo] : [repo, worktree];
@@ -366,7 +376,7 @@ describe('legacy import', () => {
     );
 
     it("reads a workspace's earlier stamp as covering its own root, and still imports its worktree", () => {
-        seedLegacyDb(repo, seedUnpushed);
+        seedLegacyRepo(repo, UNPUSHED);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;
         setWorkspaceSetting(ledger.db, workspaceId, LEGACY_IMPORT_SETTING, WORKSPACE_STAMP);
         const worktree = createLegacyWorktree(repo);
@@ -381,10 +391,10 @@ describe('legacy import', () => {
     });
 
     it('counts only the rows it queued', () => {
-        seedLegacyDb(repo, legacy => {
-            legacy.addOutboxItem({ taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'in_review' }), status: 'pending' });
-            legacy.addOutboxItem({ taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'closed' }), status: 'pending' });
-        });
+        seedLegacyRepo(repo, [
+            { taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'in_review' }), status: 'pending' },
+            { taskId: '42', action: 'updateTask', payload: JSON.stringify({ state: 'closed' }), status: 'pending' },
+        ]);
         const result = importLegacyWorkspace(ledger.db, repo);
         const task = listTasks(ledger.db, { workspaceId: result.workspaceId }).find(t => t.title === 'Login fix')!;
         expect(outboxRows(ledger.db, task.id).map(row => row.op)).toEqual(['sync_state']);
@@ -392,9 +402,7 @@ describe('legacy import', () => {
     });
 
     it('logs a 1.4.0 change it cannot queue because the issue is not in the cache', () => {
-        seedLegacyDb(repo, legacy => {
-            legacy.addOutboxItem({ taskId: '99', action: 'updateTask', payload: JSON.stringify({ comment: 'uncached' }), status: 'pending' });
-        });
+        seedLegacyRepo(repo, UNCACHED);
         const result = importLegacyWorkspace(ledger.db, repo);
         expect(result.queued).toBe(0);
         const lines = fs.readFileSync(path.join(tmpHome, SYNC_LOG_FILE), 'utf8').trim().split('\n');
@@ -417,7 +425,7 @@ describe('legacy import', () => {
     });
 
     it('stamps and queues a ledger a pre-release build imported, once', () => {
-        seedLegacyDb(repo, seedUnpushed);
+        seedLegacyRepo(repo, UNPUSHED);
         // What a pre-release build left: the global stamp and linked tasks; no workspace stamp, no policy, nothing queued.
         setSetting(ledger.db, LEGACY_IMPORT_SETTING, PRE_RELEASE_STAMP);
         const workspaceId = ensureWorkspace(ledger.db, repo).id;

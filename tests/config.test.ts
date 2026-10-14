@@ -1,4 +1,4 @@
-import { loadConfig, translateState, McpPmConfig } from '../src/config';
+import { loadConfig } from '../src/config';
 import * as fs from 'fs';
 import * as init from '../src/init';
 import * as path from 'path';
@@ -56,31 +56,6 @@ notifications: []
             const config = loadConfig('/git/root');
             expect(config.vendor).toBe('github');
             expect(config.workflow.states).toEqual(['open', 'in_progress', 'closed']);
-        });
-    });
-
-    describe('translateState', () => {
-        const mockConfig: McpPmConfig = {
-            vendor: 'github',
-            workflow: {
-                states: ['open', 'in_progress', 'closed'],
-                transitions: {
-                    start_task: 'in_progress'
-                }
-            },
-            views: {
-                list_columns: [],
-                detail_fields: []
-            },
-            notifications: []
-        };
-
-        it('should translate state if found in transitions', () => {
-            expect(translateState('start_task', mockConfig)).toBe('in_progress');
-        });
-
-        it('should return the original state if not found in transitions', () => {
-            expect(translateState('closed', mockConfig)).toBe('closed');
         });
     });
 });

@@ -8,6 +8,9 @@ export interface WorkspaceEntry {
     addedAt: string;
 }
 
+/** GhostPM 1.4.0's workspace list. Read once by the legacy import; nothing writes it any more. */
+export const REGISTRY_FILE = 'workspaces.json';
+
 /** The one answer to "where is home": setup, doctor and the ledger must agree, and os.homedir() is what tests can isolate. */
 export function homeDir(): string {
     return os.homedir();
@@ -18,7 +21,7 @@ export function getGhostpmHome(): string {
 }
 
 function getRegistryPath(): string {
-    return path.join(getGhostpmHome(), 'workspaces.json');
+    return path.join(getGhostpmHome(), REGISTRY_FILE);
 }
 
 export function getWorkspaces(): WorkspaceEntry[] {
@@ -30,33 +33,4 @@ export function getWorkspaces(): WorkspaceEntry[] {
     } catch {
         return [];
     }
-}
-
-function saveWorkspaces(workspaces: WorkspaceEntry[]): void {
-    const dir = getGhostpmHome();
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(getRegistryPath(), JSON.stringify(workspaces, null, 2), 'utf8');
-}
-
-export function registerWorkspace(gitRoot: string, vendor: string): void {
-    const workspaces = getWorkspaces();
-    const existing = workspaces.findIndex(w => w.path === gitRoot);
-    const entry: WorkspaceEntry = { path: gitRoot, vendor, addedAt: new Date().toISOString() };
-
-    if (existing >= 0) {
-        workspaces[existing] = entry;
-    } else {
-        workspaces.push(entry);
-    }
-
-    saveWorkspaces(workspaces);
-}
-
-export function unregisterWorkspace(gitRoot: string): boolean {
-    const workspaces = getWorkspaces();
-    const idx = workspaces.findIndex(w => w.path === gitRoot);
-    if (idx < 0) return false;
-    workspaces.splice(idx, 1);
-    saveWorkspaces(workspaces);
-    return true;
 }

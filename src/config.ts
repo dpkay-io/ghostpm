@@ -41,15 +41,3 @@ export function loadConfig(currentPath: string = process.cwd()): McpPmConfig {
     }
     return result.data;
 }
-
-// Config parser that translates generic states (e.g., "in_progress") to vendor-specific flags.
-export function translateState(state: string, config: McpPmConfig): string {
-    // If it's a known transition state, resolve it
-    if (config.workflow.transitions[state]) {
-        return config.workflow.transitions[state];
-    }
-    
-    // Otherwise return as is, assuming it's already a target state
-    // Vendor adapters can do further specific logic based on their workflow
-    return state;
-}
