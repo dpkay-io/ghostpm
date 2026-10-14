@@ -11,7 +11,7 @@ import { TaskRow, formatTaskId } from '../src/ledger/types';
 import { NOT_A_WORKSPACE } from '../src/surfaces/task-views';
 import { SINCE_HELP } from '../src/surfaces/since';
 import { LEGACY_CONFIG_FILE } from '../src/ledger/legacy-import';
-import { FLAG_YES } from '../src/cli-args';
+import { FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES } from '../src/cli-args';
 import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
@@ -242,5 +242,20 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         expect(result.status).toBe(EXIT_FAILURE);
         expect(result.stderr).toContain('No GhostPM workspace at');
         expect(cli(['tasks']).stdout).toContain(TASK_TITLE);
+    });
+    it('prints the package version', () => {
+        const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')) as { version: string };
+        for (const flag of [FLAG_VERSION, FLAG_VERSION_SHORT]) {
+            const result = cli([flag]);
+            expect(result.status).toBe(EXIT_OK);
+            expect(result.stdout.trim()).toBe(manifest.version);
+        }
+    });
+
+    it('lists every command in help, and still answers help when nothing is registered', () => {
+        const result = cli(['help']);
+        expect(result.status).toBe(EXIT_OK);
+        expect(result.stdout).toContain('dashboard');
+        expect(result.stdout).toContain('doctor');
     });
 });

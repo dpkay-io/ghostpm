@@ -28,11 +28,12 @@ import { defaultSyncDeps, startSyncRunner, sweepStaleArgDirs } from "./sync/runn
 import { describeSync } from "./surfaces/sync-health";
 import { TASK_COLUMNS, phaseSummary, taskCell } from "./surfaces/task-views";
 import { dashboardText } from "./surfaces/dashboard";
+import { packageVersion } from "./package-info";
 
 const execFileAsync = promisify(execFile);
 
 export const SERVER_NAME = "ghostpm";
-export const SERVER_VERSION = "2.0.0";
+export const SERVER_VERSION = packageVersion();
 export const ALL_SPRINTS = "all";
 export const CLEAR_SPRINT = "__clear__";
 export const CURRENT_USER_REF = "@me";

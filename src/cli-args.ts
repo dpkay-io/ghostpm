@@ -30,3 +30,8 @@ export function firstPositional(args: readonly string[]): string | undefined {
     for (const arg of args) if (arg.indexOf(FLAG_PREFIX) !== 0) return arg;
     return undefined;
 }
+export const FLAG_VERSION = '--version';
+export const FLAG_VERSION_SHORT = '-v';
+export const FLAG_GLOBAL = '--global';
+export const FLAG_STATUSLINE = '--statusline';
+export const FLAG_RESTORE = '--restore';

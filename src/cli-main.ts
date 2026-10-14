@@ -1,40 +1,15 @@
 #!/usr/bin/env node
 
 import * as path from 'path';
+import { FLAG_GLOBAL, FLAG_RESTORE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT } from './cli-args';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
 const EXIT_FAILURE = 1;
 
-function printHelp() {
-    const help = `ghostpm - Zero-latency PM interface for AI agents
-
-Usage: ghostpm <command>
-
-Commands:
-  init              Initialize project + auto-register MCP server
-  setup             Install the skill (statusline untouched)
-  setup --global    Install the skill for every project
-  setup --statusline    Also show the active task in the statusline (off by default)
-  setup --restore   Put the statusline back the way it was
-  config get|set|unset <key> [value...] [--workspace <path>]
-                    Read or change a setting (sync_policy, progress_comments, plan_globs, ...)
-  tasks             List cached tasks
-  sync              Push queued changes to GitHub / Azure DevOps and pull theirs now
-                    (also resumes a paused workspace and retries failed pushes)
-  status            Show sync status and config
-  dashboard         Show all workspaces and task status
-  unregister [path] Remove a workspace from the dashboard
-  bootstrap         Build the native SQLite addon into the ghostpm home
-  serve             Start MCP server (used by MCP clients)
-  help              Show this help
-
-Quick start:
-  npm install -g ghostpm
-  cd your-project
-  ghostpm init`;
-
-    console.log(help);
+async function printHelp(): Promise<void> {
+    const { HELP_TEXT } = await import('./help');
+    console.log(HELP_TEXT);
 }
 
 async function main() {
@@ -111,7 +86,7 @@ async function main() {
         }
 
         case 'setup': {
-            if (args.includes('--restore')) {
+            if (args.includes(FLAG_RESTORE)) {
                 const { restoreStatusline, userSettingsPath } = await import('./plugin-setup');
                 const { openLedger, ledgerPath } = await import('./ledger/db');
                 const settingsPath = userSettingsPath();
@@ -129,8 +104,8 @@ async function main() {
             }
             const { setup } = await import('./setup');
             await setup({
-                global: args.includes('--global'),
-                statusline: args.includes('--statusline'),
+                global: args.includes(FLAG_GLOBAL),
+                statusline: args.includes(FLAG_STATUSLINE),
             });
             break;
         }
@@ -245,16 +220,23 @@ async function main() {
             break;
         }
 
+        case FLAG_VERSION:
+        case FLAG_VERSION_SHORT: {
+            const { packageVersion } = await import('./package-info');
+            console.log(packageVersion());
+            break;
+        }
+
         case 'help':
         case '--help':
         case '-h':
         case undefined:
-            printHelp();
+            await printHelp();
             break;
 
         default:
             console.error(`Unknown command: ${command}\n`);
-            printHelp();
+            await printHelp();
             process.exit(1);
     }
 }
