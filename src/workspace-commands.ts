@@ -19,6 +19,7 @@ import { AzureAdapter, AzureProcess } from './sync/azure';
 import { AzureIdentity, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
 import { quoteForShell } from './shell-quote';
+import { cleanText } from './surfaces/text';
 import { SyncPausedError } from './sync/vendor';
 
 /** How far back init samples work items to learn the process template's states and types. */
@@ -70,10 +71,10 @@ function importLegacyFolder(db: Ledger, cwd: string, warnings: string[]): number
 /** What init learns from an Azure DevOps sample, in the order it reports them. */
 const AZURE_SETTINGS = [SETTING_PHASE_STATE_MAP, SETTING_ADO_WORK_ITEM_TYPE];
 
-/** One piece of advice for any az failure: az's own (worded for init by the adapter), or fix it and run init again. */
+/** One piece of advice for any az failure: az's own (worded for init by the adapter), or fix it and run init again. Quotes az: cleaned. */
 function sampleFailure(project: string, error: unknown): string {
-    if (error instanceof SyncPausedError) return `Could not sample work items in ${project}. ${error.reason}`;
-    return `Could not sample work items in ${project} (${(error as Error).message}). Fix that, then run \`${INIT_COMMAND}\`.`;
+    if (error instanceof SyncPausedError) return cleanText(`Could not sample work items in ${project}. ${error.reason}`);
+    return cleanText(`Could not sample work items in ${project} (${(error as Error).message}). Fix that, then run \`${INIT_COMMAND}\`.`);
 }
 
 /**
@@ -86,21 +87,23 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
     if (missing.length === 0) return;
     const identity = identityOf(result.workspace);
     if (identity === null || identity.vendor !== AZURE_DEVOPS) {
-        result.warnings.push(`Could not read the Azure DevOps organization and project from the git remote (${result.workspace.git_remote ?? NO_REMOTE}).`);
+        result.warnings.push(`Could not read the Azure DevOps organization and project from the git remote (${cleanText(result.workspace.git_remote ?? NO_REMOTE)}).`);
         return;
     }
+    // Decoded from the remote URL, and the states are the vendor's: both printed cleaned.
+    const project = cleanText(identity.project);
     let sampled: AzureProcess;
     try {
         // A network call: no transaction is open here (spec §5).
         sampled = await sniff(identity);
     } catch (error) {
-        result.warnings.push(sampleFailure(identity.project, error));
+        result.warnings.push(sampleFailure(project, error));
         return;
     }
 
     const noneChanged = (key: string): string =>
-        `No work items changed in the last ${AZURE_SAMPLE_DAYS} days in ${identity.project} to learn ${key} from.`;
-    const unrecognised = `None of the states sampled in ${identity.project} (${sampled.states.join(', ')}) reads as a GhostPM phase, `
+        `No work items changed in the last ${AZURE_SAMPLE_DAYS} days in ${project} to learn ${key} from.`;
+    const unrecognised = `None of the states sampled in ${project} (${cleanText(sampled.states.join(', '))}) reads as a GhostPM phase, `
         + `so ${SETTING_PHASE_STATE_MAP} was not set: run \`ghostpm config set ${SETTING_PHASE_STATE_MAP} <phase>=<State>... `
         + `--workspace ${quoteForShell(result.workspace.path)}\`.`;
     const stateMap = phaseStateMapFrom(sampled.states);
@@ -174,7 +177,7 @@ export function describeInit(result: InitResult): string {
     const workspace = result.workspace;
     const lines = [
         `Workspace: ${workspace.path}`,
-        `Vendor:    ${workspace.vendor}${workspace.git_remote ? ` (${workspace.git_remote})` : ''}`,
+        `Vendor:    ${workspace.vendor}${workspace.git_remote ? ` (${cleanText(workspace.git_remote)})` : ''}`,
     ];
     if (result.imported > 0) lines.push(`Imported ${result.imported} task(s) from the 1.4.0 database.`);
     if (result.applied.length > 0) lines.push(`Detected: ${result.applied.join(', ')}.`);

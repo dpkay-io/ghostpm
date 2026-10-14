@@ -256,10 +256,10 @@ export class PmServer {
                 const staleMinutes = readSetting(this.db, workspace.id, SETTING_STALE_SESSION_MINUTES);
                 return text([
                     `**Workspace:** ${workspace.path} (vendor: ${workspace.vendor})`,
-                    `**User:** ${getWorkspaceSetting<string>(this.db, workspace.id, SETTING_CURRENT_USER) ?? UNKNOWN}`,
-                    `**Active Sprint:** ${getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT) ?? NONE_SET}`,
+                    `**User:** ${cleanText(getWorkspaceSetting<string>(this.db, workspace.id, SETTING_CURRENT_USER) ?? UNKNOWN)}`,
+                    `**Active Sprint:** ${cleanText(getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT) ?? NONE_SET)}`,
                     `**Current Branch:** ${branch ?? UNKNOWN}`,
-                    active ? `**Active Task:** ${formatTaskId(active.id)} ${active.title} · ${active.phase}` : '**Active Task:** _none_',
+                    active ? `**Active Task:** ${formatTaskId(active.id)} ${cleanText(active.title)} · ${active.phase}` : '**Active Task:** _none_',
                     `**Tasks:** ${tasks.length} total${summary ? ` — ${summary}` : ''}`,
                     `**Live Sessions:** ${listLiveSessions(this.db, staleMinutes).length}`,
                     `**Sync:** ${describeSync(this.db, workspace)}`,
@@ -279,7 +279,7 @@ export class PmServer {
                     const sprints = this.sprintsOf(workspace.id);
                     if (sprints.length === 0) return text('No sprints found in this workspace.');
                     const active = getWorkspaceSetting<string>(this.db, workspace.id, SETTING_ACTIVE_SPRINT);
-                    return text(sprints.map(sprint => `${sprint === active ? '→ ' : '  '}${sprint}`).join('\n'));
+                    return text(sprints.map(sprint => `${sprint === active ? '→ ' : '  '}${cleanText(sprint)}`).join('\n'));
                 }
                 if (sprint_name === CLEAR_SPRINT) {
                     setWorkspaceSetting(this.db, workspace.id, SETTING_ACTIVE_SPRINT, undefined);
@@ -287,7 +287,7 @@ export class PmServer {
                 }
                 setWorkspaceSetting(this.db, workspace.id, SETTING_ACTIVE_SPRINT, sprint_name);
                 const count = listTasks(this.db, { workspaceId: workspace.id, milestone: sprint_name }).length;
-                return text(`Active sprint set to **${sprint_name}** (${count} task${count === 1 ? '' : 's'}).`);
+                return text(`Active sprint set to **${cleanText(sprint_name)}** (${count} task${count === 1 ? '' : 's'}).`);
             },
         );
 
@@ -318,7 +318,7 @@ export class PmServer {
                     phases: phase ? [phase] : undefined,
                 });
                 if (tasks.length === 0) return text('No tasks found.');
-                return text(`${milestone ? `_Sprint: ${milestone}_\n\n` : ''}${this.renderTable(tasks)}`);
+                return text(`${milestone ? `_Sprint: ${cleanText(milestone)}_\n\n` : ''}${this.renderTable(tasks)}`);
             },
         );
 
@@ -397,7 +397,7 @@ export class PmServer {
                     const wantsBranch = readSetting(this.db, workspace.id, SETTING_CREATE_BRANCH);
                     const branchNote = wantsBranch && (result.created || result.reopened) ? await this.ensureBranch(result.task) : '';
                     const crossNote = this.crossWorkspaceNote(workspace.id, result.task);
-                    return text(`${verb} ${formatTaskId(result.task.id)} "${result.task.title}" (${result.task.phase}).${crossNote}${branchNote}`);
+                    return text(`${verb} ${formatTaskId(result.task.id)} "${cleanText(result.task.title)}" (${result.task.phase}).${crossNote}${branchNote}`);
                 } catch (error) {
                     return failure(error);
                 }
@@ -453,7 +453,7 @@ export class PmServer {
                         source: this.source(), sessionId: this.sessionId,
                     });
                     const crossNote = this.crossWorkspaceNote(workspace.id, result.into, result.from);
-                    return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${result.into.title}".${crossNote}`);
+                    return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${cleanText(result.into.title)}".${crossNote}`);
                 } catch (error) {
                     return failure(error);
                 }

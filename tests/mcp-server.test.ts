@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as child_process from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { PmServer, openerFor } from '../src/mcp-server';
+import { ALL_SPRINTS, PmServer, openerFor } from '../src/mcp-server';
 import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { recordEvent } from '../src/ledger/events';
@@ -16,6 +16,9 @@ import {
 } from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
 import { quoteForShell } from '../src/shell-quote';
+import { cleanText } from '../src/surfaces/text';
+import { TaskRow } from '../src/ledger/types';
+import { HOSTILE, NOT_ONE_LINE, TERMINAL_CONTROL } from './hostile-text';
 import { tempLedger, TempLedger, clonedRepo, outboxRows } from './ledger/helpers';
 import { removeTempDir } from './temp-dir';
 
@@ -134,6 +137,48 @@ describe('mcp server on the ledger', () => {
         const table = await call('query_tasks');
         expect(table).toContain('| id | phase | title | assignee | remote |');
         expect(table).toContain(`| T${imported.id} | planned | Login fix | dpk | #42 |`);
+    });
+
+    describe('vendor text in every answer', () => {
+        /** One markdown table row per task: the header, its rule and the rows. */
+        const TABLE_HEADER_LINES = 2;
+        const clean = cleanText(HOSTILE);
+        let hostile: TaskRow;
+
+        beforeEach(() => {
+            hostile = task(HOSTILE, { origin: 'vendor', assignee: HOSTILE, milestone: HOSTILE });
+            insertVendorLink(db, { taskId: hostile.id, vendor: 'github', remoteId: '7' });
+            setWorkspaceSetting(db, workspaceId, SETTING_CURRENT_USER, HOSTILE);
+        });
+
+        it('keeps each query_tasks row on one line, with its | escaped', async () => {
+            const table = await call('query_tasks', { sprint: ALL_SPRINTS });
+            expect(table).not.toMatch(TERMINAL_CONTROL);
+            expect(table.trim().split('\n')).toHaveLength(TABLE_HEADER_LINES + 1);
+            expect(table).toContain(`| ${clean.replace(/\|/g, '\\|')} |`);
+        });
+
+        it('cleans the sprint the table is filtered by, and the sprints set_sprint lists', async () => {
+            expect(await call('query_tasks', { sprint: HOSTILE })).toContain(`_Sprint: ${clean}_\n`);
+            expect(await call('set_sprint')).toBe(`  ${clean}`);
+        });
+
+        it('cleans the user, the sprint and the active task title in get_project_state', async () => {
+            await call('set_sprint', { sprint_name: HOSTILE });
+            mockExecFile(null, `task/T${hostile.id}\n`);
+            const state = await call('get_project_state');
+            expect(state).not.toMatch(TERMINAL_CONTROL);
+            expect(state).toContain(`**User:** ${clean}\n`);
+            expect(state).toContain(`**Active Sprint:** ${clean}\n`);
+            expect(state).toContain(`**Active Task:** T${hostile.id} ${clean} · planned\n`);
+        });
+
+        it('cleans the title track_work echoes and every timeline line', async () => {
+            expect(await call('track_work', { title: 'more', intent: 'fix', task_id: `T${hostile.id}` })).not.toMatch(NOT_ONE_LINE);
+            const timeline = await call('timeline');
+            expect(timeline).not.toMatch(TERMINAL_CONTROL);
+            timeline.split('\n').forEach(line => expect(line).toMatch(/^- /));
+        });
     });
 
     it('resolves @me only when the user is known', async () => {

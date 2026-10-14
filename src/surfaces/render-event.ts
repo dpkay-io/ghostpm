@@ -1,7 +1,7 @@
 import * as path from 'path';
 import { TimelineEntry } from '../ledger/events';
 import { EventRow, formatTaskId, plural } from '../ledger/types';
-import { truncate } from './text';
+import { cleanText, truncate } from './text';
 
 /** How many edited files a progress line names before counting the rest. */
 export const FILES_NAMED = 3;
@@ -115,7 +115,7 @@ export function eventTask(entry: Pick<TimelineEntry, 'task_id' | 'title'>): stri
     return entry.task_id === null ? '' : `${formatTaskId(entry.task_id)} ${entry.title ?? ''} · `;
 }
 
-/** One timeline line: `- <at> · T42 <title> · <detail> (<source>)`. */
+/** One timeline line: `- <at> · T42 <title> · <detail> (<source>)`. Titles, links and names are vendor text: cleaned, so it stays one line. */
 export function renderEvent(entry: RenderableEvent): string {
-    return `- ${entry.at} · ${eventTask(entry)}${eventDetail(entry)} (${entry.source})`;
+    return cleanText(`- ${entry.at} · ${eventTask(entry)}${eventDetail(entry)} (${entry.source})`);
 }

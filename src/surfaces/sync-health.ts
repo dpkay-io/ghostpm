@@ -5,6 +5,7 @@ import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
 import { leaseHolder } from '../sync/lease';
 import { outboxHealth } from '../sync/outbox';
 import { syncIsOff, syncOffHint } from '../sync/schedule';
+import { cleanText } from './text';
 
 export interface SyncHealth {
     /** Queued and in-flight (claimed) pushes alike. */
@@ -61,7 +62,8 @@ export function syncDescription(db: Ledger, workspace: WorkspaceRow, health: Syn
     const counts: string[] = [];
     if (health.pending > 0) counts.push(`${health.pending} pending`);
     if (health.failed > 0) counts.push(`${health.failed} failed`);
-    const detail = health.paused === null ? null : `${STATE_PAUSED}: ${health.paused}`;
+    // The pause reason quotes the vendor CLI: cleaned here, once for every surface.
+    const detail = health.paused === null ? null : `${STATE_PAUSED}: ${cleanText(health.paused)}`;
     if (counts.length > 0) return { state: counts.join(PART_SEPARATOR), detail };
     return { state: detail === null ? SYNC_OK : STATE_PAUSED, detail };
 }

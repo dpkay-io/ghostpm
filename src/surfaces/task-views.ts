@@ -10,7 +10,7 @@ import { getWorkspace } from '../ledger/workspaces';
 import { CLOSED_PHASES, PHASES, Phase, TaskRow, WorkspaceRow, formatTaskId } from '../ledger/types';
 import { FLAG_ALL } from '../cli-args';
 import { describeSync, machineSyncHealth } from './sync-health';
-import { alignColumns, formatClock, formatDateTime, padRight, workspaceLabel } from './text';
+import { alignColumns, cleanText, formatClock, formatDateTime, padRight, workspaceLabel } from './text';
 
 /** The columns of every task table: the CLI list and the MCP query_tasks markdown. */
 export const TASK_COLUMNS = ['id', 'phase', 'title', 'assignee', 'remote'] as const;
@@ -24,15 +24,16 @@ const NOT_DETECTED = '(not detected)';
 const NONE = 'none';
 const NEVER = 'never';
 
+/** Vendor text (title, assignee, remote id) comes cleaned: every table prints one row per line. */
 export function taskCell(db: Ledger, task: TaskRow, column: TaskColumn): string {
     switch (column) {
         case 'id': return formatTaskId(task.id);
         case 'phase': return task.phase;
-        case 'title': return task.title;
-        case 'assignee': return task.assignee ?? '';
+        case 'title': return cleanText(task.title);
+        case 'assignee': return cleanText(task.assignee ?? '');
         case 'remote': {
             const link = getVendorLink(db, task.id);
-            return link ? `#${link.remote_id}` : '';
+            return link ? `#${cleanText(link.remote_id)}` : '';
         }
     }
 }
@@ -72,11 +73,12 @@ export function renderStatus(db: Ledger, workspace: WorkspaceRow, ledgerFile: st
     const runner = machineSyncHealth(db, new Date(now).toISOString()).runner;
     const policy = explainSetting(db, workspace.id, SETTING_SYNC_POLICY);
     const lastPull = getWorkspaceSetting<string>(db, workspace.id, SETTING_LAST_SYNC);
+    // The remote, the user and the sprint come from git config and the vendor: cleaned. describeSync cleans the pause reason.
     const rows: [string, string][] = [
         ['Workspace', workspace.path],
-        ['Vendor', workspace.git_remote ? `${workspace.vendor} (${workspace.git_remote})` : workspace.vendor],
-        ['User', getWorkspaceSetting<string>(db, workspace.id, SETTING_CURRENT_USER) ?? NOT_DETECTED],
-        ['Sprint', getWorkspaceSetting<string>(db, workspace.id, SETTING_ACTIVE_SPRINT) ?? NONE],
+        ['Vendor', workspace.git_remote ? `${workspace.vendor} (${cleanText(workspace.git_remote)})` : workspace.vendor],
+        ['User', cleanText(getWorkspaceSetting<string>(db, workspace.id, SETTING_CURRENT_USER) ?? NOT_DETECTED)],
+        ['Sprint', cleanText(getWorkspaceSetting<string>(db, workspace.id, SETTING_ACTIVE_SPRINT) ?? NONE)],
         ['Tasks', `${tasks.length} total${summary ? ` (${summary})` : ''}`],
         ['Sessions', `${live} live here`],
         ['Policy', `${policy.value} (${policy.source})`],

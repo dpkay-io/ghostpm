@@ -21,6 +21,8 @@ import { AzureProcess } from '../src/sync/azure';
 import { AzureIdentity } from '../src/sync/identity';
 import { syncOffHint } from '../src/sync/schedule';
 import { quoteForShell } from '../src/shell-quote';
+import { cleanText } from '../src/surfaces/text';
+import { HOSTILE, TERMINAL_CONTROL } from './hostile-text';
 import {
     AZURE_SAMPLE_DAYS, describeInit, describeUnregister, initWorkspace, unregisterTarget, unregisterWorkspace,
 } from '../src/workspace-commands';
@@ -241,6 +243,16 @@ describe('workspace commands', () => {
             expect(warnings).toContain(`ghostpm config set ${SETTING_PHASE_STATE_MAP}`);
             expect(warnings).toContain(`--workspace ${quoteForShell(result.workspace.path)}`);
             expect(warnings).not.toContain('No work items changed');
+        });
+
+        it('prints sampled states and az\'s own words on clean lines', async () => {
+            const sampled = await initWorkspace(ledger.db, repo(AZURE_REMOTE), sniffing({ states: [HOSTILE], workItemTypes: [] }));
+            const failed = await initWorkspace(ledger.db, repo(AZURE_REMOTE), async () => { throw new Error(HOSTILE); });
+
+            [describeInit(sampled), describeInit(failed)].forEach(text => {
+                expect(text).not.toMatch(TERMINAL_CONTROL);
+                expect(text).toContain(cleanText(HOSTILE));
+            });
         });
 
         it('warns and sets nothing when az cannot sample, with one piece of advice: run init again', async () => {

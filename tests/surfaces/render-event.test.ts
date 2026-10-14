@@ -2,7 +2,8 @@ import { EVENT_KINDS, EventKind } from '../../src/ledger/types';
 import {
     COMMENT_PREVIEW_CHARS, RenderableEvent, eventDetail, eventFiles, renderEvent,
 } from '../../src/surfaces/render-event';
-import { ELLIPSIS } from '../../src/surfaces/text';
+import { ELLIPSIS, cleanText } from '../../src/surfaces/text';
+import { HOSTILE, NOT_ONE_LINE } from '../hostile-text';
 
 const AT = '2026-09-29T10:00:00.000Z';
 
@@ -80,6 +81,20 @@ describe('renderEvent', () => {
     it('prints time, task, detail and source on one line', () => {
         expect(renderEvent(event('phase', { from: 'planned', to: 'in_progress' })))
             .toBe(`- ${AT} · T42 Login fix · planned → in_progress (test)`);
+    });
+
+    it('keeps a hostile title, rename, link and source on one clean line (the MCP timeline prints it as is)', () => {
+        const hostile = { title: HOSTILE, source: HOSTILE };
+        [
+            event('renamed', { from: 'a', to: HOSTILE }, hostile),
+            event('pr', { url: HOSTILE }, hostile),
+            event('linked', { url: HOSTILE }, hostile),
+            event('progress', { files: [HOSTILE] }, hostile),
+        ].forEach(entry => {
+            const line = renderEvent(entry);
+            expect(line).not.toMatch(NOT_ONE_LINE);
+            expect(line).toContain(`T42 ${cleanText(HOSTILE)} · `);
+        });
     });
 
     it('leaves out the task part for an event with no task', () => {

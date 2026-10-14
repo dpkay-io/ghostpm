@@ -6,11 +6,13 @@ import { ensureWorkspace, getWorkspace } from '../../src/ledger/workspaces';
 import { createTask, insertVendorLink } from '../../src/ledger/tasks';
 import { STATUS_FAILED } from '../../src/ledger/projection';
 import {
-    SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause, setWorkspaceSetting,
+    SETTING_ACTIVE_SPRINT, SETTING_CURRENT_USER, SETTING_LAST_SYNC, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause,
+    setWorkspaceSetting,
 } from '../../src/ledger/settings';
 import { Phase, formatTaskId } from '../../src/ledger/types';
-import { ELLIPSIS, formatDateTime } from '../../src/surfaces/text';
-import { MAX_CELL_WIDTH, phaseSummary, renderStatus, renderTaskList } from '../../src/surfaces/task-views';
+import { ELLIPSIS, cleanText, formatDateTime } from '../../src/surfaces/text';
+import { MAX_CELL_WIDTH, phaseSummary, renderStatus, renderTaskList, taskCell } from '../../src/surfaces/task-views';
+import { HOSTILE, NOT_ONE_LINE, TERMINAL_CONTROL } from '../hostile-text';
 
 describe('task views', () => {
     let ledger: TempLedger;
@@ -58,6 +60,14 @@ describe('task views', () => {
         expect(lines[1]).not.toContain('\u001b');
     });
 
+    it('gives every table the cleaned cell: no escape, bidi control or line break from the vendor', () => {
+        const hostile = createTask(ledger.db, { title: HOSTILE, phase: 'planned', workspaceId: here, origin: 'vendor', source: 'test', assignee: HOSTILE });
+        insertVendorLink(ledger.db, { taskId: hostile.id, vendor: 'github', remoteId: HOSTILE });
+
+        (['title', 'assignee', 'remote'] as const).forEach(column => expect(taskCell(ledger.db, hostile, column)).not.toMatch(NOT_ONE_LINE));
+        expect(taskCell(ledger.db, hostile, 'title')).toBe(cleanText(HOSTILE));
+    });
+
     it('adds the workspace column when listing every workspace', () => {
         task('Here', here);
         task('There', there);
@@ -89,6 +99,21 @@ describe('task views', () => {
         expect(status).toContain('Last pull: never');
         expect(status).toContain('Runner:    none');
         expect(status).toContain(`Ledger:    ${file} (schema ${SCHEMA_VERSION})`);
+    });
+
+    it('prints what the vendor named (user, sprint, pause reason) on one clean line each', () => {
+        const repo = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'gh'));
+        setWorkspaceSetting(ledger.db, repo.id, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        setWorkspaceSetting(ledger.db, repo.id, SETTING_CURRENT_USER, HOSTILE);
+        setWorkspaceSetting(ledger.db, repo.id, SETTING_ACTIVE_SPRINT, HOSTILE);
+        setSyncPause(ledger.db, repo.id, HOSTILE);
+
+        const status = renderStatus(ledger.db, repo, path.join(ledger.dir, LEDGER_FILE));
+
+        expect(status).not.toMatch(TERMINAL_CONTROL);
+        expect(status).toContain(`User:      ${cleanText(HOSTILE)}\n`);
+        expect(status).toContain(`Sprint:    ${cleanText(HOSTILE)}\n`);
+        expect(status).toContain(`Sync:      paused: ${cleanText(HOSTILE)}\n`);
     });
 
     it('shows the sync policy with its source, the shared sync wording and the last pull', () => {
