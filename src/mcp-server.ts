@@ -29,6 +29,8 @@ import { describeSync } from "./surfaces/sync-health";
 import { TASK_COLUMNS, phaseSummary, taskCell } from "./surfaces/task-views";
 import { dashboardText } from "./surfaces/dashboard";
 import { packageVersion } from "./package-info";
+import { systemTool } from "./cli";
+import { cleanText } from "./surfaces/text";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,6 +44,14 @@ const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
 const DEFAULT_TIMELINE_HOURS = 24;
 const SOURCE_PREFIX = "mcp";
+/** Only web links reach the OS URL handler: file:, javascript: or ms-settings: from a vendor body must never launch anything. */
+export const OPENABLE_PROTOCOLS: ReadonlySet<string> = new Set(["http:", "https:"]);
+/**
+ * rundll32 hands its raw command tail to the handler, so the link must be one that Windows never quotes (no space,
+ * tab or quote). The serialised URL escapes those everywhere but the host, where only a quote can survive.
+ */
+const WINDOWS_QUOTED = '"';
+const WINDOWS_URL_HANDLER = "url.dll,FileProtocolHandler";
 /** What update_task says about a publish request, by what the ledger did with it. */
 const PUBLISH_NOTES: Record<ProjectionResult, string> = {
     no_vendor: 'not published: this workspace has no GitHub or Azure DevOps remote',
@@ -104,6 +114,35 @@ const failure = (error: unknown): ToolResult => ({
     content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
     isError: true,
 });
+
+/**
+ * The link exactly as the opener receives it, or an error saying why it is refused. It is the serialised URL, never the
+ * caller's spelling, so `https:\\host\share` reaches the handler as `https://host/share`, not as a UNC path.
+ */
+function openableLink(raw: string): string {
+    const url = new URL(raw);
+    if (!OPENABLE_PROTOCOLS.has(url.protocol)) {
+        throw new Error(`Only http and https links can be opened; refusing a ${url.protocol} link.`);
+    }
+    // The URL parser silently drops tabs and newlines; a bidi override disguises where the link leads.
+    if (cleanText(raw) !== raw) throw new Error("Refusing a link that contains control characters.");
+    if (url.username !== "" || url.password !== "") {
+        throw new Error("Refusing a link with a user name or password in it: it can disguise the real host.");
+    }
+    if (url.href.includes(WINDOWS_QUOTED)) throw new Error("Refusing a link with a quote in its host name.");
+    return url.href;
+}
+
+export interface Opener {
+    file: string;
+    args: string[];
+}
+
+/** The command that opens `link`, run without a shell; on Windows rundll32 from System32, never one planted on PATH. */
+export function openerFor(link: string, platform: NodeJS.Platform = process.platform): Opener {
+    if (platform === "win32") return { file: systemTool("rundll32.exe"), args: [WINDOWS_URL_HANDLER, link] };
+    return { file: platform === "darwin" ? "open" : "xdg-open", args: [link] };
+}
 
 export class PmServer {
     private readonly server: McpServer;
@@ -315,25 +354,19 @@ export class PmServer {
             "open_attachment",
             "Open a URL from a task in the user's local browser.",
             {
-                url: z.string().url().describe('URL to open in the browser'),
+                url: z.string().url().describe('http or https URL to open in the browser'),
             },
             async ({ url }) => {
+                let link: string;
                 try {
-                    let cmd: string;
-                    let args: string[];
-                    if (process.platform === "win32") {
-                        // No shell: rundll32 hands the URL straight to the default handler, so
-                        // vendor-supplied URLs (spec §8.9) never pass through cmd.exe's parser.
-                        cmd = "rundll32.exe";
-                        args = ["url.dll,FileProtocolHandler", url];
-                    } else if (process.platform === "darwin") {
-                        cmd = "open";
-                        args = [url];
-                    } else {
-                        cmd = "xdg-open";
-                        args = [url];
-                    }
-                    await execFileAsync(cmd, args);
+                    link = openableLink(url);
+                } catch (error) {
+                    return failure(error);
+                }
+                try {
+                    // No shell: vendor-supplied URLs (spec §8.9) never pass through cmd.exe's or sh's parser.
+                    const { file, args } = openerFor(link);
+                    await execFileAsync(file, args);
                     return text('Attachment opened successfully in local browser.');
                 } catch (error) {
                     return text(`Failed to open attachment: ${(error as Error).message}`);

@@ -12,7 +12,7 @@ const NODE_SCRIPT_EXT = '.js';
 const SYSTEM32_SEGMENTS = ['System32'];
 const DEFAULT_SYSTEM_ROOT = 'C:\\Windows';
 /** Windows tools are run by absolute path from System32: a copy planted in the working folder must never win. */
-const systemTool = (name: string): string => path.join(process.env.SystemRoot || DEFAULT_SYSTEM_ROOT, ...SYSTEM32_SEGMENTS, name);
+export const systemTool = (name: string): string => path.join(process.env.SystemRoot || DEFAULT_SYSTEM_ROOT, ...SYSTEM32_SEGMENTS, name);
 const systemDir = (): string => path.dirname(systemTool('where.exe'));
 /** taskkill: the process tree (/T), forcibly (/F); the pid follows. */
 const TASKKILL_TREE = ['/T', '/F', '/PID'];

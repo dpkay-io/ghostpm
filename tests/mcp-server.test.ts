@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as child_process from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { PmServer } from '../src/mcp-server';
+import { PmServer, openerFor } from '../src/mcp-server';
 import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { recordEvent } from '../src/ledger/events';
@@ -194,15 +194,51 @@ describe('mcp server on the ledger', () => {
         expect(child_process.execFile).toHaveBeenCalled();
     });
 
-    it('opens a vendor URL with shell metacharacters via rundll32, never through cmd.exe', async () => {
+    it('opens a vendor URL with shell metacharacters through the platform opener, never through a shell', async () => {
         mockExecFile(null);
         // A vendor-supplied URL (spec §8.9) can carry '&'; a shell-parsed cmd.exe form would
-        // split this into two commands. The exact argv below only holds for a shell-free call.
+        // split this into two commands. The exact argv below, with no options, only holds for a shell-free call.
         const url = 'https://example.invalid/x?a=1&b=2';
         expect(await call('open_attachment', { url })).toContain('opened');
-        expect(child_process.execFile).toHaveBeenCalledWith(
-            'rundll32.exe', ['url.dll,FileProtocolHandler', url], expect.any(Function)
-        );
+        const { file, args } = openerFor(url);
+        expect(args).toContain(url);
+        expect(child_process.execFile).toHaveBeenCalledWith(file, args, expect.any(Function));
+    });
+
+    it('hands the opener the parsed link, so a backslashed https link never reaches the handler as a UNC path', async () => {
+        mockExecFile(null);
+        expect(await call('open_attachment', { url: 'https:\\\\example.invalid\\share' })).toContain('opened');
+        const { file, args } = openerFor('https://example.invalid/share');
+        expect(child_process.execFile).toHaveBeenCalledWith(file, args, expect.any(Function));
+    });
+
+    it.each(['file:///C:/Windows/System32/calc.exe', 'javascript:alert(1)', 'ms-settings:privacy'])(
+        'refuses to open %s: only web links reach the OS handler (gap N5)',
+        async url => {
+            mockExecFile(null);
+            const refused = await client.callTool({ name: 'open_attachment', arguments: { url } }) as { isError?: boolean; content: { text: string }[] };
+            expect(refused.isError).toBe(true);
+            expect(refused.content[0].text).toContain('Only http and https');
+            expect(child_process.execFile).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        ['a data: link', 'data:text/html,<script>alert(1)</script>', 'Only http and https'],
+        ['a file: link to a network share', 'file://attacker.invalid/share/calc.exe', 'Only http and https'],
+        ['a UNC path', '\\\\attacker.invalid\\share\\calc.exe', 'Invalid arguments'],
+        ['credentials that disguise the real host', 'https://example.invalid@attacker.invalid/', 'user name or password'],
+        ['a user name and password', 'https://user:secret@example.invalid/', 'user name or password'],
+        ['a newline the URL parser would silently drop', 'https://example.invalid/a\nb', 'control characters'],
+        ['a NUL', 'https://example.invalid/\u0000', 'control characters'],
+        ['a bidi override that disguises the link', 'https://example.invalid/\u202Eexe.txt', 'control characters'],
+        ['a quote in the host that Windows would have to escape', 'https://a"b.invalid/', 'quote'],
+    ])('refuses %s', async (_, url, reason) => {
+        mockExecFile(null);
+        const refused = await client.callTool({ name: 'open_attachment', arguments: { url } }) as { isError?: boolean; content: { text: string }[] };
+        expect(refused.isError).toBe(true);
+        expect(refused.content[0].text).toContain(reason);
+        expect(child_process.execFile).not.toHaveBeenCalled();
     });
 
     it('creates a task and attaches later work to it', async () => {
@@ -430,5 +466,18 @@ describe('mcp server in a GitHub workspace', () => {
         expect(await call('get_project_state')).toContain(
             `**Sync:** off (sync_policy off; \`ghostpm config set sync_policy auto --workspace "${workspacePath}"\` turns it on)`,
         );
+    });
+});
+
+describe('the attachment opener', () => {
+    const link = 'https://example.invalid/x?a=1&b=2';
+    const rundll32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe');
+
+    it.each([
+        ['win32', rundll32, ['url.dll,FileProtocolHandler', link]],
+        ['darwin', 'open', [link]],
+        ['linux', 'xdg-open', [link]],
+    ])('on %s runs %s with the link as one argument', (platform, file, args) => {
+        expect(openerFor(link, platform as NodeJS.Platform)).toEqual({ file, args });
     });
 });
