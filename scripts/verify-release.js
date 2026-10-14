@@ -22,7 +22,12 @@ const { runNpm } = require(path.join(ROOT, 'dist', 'bootstrap.js'));
 const CLAUDE_CODE_INSTALL_LIMIT_MS = 60 * 1000;
 /** Half of Claude Code's limit, as margin. */
 const DEPENDENCY_BUDGET_MS = CLAUDE_CODE_INSTALL_LIMIT_MS / 2;
-/** `npm ci` is stopped where Claude Code would stop it. ponytail: on Windows that ends cmd.exe; npm may outlive it. */
+/**
+ * `npm ci` is stopped where Claude Code would stop it. ponytail: on Windows the timeout ends only cmd.exe. The orphaned
+ * npm keeps running, and stopLeftovers cannot catch it: it matches the work folder in command lines, and npm's has none.
+ * The run fails and leaves the work folder, which cannot be deleted (EBUSY) until npm exits. Tracking npm's process
+ * tree is the upgrade.
+ */
 const NPM_CI_TIMEOUT_MS = CLAUDE_CODE_INSTALL_LIMIT_MS;
 const BOOTSTRAP_TIMEOUT_MS = 5 * 60 * 1000;
 /** Ample for one hook, CLI command or process listing (Claude Code gives a hook 5 s); a hung one fails its check instead. */

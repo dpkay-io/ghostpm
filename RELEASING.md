@@ -27,7 +27,7 @@ The commands below are PowerShell, run from the repository root unless a step sa
   Expected: jest reports every suite passed, the two counts are equal, and the last command prints nothing. The only skipped tests are platform-only ones (`itOnWindows`, `itOnPosix`, and doctor's PowerShell round trip where `pwsh` is missing).
 - [ ] The hook stays cheap (spec §7.2, §15): `tests/hook/import-chain.test.ts` is one of the built suites above and passed. It runs real events through the built hook and fails if the MCP SDK, zod, js-yaml, a vendor adapter, the sync runner, `dist/surfaces/` or the statusline gets loaded.
 - [ ] `npm run verify-release` prints `All N checks passed`, and the dependency install stays under 30 s. Run it twice: once with Node.js 22 first on `PATH` and once with Node.js 24 (with nvm: `nvm use <version>`). It reads the public npm registry into an empty scratch cache, works in a temporary home and publishes nothing.
-- [ ] The versions agree: `package.json`, `package-lock.json`, `.claude-plugin/plugin.json`, the npm source in `.claude-plugin/marketplace.release.json`, and the top `CHANGELOG.md` heading. `tests/version.test.ts` enforces this; to bump, run `npm version <x.y.z> --no-git-tag-version` and edit the other three.
+- [ ] The versions agree: `package.json`, `package-lock.json`, `.claude-plugin/plugin.json`, the npm source in `.claude-plugin/marketplace.release.json`, and the top `CHANGELOG.md` heading. `tests/version.test.ts` enforces this, for `(unreleased)` and for a dated heading alike; to bump, run `npm version <x.y.z> --no-git-tag-version` and edit the other three. The date itself is section 3's first step.
 
 ### Release gates an agent cannot check (you)
 
@@ -53,7 +53,7 @@ They need another OS, a real terminal, Azure DevOps, Claude Code itself or your 
   - In a Claude Code session with the plugin, have Claude run `az repos pr create …`. The printed output must contain the PR's web link, `https://…/pullrequest/<id>`, and `ghostpm standup --since 1h` must then list that PR. The hook records only that form (`PR_URL` in `src/hook/handlers.ts`).
 - [ ] **Azure DevOps: GhostPM's markers survive.** In a workspace with sync on and a throwaway Azure DevOps remote, create a task and run `ghostpm sync`, then add a comment to it and sync again. `az boards work-item show --org https://dev.azure.com/<org> --id <id>` must still show `<!-- ghostpm:<16 hex digits> -->` in `System.Description` and, after the comment, in `System.History`. Without them, a retried create or comment is posted twice.
 - [ ] **No console window flashes on Windows.** Watch the first session in section 2 start (it starts the detached addon build), and a session start in a workspace with sync on (it starts `ghostpm sync --background`, for example in the throwaway repo below). No console window may appear. Check from Windows Terminal and from VS Code.
-- [ ] **Hook p95 under 150 ms on a populated ledger, on a quiet machine** (spec §7.2, §15). Close other heavy programs. In a new PowerShell window in this checkout, after `npm run build`:
+- [ ] **Hook p95 under 150 ms on a populated ledger, on a quiet machine, on Node.js 22 and on Node.js 24** (spec §7.2, §15). Close other heavy programs. In a new PowerShell window in this checkout, put the Node.js to measure first on `PATH` (with nvm: `nvm use <version>`), run `npm ci; npm run build` with it (the SQLite addon must match that Node.js), then:
 
   ```powershell
   # These variables point GhostPM at a scratch home for this window only. Close the window afterwards.
@@ -68,10 +68,13 @@ They need another OS, a real terminal, Azure DevOps, Claude Code itself or your 
   Remove-Item -Recurse -Force $p95
   ```
 
-- [ ] **End to end against a throwaway GitHub repository.** Only with the account owner's consent: it creates and deletes a real repository.
+- [ ] **End to end against a throwaway GitHub repository.** Only with the account owner's consent: it creates and deletes a real repository. The clone goes to a scratch folder outside this checkout, so run the 2.0 CLI by its full path (`node <checkout>\dist\cli-main.js`) unless 2.0 is installed globally.
 
   ```powershell
   $e2e = '<owner>/ghostpm-e2e'      # a repository you may create and delete
+  $scratch = Join-Path $env:TEMP 'ghostpm-e2e-clone'
+  New-Item -ItemType Directory -Force $scratch | Out-Null
+  Set-Location $scratch
   gh repo create $e2e --private --clone
   Set-Location ghostpm-e2e
   ghostpm init                      # registers the folder and turns sync on (sync_policy auto)
@@ -80,7 +83,7 @@ They need another OS, a real terminal, Azure DevOps, Claude Code itself or your 
   gh issue list --repo $e2e --state all --json number,title,state,labels
   ```
 
-  Expected: the task became an issue, its phase label (`ghostpm:<phase>`) followed the phase, and "done" closed it. Rename the issue on GitHub, run `ghostpm sync`, and `ghostpm tasks --all` shows the new title. Clean up with `ghostpm unregister . --yes`, then `Set-Location ..` and `gh repo delete $e2e --yes`.
+  Expected: the task became an issue, its phase label (`ghostpm:<phase>`) followed the phase, and "done" closed it. Rename the issue on GitHub, run `ghostpm sync`, and `ghostpm tasks --all` shows the new title. Clean up with `ghostpm unregister . --yes`, then `Set-Location $env:TEMP`, `Remove-Item -Recurse -Force $scratch` and `gh repo delete $e2e --yes`.
 - [ ] **`ghostpm dashboard` in a real terminal**, in Windows Terminal: section 2's last check (resize, Ctrl+C, a new session within about a second, a task change shown within about a second), plus `ghostpm dashboard --once`, which prints one snapshot and exits.
 - [ ] **A real `az boards query` with `@Today - 90`**, the query `ghostpm init` uses to learn an Azure DevOps process:
 
@@ -133,11 +136,19 @@ In that session:
 
 ## 3. Publish (maintainer)
 
-npm goes first, because the marketplace entry on `master` names an npm version. Replace `2.0.0` with the release version.
+npm goes first, because the marketplace entry on `master` names an npm version. The changelog is dated before staging, because `CHANGELOG.md` ships in the package. Replace `2.0.0` with the release version.
 
-1. `npm login` if needed. Then `npm run stage` and `npm publish ./release` (npm asks for your 2FA code).
-2. `npm view ghostpm@2.0.0 version` prints `2.0.0`, and `npm pack ghostpm@2.0.0 --dry-run` lists `npm-shrinkwrap.json`, `.claude-plugin/plugin.json`, `hooks/hooks.json` and `skills/ghostpm/SKILL.md`.
-3. Point the marketplace at the published package, and commit:
+1. Date the release: in `CHANGELOG.md`, replace `(unreleased)` with the day you publish (for example `## 2.0.0 (2026-10-20)`). Then `npx jest tests/version.test.ts` and commit the release:
+
+   ```powershell
+   git add CHANGELOG.md
+   git commit -m "Release GhostPM 2.0.0"
+   ```
+
+2. `npm login` if needed. Then `npm run stage`, which builds and stages the dated `CHANGELOG.md`.
+3. `npm publish ./release` (npm asks for your 2FA code).
+4. `npm view ghostpm@2.0.0 version` prints `2.0.0`, and `npm pack ghostpm@2.0.0 --dry-run` lists `CHANGELOG.md`, `npm-shrinkwrap.json`, `.claude-plugin/plugin.json`, `hooks/hooks.json` and `skills/ghostpm/SKILL.md`.
+5. Point the marketplace at the published package, and commit:
 
    ```powershell
    Copy-Item .claude-plugin\marketplace.release.json .claude-plugin\marketplace.json -Force
@@ -147,9 +158,8 @@ npm goes first, because the marketplace entry on `master` names an npm version. 
    ```
 
    From now on the repository's marketplace is the released one (`ghostpm`, npm source). A machine that installed the plugin from the development marketplace (`ghostpm-local`) switches over in section 4.
-4. `git tag -a v2.0.0 -m "GhostPM 2.0.0"`, then `git push origin master v2.0.0`.
-5. Set the release date: in `CHANGELOG.md`, replace `(unreleased)` with the day `npm publish` ran (for example `## 2.0.0 (2026-10-20)`), then commit and `git push origin master`.
-6. Optional: save the 2.0.0 section of `CHANGELOG.md` to `notes.md`, then `gh release create v2.0.0 --title "GhostPM 2.0.0" --notes-file notes.md`.
+6. `git tag -a v2.0.0 -m "GhostPM 2.0.0"`, then `git push origin master v2.0.0`.
+7. Optional: save the 2.0.0 section of `CHANGELOG.md` to `notes.md`, then `gh release create v2.0.0 --title "GhostPM 2.0.0" --notes-file notes.md`.
 
 ## 4. After publishing, install it the way a user would (you)
 

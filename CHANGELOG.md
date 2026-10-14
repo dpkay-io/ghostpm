@@ -7,7 +7,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
 ### Breaking changes
 
 - **Storage moved.** Tasks now live in `~/.ghostpm/ledger.db` (or `$GHOSTPM_HOME/ledger.db`). Every session, hook, MCP server and command shares it. 1.4.0's per-repo `.mcp-pm.db` files are imported once, read-only, and never written again.
-- **Node.js 22 or newer** is required. better-sqlite3 12 ships prebuilt addons from Node 22; older Node has to compile it, which needs Python and a C++ toolchain.
+- **Node.js 22 or newer** is required. Node.js 22 or 24+ downloads a prebuilt SQLite addon; any other Node.js has to compile it, which needs Python and a C++ toolchain.
 - **Vendor sync is off by default.** Nothing is pushed, pulled or queued until a workspace opts in. `ghostpm init` opts its repo in (`sync_policy` `auto`); `ghostpm config set sync_policy …` changes it. 1.4.0 repos keep 1.4.0's behaviour: they are stamped `sync_policy` `linked-only` and `progress_comments` `none` where those are unset, on every server start, so `config unset` is stamped again. Set a value instead.
 - **MCP tools changed.** `start_task` and `resolve_conflict` are gone.
   - `track_work` creates a task or attaches to one. It replaces `start_task`; branch creation is the `create_branch` setting.
