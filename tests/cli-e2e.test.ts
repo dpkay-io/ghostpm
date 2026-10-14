@@ -7,6 +7,7 @@ import { ensureWorkspace } from '../src/ledger/workspaces';
 import { createTask } from '../src/ledger/tasks';
 import { startSession, setSessionTask } from '../src/ledger/sessions';
 import { TaskRow, formatTaskId } from '../src/ledger/types';
+import { SINCE_HELP } from '../src/surfaces/since';
 import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
@@ -73,5 +74,23 @@ describeBuilt('ghostpm CLI on the ledger', () => {
         expect(result.status).toBe(EXIT_FAILURE);
         expect(result.stderr).toContain('No GhostPM ledger');
         expect(fs.existsSync(ghostpmHome)).toBe(false);
+    });
+
+    it('reports what happened since a duration and rejects a --since it cannot read (Review Focus 3)', () => {
+        const task = seed();
+
+        const report = cli(['standup', '--since', '1h']);
+        expect(report.status).toBe(EXIT_OK);
+        expect(report.stdout).toContain(`${formatTaskId(task.id)} ${TASK_TITLE} · in_progress`);
+
+        expect(cli(['standup', '--since=yesterday']).status).toBe(EXIT_OK);
+
+        const refused = cli(['standup', '--since', 'last', 'tuesday']);
+        expect(refused.status).toBe(EXIT_FAILURE);
+        expect(refused.stderr).toContain(SINCE_HELP);
+
+        const missing = cli(['standup', '--since']);
+        expect(missing.status).toBe(EXIT_FAILURE);
+        expect(missing.stderr).toContain('--since needs a value.');
     });
 });

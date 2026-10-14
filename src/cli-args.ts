@@ -5,3 +5,19 @@ export const FLAG_ONCE = '--once';
 export function hasFlag(args: readonly string[], name: string): boolean {
     return args.indexOf(name) >= 0;
 }
+
+export const FLAG_SINCE = '--since';
+
+/** `--name value` or `--name=value`; undefined when absent. A flag with no value is an error, not a silent default. */
+export function flagValue(args: readonly string[], name: string): string | undefined {
+    const inline = `${name}=`;
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (arg.indexOf(inline) === 0) return arg.slice(inline.length);
+        if (arg !== name) continue;
+        const value = args[index + 1];
+        if (value === undefined || value.indexOf(FLAG_PREFIX) === 0) throw new Error(`${name} needs a value.`);
+        return value;
+    }
+    return undefined;
+}

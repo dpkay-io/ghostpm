@@ -264,6 +264,23 @@ async function main() {
             break;
         }
 
+        case 'standup': {
+            const { flagValue, FLAG_SINCE } = await import('./cli-args');
+            const { parseSince } = await import('./surfaces/since');
+            const { buildStandup, defaultStandupSince } = await import('./surfaces/standup');
+            const { openReader } = await import('./ledger/db');
+            // Read --since before opening anything: a typo fails fast with the accepted forms.
+            const sinceArg = flagValue(args, FLAG_SINCE);
+            const since = sinceArg === undefined ? defaultStandupSince() : parseSince(sinceArg);
+            const db = openReader();
+            try {
+                console.log(buildStandup(db, since));
+            } finally {
+                db.close();
+            }
+            break;
+        }
+
         case 'unregister': {
             const { unregisterWorkspace } = await import('./registry');
             const { findGitRoot } = await import('./init');
