@@ -10,8 +10,12 @@ export const SERVER_NAME = 'ghostpm';
 export interface PackageInfo {
     name: string;
     version: string;
+    engines: { node: string };
     dependencies: { [name: string]: string };
 }
+
+/** engines.node as package.json writes it: `>=<major>`. */
+const ENGINES_NODE = /^>=(\d+)$/;
 
 let cached: PackageInfo | undefined;
 
@@ -23,4 +27,12 @@ export function packageInfo(): PackageInfo {
 /** The single version source: plugin.json, marketplace.json and the lockfile are checked against it by tests. */
 export function packageVersion(): string {
     return packageInfo().version;
+}
+
+/** The oldest Node.js major this copy supports. package.json's engines is the one source; help, doctor and bootstrap say it. */
+export function minimumNodeMajor(): number {
+    const range = packageInfo().engines.node;
+    const match = ENGINES_NODE.exec(range);
+    if (match === null) throw new Error(`Unexpected engines.node "${range}" in ${PACKAGE_JSON_PATH}.`);
+    return Number(match[1]);
 }

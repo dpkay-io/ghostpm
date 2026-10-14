@@ -2,6 +2,7 @@ import {
     FLAG_ALL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
 } from './cli-args';
 import { CONFIG_USAGE } from './config-cli';
+import { minimumNodeMajor } from './package-info';
 import { DEFAULT_STANDUP_HOURS } from './surfaces/standup';
 
 /**
@@ -52,4 +53,4 @@ Run by other programs
   ${FLAG_VERSION}, ${FLAG_VERSION_SHORT}               Print the version
 
 In Claude Code, install the plugin: claude plugin install ${PLUGIN_ID}
-In a terminal: npm install -g ghostpm (Node.js 20 or newer)`;
+In a terminal: npm install -g ghostpm (Node.js ${minimumNodeMajor()} or newer)`;

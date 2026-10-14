@@ -7,13 +7,15 @@ import { claudeConfigPath } from './ledger/legacy-import';
 import { normalizePath } from './ledger/workspaces';
 import { PLUGIN_ID } from './help';
 import { homeDir } from './registry';
-import { SERVER_NAME, packageVersion } from './package-info';
+import { SERVER_NAME, minimumNodeMajor, packageVersion } from './package-info';
 import { userSettingsPath } from './plugin-setup';
+import { prebuiltNote } from './bootstrap';
 
 export const FINDING_STALE_REGISTRATION = 'stale_registration';
 export const FINDING_CLAUDE_JSON_REGISTRATION = 'claude_json_registration';
 export const FINDING_STALE_SKILL = 'stale_skill';
 export const FINDING_NEWER_LEDGER = 'ledger_newer_than_build';
+export const FINDING_NODE_TOO_OLD = 'node_too_old';
 
 /** Tools GhostPM 1.4.0 exposed that 2.0 removed (spec D10). A skill naming them predates the ledger. */
 export const REMOVED_TOOLS = ['start_task', 'resolve_conflict'];
@@ -60,6 +62,8 @@ export interface DiagnosisProbe {
     version: string;
     /** Chooses the shell syntax of printed commands. */
     platform: string;
+    /** The running Node.js, as process.versions.node gives it. */
+    nodeVersion: string;
 }
 
 interface Settings {
@@ -210,9 +214,21 @@ function newerLedger(probe: DiagnosisProbe): Finding | null {
     };
 }
 
+function nodeTooOld(probe: DiagnosisProbe): Finding | null {
+    const minimum = minimumNodeMajor();
+    if (Number(probe.nodeVersion.split('.')[0]) >= minimum) return null;
+    return {
+        code: FINDING_NODE_TOO_OLD,
+        message: `This is Node.js ${probe.nodeVersion}; ghostpm ${probe.version} needs Node.js ${minimum} or newer. ${prebuiltNote()}`,
+        fix: `Install Node.js ${minimum} or newer, then start a new Claude Code session.`,
+    };
+}
+
 /** Read-only by design: safe to run before deciding anything. */
 export function diagnose(probe: DiagnosisProbe): Finding[] {
     const findings: Finding[] = [];
+    const old = nodeTooOld(probe);
+    if (old !== null) findings.push(old);
     const stale = staleRegistration(readSettings(probe.settingsPath), probe);
     if (stale !== null) findings.push(stale);
     findings.push(...claudeJsonRegistrations(parseClaudeJson(probe.claudeJson), probe.platform));
@@ -291,5 +307,6 @@ export function machineProbe(): DiagnosisProbe {
         ledgerSchema: ledger.schema,
         version: packageVersion(),
         platform: process.platform,
+        nodeVersion: process.versions.node,
     };
 }

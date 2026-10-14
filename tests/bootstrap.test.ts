@@ -8,6 +8,7 @@ import {
 } from '../src/bootstrap';
 import { IS_WINDOWS, resolveCommand } from '../src/cli';
 import { BINDING_FILE, bootstrappedBindingPath } from '../src/ledger/binding';
+import { minimumNodeMajor } from '../src/package-info';
 import { removeTempDir } from './temp-dir';
 
 // Never run the real npm: the default runner's call is recorded instead, and npm is never looked up on PATH.
@@ -83,6 +84,34 @@ describe('bootstrap', () => {
 
     it('reports an npm run that produced no addon', () => {
         expect(() => bootstrapBinding(() => undefined, home)).toThrow('produced no addon');
+    });
+
+    describe('says why a build fails: a prebuilt addon only from the oldest supported Node.js up, a compiler before that', () => {
+        const messageOf = (run: NpmRunner): string => {
+            try {
+                bootstrapBinding(run, home);
+            } catch (error) {
+                return (error as Error).message;
+            }
+            throw new Error('bootstrapBinding did not fail');
+        };
+        const explains = (message: string): void => {
+            expect(message).toContain(`Node.js ${minimumNodeMajor()} or newer`);
+            expect(message).toContain('Python');
+            expect(message).toContain('C++ toolchain');
+        };
+
+        it('when npm fails, after npm\'s own message', () => {
+            const message = messageOf(() => { throw new Error('Command failed: npm install'); });
+            expect(message).toContain('Command failed: npm install');
+            explains(message);
+        });
+
+        it('when npm leaves no addon', () => {
+            const message = messageOf(() => undefined);
+            expect(message).toContain('produced no addon');
+            explains(message);
+        });
     });
 
     it('the default runner hands npm one command line: its absolute path quoted, then the checked arguments, with the home only as cwd', () => {

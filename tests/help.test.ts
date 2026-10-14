@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { HELP_TEXT, PLUGIN_ID, SETUP_USAGE } from '../src/help';
 import { CONFIG_USAGE } from '../src/config-cli';
+import { minimumNodeMajor } from '../src/package-info';
 import {
     FLAG_ALL, FLAG_ONCE, FLAG_RESTORE, FLAG_SINCE, FLAG_STATUSLINE, FLAG_VERSION, FLAG_VERSION_SHORT, FLAG_YES,
 } from '../src/cli-args';
@@ -66,6 +67,10 @@ describe('help', () => {
     // tests/version.test.ts holds PLUGIN_ID to the release marketplace and plugin.json.
     it('tells Claude Code users to install the plugin by its id', () => {
         expect(HELP_TEXT).toContain(`claude plugin install ${PLUGIN_ID}`);
+    });
+
+    it('names the oldest Node.js that package.json engines allows', () => {
+        expect(HELP_TEXT).toContain(`Node.js ${minimumNodeMajor()} or newer`);
     });
 });
 

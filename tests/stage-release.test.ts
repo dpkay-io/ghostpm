@@ -25,7 +25,7 @@ describe('stageRelease', () => {
         name: 'ghostpm', version: '9.9.9', private: true, bin: { ghostpm: './dist/cli-main.js' },
         files: ['dist', '.claude-plugin/plugin.json', 'hooks', SHRINKWRAP],
         scripts: { build: 'tsc' },
-        engines: { node: '>=20' },
+        engines: { node: '>=22' },
         dependencies: { 'runtime-dep': '^1.0.0' },
         devDependencies: { 'dev-dep': '^2.0.0' },
     });
@@ -65,7 +65,7 @@ describe('stageRelease', () => {
         expect(published.devDependencies).toBeUndefined();
         expect(published.scripts).toBeUndefined();
         expect(published.private).toBeUndefined();
-        expect(published).toMatchObject({ name: 'ghostpm', version: '9.9.9', bin: { ghostpm: './dist/cli-main.js' }, engines: { node: '>=20' } });
+        expect(published).toMatchObject({ name: 'ghostpm', version: '9.9.9', bin: { ghostpm: './dist/cli-main.js' }, engines: { node: '>=22' } });
         expect(published.files).toEqual(manifest().files);
     });
 

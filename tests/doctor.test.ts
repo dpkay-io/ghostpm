@@ -5,17 +5,20 @@ import { spawnSync } from 'child_process';
 import { removeTempDir } from './temp-dir';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
-    FINDING_NEWER_LEDGER, MCP_SERVER_KEY, REMOVED_TOOLS, changeDirCommand, machineProbe, quoteForShell, removeDirCommand, skillCandidates,
+    FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, MCP_SERVER_KEY, REMOVED_TOOLS, changeDirCommand, machineProbe, quoteForShell,
+    removeDirCommand, skillCandidates,
 } from '../src/doctor';
 import { PLUGIN_ID } from '../src/help';
 import { userSettingsPath } from '../src/plugin-setup';
-import { packageVersion } from '../src/package-info';
+import { minimumNodeMajor, packageVersion } from '../src/package-info';
 import Database from 'better-sqlite3';
 import { SCHEMA_VERSION, ledgerPath } from '../src/ledger/db';
 import { homeDir } from '../src/registry';
 import { isolateHomes } from './ledger/helpers';
 
 const PLUGIN_ARGS = ['${CLAUDE_PLUGIN_ROOT}/dist/cli-main.js', 'serve'];
+/** The oldest Node.js engines allows: these tests run on whatever Node runs jest, which may be older. */
+const SUPPORTED_NODE = `${minimumNodeMajor()}.0.0`;
 
 describe('diagnose', () => {
     let home: string;
@@ -34,8 +37,12 @@ describe('diagnose', () => {
         ledgerSchema: SCHEMA_VERSION,
         version: '2.0.0',
         platform: 'win32',
+        nodeVersion: SUPPORTED_NODE,
         ...over,
     });
+
+    /** machineProbe reads the Node running jest; the findings under test are the other ones. */
+    const onSupportedNode = (found: DiagnosisProbe): DiagnosisProbe => ({ ...found, nodeVersion: SUPPORTED_NODE });
 
     const codesFrom = (p: DiagnosisProbe): string[] => diagnose(p).map(finding => finding.code);
 
@@ -219,8 +226,9 @@ describe('diagnose', () => {
                 fs.writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: MCP_SERVER_KEY }));
                 const found = machineProbe();
                 expect(found.ledgerSchema).toBeNull();
+                expect(found.nodeVersion).toBe(process.versions.node);
                 expect(found.skills.map(skill => skill.skillMd)).toEqual([path.join(dir, 'SKILL.md')]);
-                expect(diagnose(found).map(finding => finding.code)).toEqual([FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL]);
+                expect(diagnose(onSupportedNode(found)).map(finding => finding.code)).toEqual([FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL]);
                 expect(fs.existsSync(ghostpmHome)).toBe(false);
             } finally {
                 if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
@@ -229,6 +237,8 @@ describe('diagnose', () => {
         });
     });
 
+    // Forward guards: no check reads a plugin cache, enabledPlugins or a project's own .claude-plugin today, so these pass
+    // on the code as it is. They fail as soon as a new check flags GhostPM's own plugin from either marketplace (ruling).
     describe("GhostPM's own plugin, installed from either marketplace", () => {
         const REPO = path.join(__dirname, '..');
         const [PLUGIN_NAME, RELEASE_MARKETPLACE] = PLUGIN_ID.split('@');
@@ -257,7 +267,7 @@ describe('diagnose', () => {
                 fs.mkdirSync(path.dirname(userSettingsPath()), { recursive: true });
                 fs.writeFileSync(userSettingsPath(), JSON.stringify({ enabledPlugins: { [`${PLUGIN_NAME}@${marketplace}`]: true } }));
                 fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ projects: { [root]: {} } }));
-                expect(diagnose(machineProbe())).toEqual([]);
+                expect(diagnose(onSupportedNode(machineProbe()))).toEqual([]);
             } finally {
                 if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
                 restore();
@@ -330,7 +340,25 @@ describe('diagnose', () => {
                 db.close();
             });
             expect(found.ledgerSchema).toBe(SCHEMA_VERSION + 1);
-            expect(diagnose(found).map(finding => finding.code)).toEqual([FINDING_NEWER_LEDGER]);
+            expect(diagnose(onSupportedNode(found)).map(finding => finding.code)).toEqual([FINDING_NEWER_LEDGER]);
+        });
+    });
+
+    describe('a Node.js older than package.json engines allows', () => {
+        const minimum = minimumNodeMajor();
+
+        it('names the running version and says to install the oldest supported one or newer', () => {
+            const found = diagnose(probe({ nodeVersion: `${minimum - 2}.20.2` })).filter(finding => finding.code === FINDING_NODE_TOO_OLD);
+            expect(found).toHaveLength(1);
+            expect(found[0].message).toContain(`${minimum - 2}.20.2`);
+            expect(found[0].message).toMatch(/Python/);
+            expect(found[0].fix).toContain(`Install Node.js ${minimum} or newer`);
+        });
+
+        it('flags the major just below, and stays quiet from the minimum up', () => {
+            expect(codesFrom(probe({ nodeVersion: `${minimum - 1}.99.0` }))).toEqual([FINDING_NODE_TOO_OLD]);
+            expect(diagnose(probe({ nodeVersion: `${minimum}.0.0` }))).toEqual([]);
+            expect(diagnose(probe({ nodeVersion: `${minimum + 4}.1.0` }))).toEqual([]);
         });
     });
 

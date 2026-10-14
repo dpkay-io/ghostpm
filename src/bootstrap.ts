@@ -4,6 +4,7 @@ import * as path from 'path';
 import { getGhostpmHome } from './registry';
 import { BINDING_FILE, bootstrappedBindingPath } from './ledger/binding';
 import { IS_WINDOWS, UNSAFE_IN_QUOTES, resolveCommand } from './cli';
+import { minimumNodeMajor } from './package-info';
 
 const PACKAGE = 'better-sqlite3';
 const NPM = 'npm';
@@ -54,6 +55,11 @@ export const runNpm: NpmRunner = (args, cwd) => {
     execSync([`"${npm}"`, ...args].join(' '), { cwd, stdio: 'inherit' });
 };
 
+/** The usual reason a build fails: better-sqlite3 publishes prebuilt addons only for the Node.js versions engines allows. */
+export function prebuiltNote(): string {
+    return `Node.js ${minimumNodeMajor()} or newer downloads a prebuilt SQLite addon; an older Node.js has to compile it, which needs Python and a C++ toolchain.`;
+}
+
 /**
  * Builds the native addon into the ghostpm home and returns where it landed. npm runs with
  * lifecycle scripts enabled, which is the point: prebuild-install downloads a matching
@@ -65,11 +71,16 @@ export function bootstrapBinding(run: NpmRunner = runNpm, home: string = getGhos
     if (IS_WINDOWS && buildDir.startsWith(UNC_PREFIX)) {
         throw new Error(`The GhostPM home ${home} is on a network share, where cmd.exe cannot run npm. Set GHOSTPM_HOME to a local folder and run \`ghostpm bootstrap\` again.`);
     }
+    const version = installedAddonVersion();
     fs.mkdirSync(buildDir, { recursive: true });
-    run(npmInstallArgs(installedAddonVersion()), buildDir);
+    try {
+        run(npmInstallArgs(version), buildDir);
+    } catch (error) {
+        throw new Error(`${(error as Error).message}\n${prebuiltNote()}`);
+    }
 
     const built = path.join(buildDir, BUILT_ADDON);
-    if (!fs.existsSync(built)) throw new Error(`npm completed but produced no addon at ${built}`);
+    if (!fs.existsSync(built)) throw new Error(`npm completed but produced no addon at ${built}\n${prebuiltNote()}`);
 
     const target = bootstrappedBindingPath(home);
     fs.mkdirSync(path.dirname(target), { recursive: true });

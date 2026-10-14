@@ -84,9 +84,10 @@ describe('plugin packaging', () => {
         expect(fs.existsSync(path.join(ROOT, 'bin'))).toBe(false);
     });
 
-    it('keeps the development root out of the registry and requires Node 20', () => {
+    it('keeps the development root out of the registry and requires Node 22', () => {
         const manifest = readJson('package.json');
         expect(manifest.private).toBe(true);
-        expect(manifest.engines.node).toBe('>=20');
+        // better-sqlite3 publishes no prebuilt addon for Node 20, which is past end of life.
+        expect(manifest.engines.node).toBe('>=22');
     });
 });

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 // Proves the published artifact the way Claude Code installs it and the way a first plugin
-// session runs it. Needs a fresh `npm run build` and the network (the npm registry, and the
-// better-sqlite3 prebuilt binary the bootstrap downloads). Every process it starts runs in a
-// temporary home, with a temporary folder, an empty npm cache and empty npm config of its own:
-// ~/.ghostpm, ~/.claude, the user's npm cache and ~/.npmrc are never touched. Nothing is published.
+// session runs it. Needs a fresh `npm run build`, Node.js at package.json's engines minimum or
+// newer, and the network (the npm registry, and the better-sqlite3 prebuilt binary the bootstrap
+// downloads). Every process it starts gets a scratch folder for its home, its temporary folder,
+// LOCALAPPDATA and XDG_CACHE_HOME (where node-gyp would keep headers), an empty npm cache and
+// empty npm config: ~/.ghostpm, ~/.claude, the user's caches and ~/.npmrc are never touched.
+// Anything still running from the scratch folder at the end, such as the detached bootstrap, is
+// stopped, pass or fail. Nothing is published.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -18,7 +21,13 @@ const { runNpm } = require(path.join(ROOT, 'dist', 'bootstrap.js'));
 /** Claude Code kills the plugin dependency install at 60 s (plugins loading reference); keep half as margin. */
 const DEPENDENCY_BUDGET_MS = 30 * 1000;
 const BOOTSTRAP_TIMEOUT_MS = 5 * 60 * 1000;
+/** Ample for one hook, CLI command or process listing (Claude Code gives a hook 5 s); a hung one fails its check instead. */
+const COMMAND_TIMEOUT_MS = 30 * 1000;
 const POLL_MS = 1000;
+const WORK_PREFIX = 'ghostpm-verify-';
+const WINDOWS = 'win32';
+/** Every process with its command line. CIM, because wmic is gone from current Windows. */
+const LIST_WINDOWS_PROCESSES = 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }';
 const MANIFEST = 'package.json';
 const RELEASE_DIR = 'release';
 const EXTRACT_DIR = 'extract';
@@ -75,8 +84,9 @@ function isolate(work) {
     // Two files: npm refuses to load one file as both its user and its global config.
     const userNpmrc = path.join(work, 'user.npmrc');
     const globalNpmrc = path.join(work, 'global.npmrc');
-    fs.mkdirSync(home);
-    fs.mkdirSync(tmp);
+    const localAppData = path.join(work, 'local-app-data');
+    const xdgCache = path.join(work, 'xdg-cache');
+    [home, tmp, localAppData, xdgCache].forEach(dir => fs.mkdirSync(dir));
     [userNpmrc, globalNpmrc].forEach(file => fs.writeFileSync(file, ''));
     Object.keys(process.env).filter(key => NPM_CONFIG_ENV.test(key)).forEach(key => { delete process.env[key]; });
     // The MCP server would take it as its workspace.
@@ -91,6 +101,9 @@ function isolate(work) {
         TEMP: tmp,
         TMP: tmp,
         TMPDIR: tmp,
+        // node-gyp's header cache, should a prebuilt be missing: env-paths puts it under these.
+        LOCALAPPDATA: localAppData,
+        XDG_CACHE_HOME: xdgCache,
         npm_config_cache: path.join(work, 'npm-cache'),
         npm_config_userconfig: userNpmrc,
         npm_config_globalconfig: globalNpmrc,
@@ -105,6 +118,36 @@ function filesUnder(dir) {
         .map(file => file.split(path.sep).join('/'));
 }
 
+/**
+ * Stops every process whose command line names the scratch folder, with everything it started: the hook starts
+ * `<cli> bootstrap` detached and keeps no handle on it. Matches on the folder's own name, which mkdtemp makes unique
+ * and ASCII. Answers how many it stopped.
+ */
+function stopLeftovers(work) {
+    const marker = path.basename(work);
+    const listing = process.platform === WINDOWS
+        ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', LIST_WINDOWS_PROCESSES], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS, windowsHide: true })
+        : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS });
+    const pids = String(listing.stdout || '').split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line.indexOf(marker) >= 0)
+        .map(line => Number(line.split(' ')[0]))
+        .filter(pid => pid !== process.pid);
+    pids.forEach(pid => {
+        if (process.platform === WINDOWS) {
+            spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: COMMAND_TIMEOUT_MS, windowsHide: true });
+            return;
+        }
+        try {
+            // Detached made it a process group leader: the group takes npm and the compiler with it.
+            process.kill(-pid, 'SIGKILL');
+        } catch (error) {
+            try { process.kill(pid, 'SIGKILL'); } catch (gone) { /* already exited */ }
+        }
+    });
+    return pids.length;
+}
+
 /** The MCP SDK passes only a few variables on unless given the whole environment, as strings. */
 function stringEnv() {
     const env = {};
@@ -112,8 +155,8 @@ function stringEnv() {
     return env;
 }
 
-async function main() {
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-verify-'));
+/** Runs every check in `work`; answers how long the dependency install took. */
+async function verify(work) {
     const version = readJson(path.join(ROOT, MANIFEST)).version;
     const ghostpmHome = isolate(work);
     console.log(`Verifying ghostpm ${version} in ${work}\n`);
@@ -124,7 +167,7 @@ async function main() {
     const tarball = fs.readdirSync(work).find(file => file.endsWith(TARBALL_EXTENSION));
     fs.mkdirSync(path.join(work, EXTRACT_DIR));
     // Relative paths: GNU tar would read "C:" in an absolute Windows path as a remote host.
-    execFileSync('tar', ['-xzf', tarball, '-C', EXTRACT_DIR], { cwd: work });
+    execFileSync('tar', ['-xzf', tarball, '-C', EXTRACT_DIR], { cwd: work, timeout: COMMAND_TIMEOUT_MS });
     const pkg = path.join(work, EXTRACT_DIR, PACKAGE_DIR);
     const shipped = filesUnder(pkg);
     const manifest = readJson(path.join(pkg, MANIFEST));
@@ -159,7 +202,8 @@ async function main() {
     fs.mkdirSync(workspace);
     const cliJs = path.join(pkg, 'dist', 'cli-main.js');
     const hookJs = path.join(pkg, 'dist', 'hook.js');
-    const run = (script, args, input) => spawnSync(process.execPath, [script].concat(args), { cwd: workspace, input: input || '', encoding: 'utf8', windowsHide: true });
+    const run = (script, args, input) => spawnSync(process.execPath, [script].concat(args),
+        { cwd: workspace, input: input || '', encoding: 'utf8', windowsHide: true, timeout: COMMAND_TIMEOUT_MS });
 
     const printed = run(cliJs, ['--version']).stdout.trim();
     check('--version prints the package version', printed === version, printed);
@@ -216,6 +260,19 @@ async function main() {
     check('status reads the workspace', status.status === 0 && status.stdout.indexOf(STATUS_LABEL) >= 0);
     const doctor = run(cliJs, ['doctor']);
     check('doctor finds nothing to fix in a clean home', doctor.status === 0 && doctor.stdout.trim() === DOCTOR_CLEAN, doctor.stdout.trim());
+    return installMs;
+}
+
+async function main() {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), WORK_PREFIX));
+    let installMs;
+    try {
+        installMs = await verify(work);
+    } finally {
+        // Pass, fail or throw: nothing the run started may outlive it.
+        const stopped = stopLeftovers(work);
+        if (stopped > 0) console.log(`Stopped ${stopped} process(es) still running from ${work}.`);
+    }
 
     const failed = results.filter(ok => !ok).length;
     if (failed > 0) {
@@ -231,7 +288,11 @@ async function main() {
     console.log(`\nAll ${results.length} checks passed. The dependency install took ${installMs} ms.`);
 }
 
-main().catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-});
+module.exports = { stopLeftovers };
+
+if (require.main === module) {
+    main().catch(error => {
+        console.error(error);
+        process.exitCode = 1;
+    });
+}

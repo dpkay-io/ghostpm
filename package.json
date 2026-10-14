@@ -15,7 +15,7 @@
     "skills",
     "npm-shrinkwrap.json"
   ],
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "stage": "npm run build && node scripts/stage-release.js",
