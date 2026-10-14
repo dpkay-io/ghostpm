@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Ledger, openLedger, LEDGER_FILE } from '../../src/ledger/db';
-import { OutboxRow } from '../../src/ledger/projection';
+import { OP_SYNC_STATE, OutboxRow, OutboxStatus } from '../../src/ledger/projection';
+import { SYNC_LEASE } from '../../src/sync/lease';
 import { removeTempDir } from '../temp-dir';
 
 export function eventKinds(db: Ledger, taskId: number): string[] {
@@ -41,4 +42,14 @@ export function clonedRepo(parent: string, name: string, remote: string = GITHUB
 
 export function outboxRows(db: Ledger, taskId: number): OutboxRow[] {
     return db.prepare('SELECT * FROM outbox WHERE task_id = ? ORDER BY id').all(taskId) as OutboxRow[];
+}
+
+/** One sync_state row in `status`. Seed at most one pending row per task: migration 2 allows no second. */
+export function seedOutboxRow(db: Ledger, taskId: number, status: OutboxStatus): void {
+    db.prepare('INSERT INTO outbox (task_id, op, status) VALUES (?, ?, ?)').run(taskId, OP_SYNC_STATE, status);
+}
+
+/** The sync runner's lease, held by `holder` until `expiresAt`. */
+export function seedLease(db: Ledger, holder: string, expiresAt: string): void {
+    db.prepare('INSERT OR REPLACE INTO leases (name, holder, expires_at) VALUES (?, ?, ?)').run(SYNC_LEASE, holder, expiresAt);
 }

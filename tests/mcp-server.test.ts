@@ -395,7 +395,7 @@ describe('mcp server in a GitHub workspace', () => {
         const workspaceId = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'widgets')).id;
         setSyncPause(ledger.db, workspaceId, 'GitHub CLI is not logged in. Run `gh auth login`, then `ghostpm sync`.');
         expect(await call('get_project_state')).toContain(
-            '**Sync:** 1 pending, 0 failed — paused: GitHub CLI is not logged in. Run `gh auth login`, then `ghostpm sync`.',
+            '**Sync:** 1 pending · paused: GitHub CLI is not logged in. Run `gh auth login`, then `ghostpm sync`.',
         );
     });
 
