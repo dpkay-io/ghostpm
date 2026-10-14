@@ -8,7 +8,7 @@ import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { Runner, runCli, sweepArgDirs } from '../cli';
 import { AzureAdapter } from './azure';
 import { GitHubAdapter } from './github';
-import { identityOf } from './identity';
+import { SYNCED_REMOTES, identityOf } from './identity';
 import { acquireLease, leaseHolder, leaseHolderId, releaseLease } from './lease';
 import { hasDueWork, outboxHealth, rearmFailed, releaseStaleClaims } from './outbox';
 import { PullSummary, pullWorkspace } from './pull';
@@ -23,7 +23,7 @@ const MS_PER_SECOND = 1000;
 export function unusableRemote(workspace: WorkspaceRow): string {
     return `GhostPM cannot tell which ${workspace.vendor === 'github' ? 'GitHub repository' : 'Azure DevOps project'} `
         + `${workspace.path} belongs to from its git remote (${workspace.git_remote ?? 'none'}). `
-        + 'It syncs github.com, dev.azure.com and *.visualstudio.com remotes. Fix the remote, then run `ghostpm sync`.';
+        + `It syncs ${SYNCED_REMOTES} remotes. Fix the remote, then run \`ghostpm sync\`.`;
 }
 
 /** The adapter for a workspace, from its remote and settings. A remote it cannot read pauses the workspace. */

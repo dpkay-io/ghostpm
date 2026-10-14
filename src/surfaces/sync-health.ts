@@ -4,6 +4,7 @@ import { getSyncPause } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
 import { leaseHolder } from '../sync/lease';
 import { outboxHealth } from '../sync/outbox';
+import { SYNCED_REMOTES, identityOf } from '../sync/identity';
 import { syncIsOff, syncOffHint } from '../sync/schedule';
 import { cleanText } from './text';
 
@@ -28,6 +29,8 @@ export interface MachineSyncHealth {
 export const SYNC_OFF = 'off';
 export const SYNC_OK = 'ok';
 const NO_REMOTE = 'no GitHub or Azure DevOps remote';
+/** How a vendor workspace with no remote on record names it. */
+const NO_REMOTE_TEXT = 'none';
 const PART_SEPARATOR = ' · ';
 
 export function workspaceSyncHealth(db: Ledger, workspaceId: number): SyncHealth {
@@ -54,6 +57,18 @@ export interface SyncDescription {
 }
 
 const STATE_PAUSED = 'paused';
+const STATE_UNRECOGNISED = 'remote not recognised';
+/** The states whose detail says it all: describeSync prints the detail alone. */
+const STATES_IN_DETAIL = [STATE_PAUSED, STATE_UNRECOGNISED];
+
+/**
+ * A vendor remote sync cannot read the repository or project from (www.github.com, say), cleaned: git config is text
+ * anyone can write. Null when sync can read it, or there is no vendor at all.
+ */
+export function unrecognisedRemote(workspace: WorkspaceRow): string | null {
+    if (workspace.vendor === NO_VENDOR || identityOf(workspace) !== null) return null;
+    return `${STATE_UNRECOGNISED}: ${cleanText(workspace.git_remote ?? NO_REMOTE_TEXT)}; GhostPM syncs ${SYNCED_REMOTES} remotes`;
+}
 
 /** `health` may be passed when the caller already read it. */
 export function syncDescription(db: Ledger, workspace: WorkspaceRow, health: SyncHealth = workspaceSyncHealth(db, workspace.id)): SyncDescription {
@@ -62,16 +77,19 @@ export function syncDescription(db: Ledger, workspace: WorkspaceRow, health: Syn
     const counts: string[] = [];
     if (health.pending > 0) counts.push(`${health.pending} pending`);
     if (health.failed > 0) counts.push(`${health.failed} failed`);
-    // The pause reason quotes the vendor CLI: cleaned here, once for every surface.
-    const detail = health.paused === null ? null : `${STATE_PAUSED}: ${cleanText(health.paused)}`;
+    // The pause reason quotes the vendor CLI: cleaned here, once for every surface. With no pause yet, a remote sync
+    // cannot read is still never ok: the first sync would only pause on it.
+    const paused = health.paused === null ? null : `${STATE_PAUSED}: ${cleanText(health.paused)}`;
+    const detail = paused ?? unrecognisedRemote(workspace);
     if (counts.length > 0) return { state: counts.join(PART_SEPARATOR), detail };
-    return { state: detail === null ? SYNC_OK : STATE_PAUSED, detail };
+    if (detail === null) return { state: SYNC_OK, detail };
+    return { state: paused === null ? STATE_UNRECOGNISED : STATE_PAUSED, detail };
 }
 
-/** Sync state in words, the same on every surface: off and why first, else what is queued, failed or paused, else ok. */
+/** Sync state in words, the same on every surface: off and why first, else what is queued, failed, paused or unreadable, else ok. */
 export function describeSync(db: Ledger, workspace: WorkspaceRow): string {
     const { state, detail } = syncDescription(db, workspace);
     if (detail === null) return state;
     if (state === SYNC_OFF) return `${state} (${detail})`;
-    return state === STATE_PAUSED ? detail : `${state}${PART_SEPARATOR}${detail}`;
+    return STATES_IN_DETAIL.indexOf(state) >= 0 ? detail : `${state}${PART_SEPARATOR}${detail}`;
 }

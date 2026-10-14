@@ -9,6 +9,8 @@ import { SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause, setWorkspaceSettin
 import { WorkspaceRow } from '../../src/ledger/types';
 import { syncOffHint } from '../../src/sync/schedule';
 import { SYNC_OK, describeSync, machineSyncHealth, syncDescription, workspaceSyncHealth } from '../../src/surfaces/sync-health';
+import { cleanText } from '../../src/surfaces/text';
+import { TERMINAL_CONTROL, UNREADABLE_REMOTE } from '../hostile-text';
 
 const RUNNER = 'mcp:4242';
 
@@ -79,6 +81,23 @@ describe('sync health', () => {
         seedOutboxRow(ledger.db, taskIn(github.id).id, STATUS_FAILED);
         setSyncPause(ledger.db, github.id, 'az login');
         expect(describeSync(ledger.db, github)).toBe('2 pending · 1 failed · paused: az login');
+    });
+
+    it('says a remote sync cannot read is not recognised, naming it cleaned, instead of ok', () => {
+        const odd = ensureWorkspace(ledger.db, clonedRepo(ledger.dir, 'odd', UNREADABLE_REMOTE));
+        setWorkspaceSetting(ledger.db, odd.id, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        expect(odd.vendor).toBe('github');
+
+        const said = describeSync(ledger.db, odd);
+
+        expect(said).not.toBe(SYNC_OK);
+        expect(said).toContain('not recognised');
+        expect(said).toContain(cleanText(UNREADABLE_REMOTE));
+        expect(said).not.toMatch(TERMINAL_CONTROL);
+        expect(syncDescription(ledger.db, odd).state).not.toBe(SYNC_OK);
+        // What is queued still shows.
+        seedOutboxRow(ledger.db, taskIn(odd.id).id, STATUS_PENDING);
+        expect(describeSync(ledger.db, odd)).toMatch(/^1 pending · .*not recognised/);
     });
 
     it('splits the wording into a short state and a detail that describeSync composes', () => {

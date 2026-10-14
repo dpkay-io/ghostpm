@@ -19,6 +19,7 @@ import { AzureAdapter, AzureProcess } from './sync/azure';
 import { AzureIdentity, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
 import { quoteForShell } from './shell-quote';
+import { unrecognisedRemote } from './surfaces/sync-health';
 import { cleanText } from './surfaces/text';
 import { SyncPausedError } from './sync/vendor';
 
@@ -162,6 +163,9 @@ const switched = (optedIn: { from: SyncPolicy | null }, now: SyncPolicy): string
 function syncLines(result: InitResult): string[] {
     const where = result.workspace.path;
     if (result.syncPolicy === SYNC_POLICY_OFF) return [`Sync:      ${SYNC_POLICY_OFF} (${syncOffHint(where)})`];
+    // Only init reads the remote again, so after a fix it is init that picks it up.
+    const unrecognised = unrecognisedRemote(result.workspace);
+    if (unrecognised !== null) return [`Sync:      ${unrecognised}. Fix the remote, then run \`${INIT_COMMAND}\` again.`];
     const lines = [result.optedIn === null
         ? `Sync:      on (${SETTING_SYNC_POLICY} ${result.syncPolicy})`
         : `Sync:      on (${switched(result.optedIn, result.syncPolicy)})`];

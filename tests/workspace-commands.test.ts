@@ -22,7 +22,7 @@ import { AzureIdentity } from '../src/sync/identity';
 import { syncOffHint } from '../src/sync/schedule';
 import { quoteForShell } from '../src/shell-quote';
 import { cleanText } from '../src/surfaces/text';
-import { HOSTILE, TERMINAL_CONTROL } from './hostile-text';
+import { HOSTILE, TERMINAL_CONTROL, UNREADABLE_REMOTE } from './hostile-text';
 import {
     AZURE_SAMPLE_DAYS, describeInit, describeUnregister, initWorkspace, unregisterTarget, unregisterWorkspace,
 } from '../src/workspace-commands';
@@ -143,6 +143,18 @@ describe('workspace commands', () => {
             const again = await initWorkspace(ledger.db, folder, sniff);
             expect(again.optedIn).toBeNull();
             expect(describeInit(again)).toContain(SYNC_ON);
+        });
+
+        it('says a remote sync cannot read is not recognised, naming it cleaned, instead of saying sync is on', async () => {
+            const result = await initWorkspace(ledger.db, repo(UNREADABLE_REMOTE), sniff);
+            const text = describeInit(result);
+
+            expect(result.workspace.vendor).toBe('github');
+            expect(text).not.toContain('Sync:      on');
+            expect(text).not.toContain(NEXT_SYNC);
+            expect(text).toContain('not recognised');
+            expect(text).toContain(cleanText(UNREADABLE_REMOTE));
+            expect(text).not.toMatch(TERMINAL_CONTROL);
         });
 
         it('keeps sync off when a person turned it off, and says how to turn it on', async () => {
