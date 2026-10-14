@@ -133,18 +133,31 @@ function claudeJsonRegistrations(claude: ClaudeJson, platform: string): Finding[
             code: FINDING_CLAUDE_JSON_REGISTRATION,
             message: `~/.claude.json registers a "${MCP_SERVER_KEY}" MCP server for ${projectPath}. ${DUPLICATE_SERVER}`,
             // Local scope is keyed by the project folder, so the removal runs from inside it.
-            fix: `cd ${quoteForShell(projectPath, platform)}; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+            fix: `${changeDirCommand(projectPath, platform)}${commandJoiner(platform)}claude mcp remove ${MCP_SERVER_KEY} -s local`,
         });
     });
     return findings;
 }
+
+/** PowerShell reads these as single quotes too (U+2018, U+2019, U+201A, U+201B), so each must be doubled like the ASCII one. */
+const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g;
 
 /**
  * A path pasted into a shell. Paths are untrusted (a repo folder can be named anything), so
  * single quotes: nothing inside them expands in PowerShell or in POSIX shells.
  */
 export function quoteForShell(value: string, platform: string): string {
-    return platform === WINDOWS ? `'${value.split("'").join("''")}'` : `'${value.split("'").join("'\\''")}'`;
+    return platform === WINDOWS ? `'${value.replace(POWERSHELL_QUOTES, quote => quote + quote)}'` : `'${value.split("'").join("'\\''")}'`;
+}
+
+/** Local scope is keyed by the folder, so the next command must run in exactly it. -LiteralPath: `cd` reads [ and ] as wildcards and can land in a sibling. */
+export function changeDirCommand(dir: string, platform: string): string {
+    return platform === WINDOWS ? `Set-Location -LiteralPath ${quoteForShell(dir, platform)}` : `cd ${quoteForShell(dir, platform)}`;
+}
+
+/** Windows PowerShell 5.1 has no `&&`, so Windows keeps `;`; elsewhere a failed cd must not run the next command in the wrong folder. */
+function commandJoiner(platform: string): string {
+    return platform === WINDOWS ? '; ' : ' && ';
 }
 
 export function removeDirCommand(dir: string, platform: string): string {

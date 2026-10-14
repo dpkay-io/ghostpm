@@ -1,10 +1,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { removeTempDir } from './temp-dir';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
-    FINDING_NEWER_LEDGER, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, quoteForShell, removeDirCommand, skillCandidates,
+    FINDING_NEWER_LEDGER, MCP_SERVER_KEY, REMOVED_TOOLS, changeDirCommand, machineProbe, quoteForShell, removeDirCommand, skillCandidates,
 } from '../src/doctor';
 import { PLUGIN_ID } from '../src/help';
 import { userSettingsPath } from '../src/plugin-setup';
@@ -130,8 +131,8 @@ describe('diagnose', () => {
                 .filter(finding => finding.code === FINDING_CLAUDE_JSON_REGISTRATION)
                 .map(finding => finding.fix);
             expect(fixes).toEqual([
-                `cd 'C:/work/app'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
-                `cd 'C:/work/site'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+                `Set-Location -LiteralPath 'C:/work/app'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
+                `Set-Location -LiteralPath 'C:/work/site'; claude mcp remove ${MCP_SERVER_KEY} -s local`,
             ]);
         });
 
@@ -247,7 +248,7 @@ describe('diagnose', () => {
             const claudeJson = JSON.stringify({ projects: { [NASTY]: { mcpServers: { [MCP_SERVER_KEY]: {} } } } });
             [ 'win32', 'linux' ].forEach(platform => {
                 const fix = diagnose(probe({ claudeJson, platform }))[0].fix;
-                expect(fix.startsWith(`cd ${quoteForShell(NASTY, platform)}`)).toBe(true);
+                expect(fix.startsWith(`${changeDirCommand(NASTY, platform)}${platform === 'win32' ? ';' : ' &&'} claude`)).toBe(true);
             });
         });
     });
@@ -293,6 +294,61 @@ describe('diagnose', () => {
             });
             expect(found.ledgerSchema).toBe(SCHEMA_VERSION + 1);
             expect(diagnose(found).map(finding => finding.code)).toEqual([FINDING_NEWER_LEDGER]);
+        });
+    });
+
+    describe('PowerShell reads more than the ASCII quote', () => {
+        const CURLY = ['\u2018', '\u2019', '\u201A', '\u201B'];
+
+        it('doubles each curly single quote, as well as the plain one', () => {
+            CURLY.forEach(quote => {
+                expect(quoteForShell(`a${quote}b`, 'win32')).toBe(`'a${quote}${quote}b'`);
+            });
+            expect(quoteForShell("a'b", 'win32')).toBe("'a''b'");
+        });
+
+        it('leaves curly quotes alone for POSIX shells, which do not read them as quotes', () => {
+            expect(quoteForShell('a\u2019b', 'linux')).toBe("'a\u2019b'");
+        });
+
+        it('changes folder literally: Set-Location -LiteralPath on Windows, cd && on POSIX', () => {
+            expect(changeDirCommand('C:/a[a]', 'win32')).toBe("Set-Location -LiteralPath 'C:/a[a]'");
+            expect(changeDirCommand('/a[a]', 'linux')).toBe("cd '/a[a]'");
+        });
+    });
+
+    describe('the Windows hints run in a real PowerShell', () => {
+        const shell = ['pwsh', 'powershell'].find(name => spawnSync(name, ['-NoProfile', '-Command', '1']).status === 0);
+        const PROGRESS_OFF = "$ProgressPreference = 'SilentlyContinue'; ";
+        const run = (script: string): void => {
+            const encoded = Buffer.from(PROGRESS_OFF + script,'utf16le').toString('base64');
+            const result = spawnSync(shell as string, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { encoding: 'utf8' });
+            expect(result.stderr).toBe('');
+            expect(result.status).toBe(0);
+        };
+
+        (shell === undefined ? it.skip : it)('removes and enters exactly the named folder, never a wildcard sibling', () => {
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-doctor-ps-'));
+            try {
+                const names = ['a[a]', 'a\u2019b', 'aa', "it's"];
+                names.forEach(name => fs.mkdirSync(path.join(root, name, '.claude', 'skills', 'ghostpm'), { recursive: true }));
+                const out = path.join(root, 'landed.txt');
+                const hintFor = (name: string): string => diagnose(probe({
+                    claudeJson: JSON.stringify({ projects: { [path.join(root, name)]: { mcpServers: { [MCP_SERVER_KEY]: {} } } } }),
+                }))[0].fix.split('; claude')[0];
+                const q = (value: string): string => quoteForShell(value, 'win32');
+                const record = `[IO.File]::WriteAllText(${q(out)}, (Get-Location).Path, (New-Object Text.UTF8Encoding $false))`;
+                run(`${hintFor('a[a]')}; ${record}`);
+                expect(fs.readFileSync(out, 'utf8')).toBe(path.join(root, 'a[a]'));
+                run(`${hintFor('a\u2019b')}; ${record}`);
+                expect(fs.readFileSync(out, 'utf8')).toBe(path.join(root, 'a\u2019b'));
+                names.slice(0, 2).concat("it's").forEach(name => run(removeDirCommand(path.join(root, name, '.claude', 'skills', 'ghostpm'), 'win32')));
+                expect(fs.readdirSync(root).sort()).toEqual(['a[a]', 'a\u2019b', 'aa', "it's", 'landed.txt'].sort());
+                expect(fs.existsSync(path.join(root, 'aa', '.claude', 'skills', 'ghostpm'))).toBe(true);
+                ['a[a]', 'a\u2019b', "it's"].forEach(name => expect(fs.existsSync(path.join(root, name, '.claude', 'skills', 'ghostpm'))).toBe(false));
+            } finally {
+                removeTempDir(root);
+            }
         });
     });
 });
