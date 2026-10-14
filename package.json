@@ -13,6 +13,7 @@
     ".mcp.json",
     "hooks",
     "skills",
+    "CHANGELOG.md",
     "npm-shrinkwrap.json"
   ],
   "engines": { "node": ">=22" },

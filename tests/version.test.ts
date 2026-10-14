@@ -37,3 +37,14 @@ describe('the release marketplace', () => {
         expect(`${marketplace.plugins[0].name}@${marketplace.name}`).toBe(PLUGIN_ID);
     });
 });
+
+describe('the changelog', () => {
+    it('the newest CHANGELOG entry is this version', () => {
+        const heading = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8').split(/\r?\n/).find(line => line.indexOf('## ') === 0);
+        expect(heading).toMatch(new RegExp(`^## ${MANIFEST.version.replace(/\./g, '\\.')}(\\s|$)`));
+    });
+
+    it('ships in the package', () => {
+        expect(MANIFEST.files).toContain('CHANGELOG.md');
+    });
+});
