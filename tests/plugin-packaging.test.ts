@@ -73,4 +73,20 @@ describe('plugin packaging', () => {
         expect(server.args.join(' ')).toContain(PLUGIN_ROOT_VAR);
         expect(server.args).toContain('serve');
     });
+
+    it('publishes every plugin component and the shrinkwrap, but no marketplace file and no bin/', () => {
+        const files: string[] = readJson('package.json').files;
+        ['dist', '.claude-plugin/plugin.json', '.mcp.json', 'hooks', 'skills', 'npm-shrinkwrap.json'].forEach(entry =>
+            expect(files).toContain(entry));
+        expect(files).not.toContain('.claude-plugin');
+        expect(files).not.toContain('bin');
+        // claude.ai and Cowork refuse plugins with a top-level bin/ directory.
+        expect(fs.existsSync(path.join(ROOT, 'bin'))).toBe(false);
+    });
+
+    it('keeps the development root out of the registry and requires Node 20', () => {
+        const manifest = readJson('package.json');
+        expect(manifest.private).toBe(true);
+        expect(manifest.engines.node).toBe('>=20');
+    });
 });

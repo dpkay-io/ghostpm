@@ -1,17 +1,24 @@
 {
   "name": "ghostpm",
   "version": "1.4.0",
-  "description": "The invisible, zero-latency PM interface for AI Agents. Connects to GitHub Issues and Azure DevOps via MCP.",
+  "private": true,
+  "description": "Local-first task ledger for AI coding sessions: captures work from Claude Code, shows it machine-wide, and syncs it to GitHub Issues or Azure DevOps.",
   "main": "dist/mcp-server.js",
   "bin": {
     "ghostpm": "./dist/cli-main.js"
   },
   "files": [
-    "dist"
+    "dist",
+    ".claude-plugin/plugin.json",
+    ".mcp.json",
+    "hooks",
+    "skills",
+    "npm-shrinkwrap.json"
   ],
+  "engines": { "node": ">=20" },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
-    "prepublishOnly": "npm run build",
+    "stage": "npm run build && node scripts/stage-release.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
     "start": "node dist/cli-main.js serve",
