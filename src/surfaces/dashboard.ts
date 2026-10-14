@@ -8,8 +8,8 @@ import { getWorkspace } from '../ledger/workspaces';
 import { PHASES, Phase, Vendor, WorkspaceRow, formatTaskId } from '../ledger/types';
 import { TASK_MARKER } from '../statusline';
 import { eventDetail, eventTask } from './render-event';
-import { MachineSyncHealth, SyncHealth, describeSync, machineSyncHealth, workspaceSyncHealth } from './sync-health';
-import { ANSI, ELLIPSIS, formatClock, padLeft, padRight, truncate, workspaceLabel } from './text';
+import { MachineSyncHealth, SyncHealth, machineSyncHealth, syncDescription, workspaceSyncHealth } from './sync-health';
+import { ANSI, ELLIPSIS, cleanText, formatClock, padLeft, padRight, truncate, workspaceLabel } from './text';
 
 export const DASHBOARD_WINDOW_HOURS = 24;
 export const RECENT_EVENTS = 12;
@@ -19,11 +19,16 @@ const CROSS_SCAN_LIMIT = 2000;
 const INDENT = '  ';
 const NAME_WIDTH = 20;
 const CLIENT_WIDTH = 12;
-const COUNT_WIDTH = 7;
+const COUNT_WIDTH = 6;
+/** Wide enough for `99 pending · 99 failed`; a longer state only pushes the counts, which are cut first. */
+const SYNC_WIDTH = 22;
+const MIN_NAME_WIDTH = 8;
+/** The width the plain-text dashboard (pipes, the MCP tool) is laid out for. */
+export const DEFAULT_COLUMNS = 80;
 const MIN_SIZE = 1;
 const NO_TASK = '(no task)';
 const PHASE_LABELS: Record<Phase, string> = {
-    brainstorming: 'brain', planned: 'plan', in_progress: 'prog', in_review: 'review', done: 'done', dropped: 'drop',
+    brainstorming: 'brain', planned: 'plan', in_progress: 'prog', in_review: 'rev', done: 'done', dropped: 'drop',
 };
 
 export type Tone = 'title' | 'heading' | 'normal' | 'warn' | 'dim';
@@ -50,8 +55,10 @@ export interface WorkspaceView {
     vendor: Vendor;
     counts: Record<Phase, number>;
     sync: SyncHealth;
-    /** The shared wording from describeSync. */
-    syncText: string;
+    /** Short state from syncDescription: off | ok | N pending · M failed | paused. */
+    syncState: string;
+    /** Why: the off reason or the pause reason. */
+    syncDetail: string | null;
     lastActivityAt: string;
 }
 
@@ -134,9 +141,11 @@ export function buildSnapshot(db: Ledger, options: SnapshotOptions = {}): Dashbo
         activity.forEach((entry, id) => {
             const row = workspaceRow(id);
             if (row === undefined) return;
+            const sync = workspaceSyncHealth(db, id);
+            const { state, detail } = syncDescription(db, row, sync);
             workspaces.push({
                 label: label(id), vendor: row.vendor, counts: entry.counts,
-                sync: workspaceSyncHealth(db, id), syncText: describeSync(db, row), lastActivityAt: entry.lastActivityAt,
+                sync, syncState: state, syncDetail: detail, lastActivityAt: entry.lastActivityAt,
             });
         });
         workspaces.sort((a, b) => (a.lastActivityAt === b.lastActivityAt ? 0 : a.lastActivityAt < b.lastActivityAt ? 1 : -1));
@@ -175,9 +184,9 @@ function describeMachine(machine: MachineSyncHealth): string {
 }
 
 /** §9.3 sections as lines of plain text. Colour, width and height are applied later. */
-export function renderDashboard(snapshot: DashboardSnapshot): DashboardLine[] {
+export function renderDashboard(snapshot: DashboardSnapshot, columns: number = DEFAULT_COLUMNS): DashboardLine[] {
     const lines: DashboardLine[] = [];
-    const add = (text: string, tone: Tone = 'normal'): void => { lines.push({ text, tone }); };
+    const add = (text: string, tone: Tone = 'normal'): void => { lines.push({ text: cleanText(text), tone }); };
 
     add(`GhostPM · ${formatClock(new Date(snapshot.at))} · ${describeMachine(snapshot.machine)}`, snapshot.machine.failed > 0 ? 'warn' : 'title');
     add('');
@@ -190,13 +199,17 @@ export function renderDashboard(snapshot: DashboardSnapshot): DashboardLine[] {
     ));
     add('');
 
-    add(`${padRight('TASKS BY PHASE', NAME_WIDTH + INDENT.length)}${PHASES.map(phase => padLeft(PHASE_LABELS[phase], COUNT_WIDTH)).join('')}  SYNC`, 'heading');
+    // Name, then SYNC, then the counts: on a narrow screen the counts are what gets cut.
+    const nameWidth = Math.max(MIN_NAME_WIDTH, Math.min(NAME_WIDTH, columns - INDENT.length - 1 - SYNC_WIDTH - PHASES.length * COUNT_WIDTH));
+    add(`${INDENT}${padRight('TASKS', nameWidth)} ${padRight('SYNC', SYNC_WIDTH)}${PHASES.map(phase => padLeft(PHASE_LABELS[phase], COUNT_WIDTH)).join('')}`, 'heading');
     if (snapshot.workspaces.length === 0) add(`${INDENT}no tasks yet`, 'dim');
     snapshot.workspaces.forEach(workspace => {
         const warn = workspace.sync.failed > 0 || workspace.sync.paused !== null;
-        add(`${INDENT}${padRight(truncate(workspace.label, NAME_WIDTH), NAME_WIDTH)}`
-            + `${PHASES.map(phase => padLeft(String(workspace.counts[phase]), COUNT_WIDTH)).join('')}`
-            + `  ${workspace.syncText}`, warn ? 'warn' : 'normal');
+        add(`${INDENT}${padRight(truncate(workspace.label, nameWidth), nameWidth)} ${padRight(workspace.syncState, SYNC_WIDTH)}`
+            + `${PHASES.map(phase => padLeft(String(workspace.counts[phase]), COUNT_WIDTH)).join('')}`, warn ? 'warn' : 'normal');
+    });
+    snapshot.workspaces.forEach(workspace => {
+        if (workspace.syncDetail !== null) add(`${INDENT}${workspace.label}: ${workspace.syncDetail}`, workspace.sync.paused !== null ? 'warn' : 'dim');
     });
     if (snapshot.hiddenWorkspaces > 0) add(`${INDENT}+${snapshot.hiddenWorkspaces} workspace(s) with no tasks and no live session`, 'dim');
 

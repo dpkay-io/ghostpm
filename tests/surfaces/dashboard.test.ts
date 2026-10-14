@@ -11,7 +11,7 @@ import { ensureWorkspace, setWorkspaceVendor } from '../../src/ledger/workspaces
 import { createTask } from '../../src/ledger/tasks';
 import { recordEvent } from '../../src/ledger/events';
 import { endSession, setSessionTask, startSession } from '../../src/ledger/sessions';
-import { SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause, setWorkspaceSetting } from '../../src/ledger/settings';
+import { getSetting, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause, setWorkspaceSetting } from '../../src/ledger/settings';
 import { Phase, formatTaskId } from '../../src/ledger/types';
 import {
     CROSS_MARKER, DashboardLine, buildSnapshot, dashboardText, fitToScreen, paint, renderDashboard,
@@ -19,6 +19,7 @@ import {
 import { visibleLength } from '../../src/surfaces/text';
 
 const ESCAPE = '\u001b[';
+const ESC = String.fromCharCode(27);
 const TWO_DAYS_MS = 2 * MS_PER_DAY;
 
 describe('dashboard snapshot', () => {
@@ -83,20 +84,64 @@ describe('dashboard snapshot', () => {
         const alphaRow = lines.find(line => line.text.indexOf('alpha') >= 0 && line.text.indexOf('failed') >= 0)!;
         const betaRow = lines.find(line => line.text.indexOf('beta') >= 0)!;
 
-        expect(alphaRow.text).toContain('1 failed · paused: gh is not logged in');
+        expect(alphaRow.text).toContain('1 failed');
+        expect(lines.map(line => line.text)).toContain('  alpha: paused: gh is not logged in');
         expect(alphaRow.tone).toBe('warn');
-        expect(betaRow.text).toContain('off (no GitHub or Azure DevOps remote)');
+        expect(betaRow.text).toMatch(/\boff\b/);
+        expect(lines.map(line => line.text)).toContain('  beta: no GitHub or Azure DevOps remote');
         expect(lines[0].text).toContain('runner mcp:4242');
     });
 
-    it('reads off, not ok, for a vendor workspace left at the default sync_policy', () => {
+    it('reads off, not ok, for a vendor workspace left at the default sync_policy, with the reason in the footer', () => {
         setWorkspaceVendor(ledger.db, alpha, 'github');
         task('Linked', alpha);
 
-        const alphaRow = renderDashboard(buildSnapshot(ledger.db)).find(line => line.text.indexOf('alpha') >= 0 && line.text.indexOf(' off') >= 0)!;
+        const lines = renderDashboard(buildSnapshot(ledger.db)).map(line => line.text);
+        const alphaRow = lines.find(line => line.indexOf('alpha') >= 0 && /\boff\b/.test(line))!;
 
-        expect(alphaRow.text).toContain('off (sync_policy off;');
-        expect(alphaRow.text).not.toContain(' ok');
+        expect(alphaRow).not.toContain(' ok');
+        expect(alphaRow).not.toContain('sync_policy');
+        expect(lines.find(line => line.indexOf('  alpha: ') === 0)).toContain('sync_policy off;');
+    });
+
+    it('warns about failed pushes even in a workspace where sync is off', () => {
+        seedOutboxRow(ledger.db, task('Stuck', beta).id, STATUS_FAILED);
+
+        const betaRow = renderDashboard(buildSnapshot(ledger.db)).find(line => line.text.indexOf('beta') >= 0)!;
+
+        expect(betaRow.tone).toBe('warn');
+        expect(betaRow.text).toContain('off');
+    });
+
+    it('keeps the sync state visible at 80 and 40 columns, and nothing wider than the screen', () => {
+        setWorkspaceVendor(ledger.db, alpha, 'github');
+        setWorkspaceSetting(ledger.db, alpha, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        for (let i = 0; i < 2; i += 1) task('Queued ' + i, alpha);
+        seedOutboxRow(ledger.db, task('Failing', alpha).id, STATUS_FAILED);
+        setSyncPause(ledger.db, alpha, 'gh is not logged in and this reason is long');
+        task('Local', beta);
+
+        [80, 40].forEach(columns => {
+            const rows = fitToScreen(renderDashboard(buildSnapshot(ledger.db), columns), { columns, rows: 60 });
+            rows.forEach(line => expect(visibleLength(line.text)).toBeLessThanOrEqual(columns));
+            expect(rows.find(line => line.text.indexOf('alpha') >= 0 && line.text.indexOf('1 failed') >= 0)).toBeDefined();
+            expect(rows.find(line => line.text.indexOf('beta') >= 0 && /\boff\b/.test(line.text))).toBeDefined();
+        });
+    });
+
+    it('neutralises control characters and keeps wide titles inside the width', () => {
+        task('Fix\n' + ESC + '31m red 漢字漢字漢字漢字漢字 😀😀😀😀😀', alpha);
+        const worked = task('Wide 漢字漢字漢字漢字漢字漢字漢字漢字', alpha);
+        startSession(ledger.db, { id: 'live', client: 'claude-code', cwd: alphaDir, workspaceId: alpha });
+        setSessionTask(ledger.db, 'live', worked.id);
+        recordEvent(ledger.db, { taskId: worked.id, kind: 'comment', source: 'test', payload: { text: 'line one\nline two ' + ESC + '2J' } });
+
+        const text = dashboardText(ledger.db);
+        const rows = fitToScreen(renderDashboard(buildSnapshot(ledger.db), 40), { columns: 40, rows: 60 });
+
+        renderDashboard(buildSnapshot(ledger.db)).forEach(line => expect(line.text).not.toMatch(/[\n\r]/));
+        expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/);
+        rows.forEach(line => expect(visibleLength(line.text)).toBeLessThanOrEqual(40));
     });
 
     it('flags a task touched from another workspace (spec §9.3)', () => {
@@ -148,6 +193,11 @@ describe('fitting the dashboard to a terminal (Review Focus 1)', () => {
         expect(fitToScreen(short, { columns: 80, rows: 24 })).toEqual(short);
     });
 
+    it('shows only the notice at one row, and one column at width 1', () => {
+        expect(fitToScreen(tall, { columns: 80, rows: 1 })).toHaveLength(1);
+        fitToScreen(tall, { columns: 1, rows: 3 }).forEach(line => expect(visibleLength(line.text)).toBeLessThanOrEqual(1));
+    });
+
     it('survives a terminal reporting zero size', () => {
         expect(fitToScreen(tall, { columns: 0, rows: 0 })).toHaveLength(1);
     });
@@ -197,6 +247,7 @@ describe('reading while a writer holds the lock (Review Focus 2, spec §15)', ()
                 const snapshot = buildSnapshot(reader);
                 expect(Date.now() - started).toBeLessThan(READ_BUDGET_MS);
                 expect(snapshot.workspaces.map(workspace => workspace.label)).toEqual(['alpha']);
+                expect(getSetting(reader, 'held')).toBeUndefined();
             } finally {
                 reader.close();
             }

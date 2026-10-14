@@ -46,14 +46,30 @@ export function syncOffReason(db: Ledger, workspace: WorkspaceRow): string | nul
     return syncIsOff(db, workspace) ? syncOffHint(workspace.path) : null;
 }
 
+/** The short state a table cell shows, and the detail that explains it (the off reason, or the pause reason). */
+export interface SyncDescription {
+    state: string;
+    detail: string | null;
+}
+
+const STATE_PAUSED = 'paused';
+
+/** `health` may be passed when the caller already read it. */
+export function syncDescription(db: Ledger, workspace: WorkspaceRow, health: SyncHealth = workspaceSyncHealth(db, workspace.id)): SyncDescription {
+    const off = syncOffReason(db, workspace);
+    if (off !== null) return { state: SYNC_OFF, detail: off };
+    const counts: string[] = [];
+    if (health.pending > 0) counts.push(`${health.pending} pending`);
+    if (health.failed > 0) counts.push(`${health.failed} failed`);
+    const detail = health.paused === null ? null : `${STATE_PAUSED}: ${health.paused}`;
+    if (counts.length > 0) return { state: counts.join(PART_SEPARATOR), detail };
+    return { state: detail === null ? SYNC_OK : STATE_PAUSED, detail };
+}
+
 /** Sync state in words, the same on every surface: off and why first, else what is queued, failed or paused, else ok. */
 export function describeSync(db: Ledger, workspace: WorkspaceRow): string {
-    const off = syncOffReason(db, workspace);
-    if (off !== null) return `${SYNC_OFF} (${off})`;
-    const health = workspaceSyncHealth(db, workspace.id);
-    const parts: string[] = [];
-    if (health.pending > 0) parts.push(`${health.pending} pending`);
-    if (health.failed > 0) parts.push(`${health.failed} failed`);
-    if (health.paused !== null) parts.push(`paused: ${health.paused}`);
-    return parts.length > 0 ? parts.join(PART_SEPARATOR) : SYNC_OK;
+    const { state, detail } = syncDescription(db, workspace);
+    if (detail === null) return state;
+    if (state === SYNC_OFF) return `${state} (${detail})`;
+    return state === STATE_PAUSED ? detail : `${state}${PART_SEPARATOR}${detail}`;
 }

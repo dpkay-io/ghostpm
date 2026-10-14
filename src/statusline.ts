@@ -6,7 +6,7 @@ import { getTask } from './ledger/tasks';
 import { SessionRow, formatTaskId } from './ledger/types';
 import { getWorkspace } from './ledger/workspaces';
 import { SYNC_OFF, syncOffReason, workspaceSyncHealth } from './surfaces/sync-health';
-import { truncate } from './surfaces/text';
+import { cleanText, truncate } from './surfaces/text';
 
 export const SEPARATOR = ' │ ';
 export const TASK_MARKER = '▶';
@@ -83,7 +83,7 @@ function warningSegment(db: Ledger, session: SessionRow | undefined): string {
 function ghostpmSegment(db: Ledger, stdin: string): string {
     const sessionId = sessionIdFrom(stdin);
     const session = sessionId.length === 0 ? undefined : getSession(db, sessionId);
-    return [taskSegment(db, session), warningSegment(db, session)].filter(part => part.length > 0).join(SEGMENT_GAP);
+    return cleanText([taskSegment(db, session), warningSegment(db, session)].filter(part => part.length > 0).join(SEGMENT_GAP));
 }
 
 function joinSegments(previous: string, ours: string): string {

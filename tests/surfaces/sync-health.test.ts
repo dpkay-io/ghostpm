@@ -8,7 +8,7 @@ import { createTask } from '../../src/ledger/tasks';
 import { SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, setSyncPause, setWorkspaceSetting } from '../../src/ledger/settings';
 import { WorkspaceRow } from '../../src/ledger/types';
 import { syncOffHint } from '../../src/sync/schedule';
-import { SYNC_OK, describeSync, machineSyncHealth, workspaceSyncHealth } from '../../src/surfaces/sync-health';
+import { SYNC_OK, describeSync, machineSyncHealth, syncDescription, workspaceSyncHealth } from '../../src/surfaces/sync-health';
 
 const RUNNER = 'mcp:4242';
 
@@ -79,5 +79,17 @@ describe('sync health', () => {
         seedOutboxRow(ledger.db, taskIn(github.id).id, STATUS_FAILED);
         setSyncPause(ledger.db, github.id, 'az login');
         expect(describeSync(ledger.db, github)).toBe('2 pending · 1 failed · paused: az login');
+    });
+
+    it('splits the wording into a short state and a detail that describeSync composes', () => {
+        const github = githubWorkspace();
+        expect(syncDescription(ledger.db, github)).toEqual({ state: 'off', detail: syncOffHint(github.path) });
+
+        setWorkspaceSetting(ledger.db, github.id, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
+        expect(syncDescription(ledger.db, github)).toEqual({ state: SYNC_OK, detail: null });
+
+        setSyncPause(ledger.db, github.id, 'az login');
+        expect(syncDescription(ledger.db, github)).toEqual({ state: 'paused', detail: 'paused: az login' });
+        expect(describeSync(ledger.db, github)).toBe('paused: az login');
     });
 });

@@ -126,6 +126,16 @@ describe('buildStatusline', () => {
         expect(line).toBe(`${TASK_MARKER} T${active.id} Login fix · in_progress`);
     });
 
+    it('neutralises newlines and escape codes in a task title (I2)', () => {
+        const bad = task('Bad\ntitle\u001b[31m red');
+        attach(bad);
+
+        const line = build();
+
+        expect(line).toBe(`PREV${SEPARATOR}${TASK_MARKER} T${bad.id} Bad title [31m red · in_progress`);
+        expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    });
+
     it('warns about failed pushes in the session workspace (spec §9.2)', () => {
         syncOn();
         const active = task('Login fix');
