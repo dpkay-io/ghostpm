@@ -3,7 +3,8 @@ import * as path from 'path';
 import { tempLedger, TempLedger } from './helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { createTask, updateTask, ChangeContext } from '../../src/ledger/tasks';
-import { listEvents } from '../../src/ledger/events';
+import { listEvents, recordEvent } from '../../src/ledger/events';
+import { startSession } from '../../src/ledger/sessions';
 
 const SOURCE = 'test';
 const AUTOMATION: ChangeContext = { source: SOURCE, human: false };
@@ -55,5 +56,32 @@ describe('listEvents', () => {
         const entries = listEvents(ledger.db, { taskId: created.id, limit: 2 });
         expect(entries.map(e => e.kind)).toEqual(['comment', 'comment']);
         expect(JSON.parse(entries[1].payload!)).toEqual({ text: 'two' });
+    });
+
+    it('carries the workspace of the task and of the session that recorded it', () => {
+        const otherDir = path.join(ledger.dir, 'other');
+        fs.mkdirSync(otherDir);
+        const otherWorkspaceId = ensureWorkspace(ledger.db, otherDir).id;
+        const created = task('Here');
+        startSession(ledger.db, { id: 'visitor', client: 'claude-code', cwd: otherDir, workspaceId: otherWorkspaceId });
+        recordEvent(ledger.db, { taskId: created.id, kind: 'comment', source: SOURCE, sessionId: 'visitor', payload: { text: 'hi' } });
+
+        const [comment] = listEvents(ledger.db, { kinds: ['comment'] });
+        expect(comment.workspace_id).toBe(workspaceId);
+        expect(comment.session_workspace_id).toBe(otherWorkspaceId);
+    });
+
+    it('keeps only events recorded from another workspace when asked', () => {
+        const otherDir = path.join(ledger.dir, 'other');
+        fs.mkdirSync(otherDir);
+        const otherWorkspaceId = ensureWorkspace(ledger.db, otherDir).id;
+        const created = task('Here');
+        startSession(ledger.db, { id: 'visitor', client: 'claude-code', cwd: otherDir, workspaceId: otherWorkspaceId });
+        startSession(ledger.db, { id: 'local', client: 'claude-code', cwd: ledger.dir, workspaceId });
+        recordEvent(ledger.db, { taskId: created.id, kind: 'comment', source: SOURCE, sessionId: 'visitor', payload: { text: 'from there' } });
+        recordEvent(ledger.db, { taskId: created.id, kind: 'comment', source: SOURCE, sessionId: 'local', payload: { text: 'from here' } });
+
+        const cross = listEvents(ledger.db, { crossWorkspaceOnly: true });
+        expect(cross.map(entry => JSON.parse(entry.payload!).text)).toEqual(['from there']);
     });
 });
