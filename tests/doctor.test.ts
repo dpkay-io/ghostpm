@@ -1,7 +1,10 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+// The module object itself, not an import wrapper: a spy on it is what doctor's execFileSync call sees.
+import child_process = require('child_process');
 import { removeTempDir } from './temp-dir';
+import { systemTool } from '../src/cli';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
     FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, removeDirCommand, skillCandidates,
@@ -309,6 +312,21 @@ describe('diagnose', () => {
                 expect(homeDir()).toBe(path.join(home, 'real'));
                 expect(userSettingsPath()).toBe(path.join(home, 'real', '.claude', 'settings.json'));
             } finally {
+                restore();
+            }
+        });
+    });
+
+    describe('finding the global install', () => {
+        it('asks where.exe from System32 on Windows, so a copy planted in the folder never runs; which elsewhere', () => {
+            const restore = isolateHomes(home);
+            const finder = jest.spyOn(child_process, 'execFileSync').mockReturnValue('');
+            try {
+                expect(machineProbe().resolveGlobal()).toBeNull();
+                expect(finder.mock.calls.map(call => call.slice(0, 2)))
+                    .toEqual([[process.platform === 'win32' ? systemTool('where.exe') : 'which', ['ghostpm']]]);
+            } finally {
+                finder.mockRestore();
                 restore();
             }
         });

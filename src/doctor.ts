@@ -10,6 +10,7 @@ import { homeDir } from './registry';
 import { SERVER_NAME, minimumNodeMajor, packageVersion } from './package-info';
 import { userSettingsPath } from './plugin-setup';
 import { prebuiltNote } from './bootstrap';
+import { systemTool } from './cli';
 import { WINDOWS, changeDirCommand, quoteForShell } from './shell-quote';
 
 export const FINDING_STALE_REGISTRATION = 'stale_registration';
@@ -262,7 +263,8 @@ function ledgerFacts(): { schema: number | null; workspacePaths: string[] } {
 /** The binary on PATH is a shim; the package sits beside it in node_modules. */
 function resolveGlobal(): string | null {
     try {
-        const finder = process.platform === WINDOWS ? 'where.exe' : 'which';
+        // From System32, as every Windows tool GhostPM runs: a where.exe planted in the folder doctor runs in never does.
+        const finder = process.platform === WINDOWS ? systemTool('where.exe') : 'which';
         const shim = String(execFileSync(finder, [GLOBAL_BINARY])).split(/\r?\n/)[0].trim();
         if (shim.length === 0) return null;
         const installDir = path.join(path.dirname(shim), 'node_modules', GLOBAL_BINARY);

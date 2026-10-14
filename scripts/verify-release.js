@@ -17,6 +17,8 @@ const { stageRelease, SHRINKWRAP } = require('./stage-release');
 const ROOT = path.join(__dirname, '..');
 // The bootstrap's own npm runner: one command line, absolute npm path, every argument checked first.
 const { runNpm } = require(path.join(ROOT, 'dist', 'bootstrap.js'));
+// Windows tools run from System32, as GhostPM runs them: a copy planted in the folder or early on PATH never does.
+const { systemTool } = require(path.join(ROOT, 'dist', 'cli.js'));
 
 /** Claude Code kills the plugin dependency install at 60 s (plugins loading reference). */
 const CLAUDE_CODE_INSTALL_LIMIT_MS = 60 * 1000;
@@ -39,6 +41,9 @@ const WORK_PREFIX = 'ghostpm-verify-';
 const WINDOWS = 'win32';
 /** Every process with its command line. CIM, because wmic is gone from current Windows. */
 const LIST_WINDOWS_PROCESSES = 'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }';
+/** Windows PowerShell's place under System32 (it is not in System32 itself). */
+const WINDOWS_POWERSHELL = path.join('WindowsPowerShell', 'v1.0', 'powershell.exe');
+const TASKKILL = 'taskkill.exe';
 const MANIFEST = 'package.json';
 const RELEASE_DIR = 'release';
 const EXTRACT_DIR = 'extract';
@@ -137,7 +142,7 @@ function filesUnder(dir) {
 function stopLeftovers(work) {
     const marker = path.basename(work);
     const listing = process.platform === WINDOWS
-        ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', LIST_WINDOWS_PROCESSES], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS, windowsHide: true })
+        ? spawnSync(systemTool(WINDOWS_POWERSHELL), ['-NoProfile', '-NonInteractive', '-Command', LIST_WINDOWS_PROCESSES], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS, windowsHide: true })
         : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: COMMAND_TIMEOUT_MS });
     if (listing.error || listing.status !== 0) {
         const reason = listing.error ? listing.error.message : `exit ${listing.status}: ${String(listing.stderr || '').trim()}`;
@@ -151,7 +156,7 @@ function stopLeftovers(work) {
         .filter(pid => pid !== process.pid);
     pids.forEach(pid => {
         if (process.platform === WINDOWS) {
-            spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: COMMAND_TIMEOUT_MS, windowsHide: true });
+            spawnSync(systemTool(TASKKILL), ['/PID', String(pid), '/T', '/F'], { timeout: COMMAND_TIMEOUT_MS, windowsHide: true });
             return;
         }
         try {
