@@ -38,6 +38,8 @@ export const SERVER_VERSION = packageVersion();
 export const ALL_SPRINTS = "all";
 export const CLEAR_SPRINT = "__clear__";
 export const CURRENT_USER_REF = "@me";
+/** Said on stderr once the stdio transport is up: stdout belongs to the protocol. */
+export const STDIO_BANNER = "GhostPM MCP server running on stdio";
 
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
@@ -503,7 +505,7 @@ export class PmServer {
             process.once('exit', () => runner.stop());
         }
         await this.server.connect(transport ?? new StdioServerTransport());
-        if (stdio) console.error(`GhostPM MCP server running on stdio (${this.sessionId})`);
+        if (stdio) console.error(`${STDIO_BANNER} (${this.sessionId})`);
     }
 }
 
