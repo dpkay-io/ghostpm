@@ -34,6 +34,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
   - explicit `--repo` or `--org` and `--project` on every vendor call.
 - **`ghostpm doctor`.** Finds 1.4.0 MCP registrations in `~/.claude.json`, stale 1.4.0 skills, a ledger newer than the copy you are running and a Node.js older than 22, and prints the exact commands that fix them. It never changes anything itself.
 - **`ghostpm bootstrap`** builds the SQLite addon into the GhostPM home, and works when its path has spaces or symbols.
+- **Capped logs.** `hook.log` and `sync.log` move to `hook.log.1` and `sync.log.1` once they pass 1 MiB, keeping one older file each.
 - **`ghostpm --version`.**
 
 ### Fixed

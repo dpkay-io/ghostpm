@@ -114,6 +114,7 @@ Repos imported from 1.4.0 keep 1.4.0's behaviour: they are stamped `sync_policy`
 | `ledger.db`, `-wal`, `-shm` | The ledger: tasks, events, sessions, workspaces, the sync queue and settings |
 | `hook.log` | Errors from hooks. A hook never interrupts a session. |
 | `sync.log` | Sync runs: pushes and pulls that failed, and secrets redacted before a push |
+| `hook.log.1`, `sync.log.1` | The previous log. A log over 1 MiB is moved here, replacing the one before, so each log takes about 2 MiB at most. |
 | `native/better_sqlite3.node` | The SQLite addon built by `bootstrap` |
 | `native-build/` | Where `bootstrap` ran npm. Safe to delete. |
 | `ghostpm.js` | Statusline launcher, only after `setup --statusline` |
