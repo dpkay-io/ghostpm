@@ -16,7 +16,7 @@ import {
 } from './ledger/workspaces';
 import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
 import { AzureAdapter, AzureProcess } from './sync/azure';
-import { AzureIdentity, identityOf } from './sync/identity';
+import { AzureIdentity, MISSING_REMOTE, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
 import { quoteForShell } from './shell-quote';
 import { unrecognisedRemote } from './surfaces/sync-health';
@@ -25,7 +25,6 @@ import { SyncPausedError } from './sync/vendor';
 
 /** How far back init samples work items to learn the process template's states and types. */
 export const AZURE_SAMPLE_DAYS = 90;
-const NO_REMOTE = 'none';
 /** How init names a sync_policy the workspace never had. */
 const NOT_SET = 'not set';
 /** What a person runs again once whatever stopped init is fixed. */
@@ -88,7 +87,7 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
     if (missing.length === 0) return;
     const identity = identityOf(result.workspace);
     if (identity === null || identity.vendor !== AZURE_DEVOPS) {
-        result.warnings.push(`Could not read the Azure DevOps organization and project from the git remote (${cleanText(result.workspace.git_remote ?? NO_REMOTE)}).`);
+        result.warnings.push(`Could not read the Azure DevOps organization and project from the git remote (${cleanText(result.workspace.git_remote ?? MISSING_REMOTE)}).`);
         return;
     }
     // Decoded from the remote URL, and the states are the vendor's: both printed cleaned.

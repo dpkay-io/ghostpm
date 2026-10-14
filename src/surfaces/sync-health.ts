@@ -4,7 +4,7 @@ import { getSyncPause } from '../ledger/settings';
 import { NO_VENDOR, WorkspaceRow } from '../ledger/types';
 import { leaseHolder } from '../sync/lease';
 import { outboxHealth } from '../sync/outbox';
-import { SYNCED_REMOTES, identityOf } from '../sync/identity';
+import { MISSING_REMOTE, SYNCED_REMOTES, identityOf } from '../sync/identity';
 import { syncIsOff, syncOffHint } from '../sync/schedule';
 import { cleanText } from './text';
 
@@ -29,8 +29,6 @@ export interface MachineSyncHealth {
 export const SYNC_OFF = 'off';
 export const SYNC_OK = 'ok';
 const NO_REMOTE = 'no GitHub or Azure DevOps remote';
-/** How a vendor workspace with no remote on record names it. */
-const NO_REMOTE_TEXT = 'none';
 const PART_SEPARATOR = ' · ';
 
 export function workspaceSyncHealth(db: Ledger, workspaceId: number): SyncHealth {
@@ -67,7 +65,7 @@ const STATES_IN_DETAIL = [STATE_PAUSED, STATE_UNRECOGNISED];
  */
 export function unrecognisedRemote(workspace: WorkspaceRow): string | null {
     if (workspace.vendor === NO_VENDOR || identityOf(workspace) !== null) return null;
-    return `${STATE_UNRECOGNISED}: ${cleanText(workspace.git_remote ?? NO_REMOTE_TEXT)}; GhostPM syncs ${SYNCED_REMOTES} remotes`;
+    return `${STATE_UNRECOGNISED}: ${cleanText(workspace.git_remote ?? MISSING_REMOTE)}; GhostPM syncs ${SYNCED_REMOTES} remotes`;
 }
 
 /** `health` may be passed when the caller already read it. */

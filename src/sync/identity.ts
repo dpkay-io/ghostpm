@@ -2,6 +2,8 @@ import { Vendor, WorkspaceRow } from '../ledger/types';
 
 /** The remotes parseRemote reads, for every message that says which ones sync handles. */
 export const SYNCED_REMOTES = 'github.com, dev.azure.com and *.visualstudio.com';
+/** How a message names the remote of a workspace that has none on record. */
+export const MISSING_REMOTE = 'none';
 
 export interface GitHubIdentity { vendor: 'github'; repo: string }
 export interface AzureIdentity { vendor: 'azure_devops'; org: string; project: string }

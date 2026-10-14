@@ -3,7 +3,7 @@
 export const WINDOWS = 'win32';
 
 /** PowerShell reads these as single quotes too (U+2018, U+2019, U+201A, U+201B), so each must be doubled like the ASCII one. */
-const POWERSHELL_QUOTES = /['‘’‚‛]/g;
+const POWERSHELL_QUOTES = /['\u2018\u2019\u201A\u201B]/g;
 
 /**
  * A path pasted into a shell. Paths are untrusted (a repo folder can be named anything), so single quotes: nothing inside
