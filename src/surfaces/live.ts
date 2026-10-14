@@ -81,7 +81,7 @@ export function startLive(options: LiveOptions): LiveHandle {
         stopped = true;
         if (timer) clearInterval(timer);
         screen.removeListener(RESIZE, onResize);
-        screen.removeListener(ERROR, onStreamError);
+        // The error listener stays: a late EPIPE (say, the restore write failing asynchronously) must not be uncaught.
         try {
             if (!broken) screen.write(`${ANSI.showCursor}${ANSI.altScreenOff}`);
         } catch {

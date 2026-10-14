@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import { tempLedger, TempLedger } from '../ledger/helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { createTask } from '../../src/ledger/tasks';
@@ -149,6 +150,16 @@ describe('startLive', () => {
 });
 
 describe('startLive when things go wrong', () => {
+    it('swallows a second output error after a stream-error stop', async () => {
+        const { screen, emitter } = emitterScreen();
+        const live = startLive({ screen, build: () => frame('A'), changed: () => false });
+
+        emitter.emit('error', new Error('EPIPE'));
+        await expect(live.done).rejects.toThrow('EPIPE');
+
+        expect(() => emitter.emit('error', new Error('second EPIPE'))).not.toThrow();
+    });
+
     const RESTORE = `${ANSI.showCursor}${ANSI.altScreenOff}`;
     const base = (screen: Screen, build: () => DashboardLine[] = () => frame('A')) => ({ screen, build, changed: () => false });
 
@@ -161,7 +172,7 @@ describe('startLive when things go wrong', () => {
     });
 
     it('restores the terminal when a resize redraw cannot write', async () => {
-        const { screen, writes, state, resize } = fakeScreen();
+        const { screen, writes, resize } = fakeScreen();
         const live = startLive(base(screen));
         const original = screen.write;
         screen.write = chunk => {
@@ -173,7 +184,6 @@ describe('startLive when things go wrong', () => {
 
         await expect(live.done).rejects.toThrow('write failed');
         expect(writes[writes.length - 1]).toBe(RESTORE);
-        expect(state.failWrites).toBe(false);
     });
 
     it('stops and writes nothing more when the output stream fails', async () => {
@@ -188,8 +198,9 @@ describe('startLive when things go wrong', () => {
             await expect(live.done).rejects.toThrow('EPIPE');
             jest.advanceTimersByTime(POLL_MS * 3);
             expect(writes.length).toBe(before);
-            expect(listeners.error).toBeNull();
             expect(listeners.resize).toBeNull();
+            expect(() => fail(new Error('second EPIPE'))).not.toThrow();
+            expect(writes.length).toBe(before);
         } finally {
             jest.useRealTimers();
         }
@@ -205,6 +216,19 @@ describe('startLive when things go wrong', () => {
         await expect(live.done).resolves.toBeUndefined();
     });
 });
+
+/** A real emitter: an 'error' event with no listener throws, as it does on process.stdout. */
+function emitterScreen(): { screen: Screen; writes: string[]; emitter: EventEmitter } {
+    const emitter = new EventEmitter();
+    const writes: string[] = [];
+    const screen: Screen = {
+        isTTY: true, columns: 40, rows: 10,
+        write: (chunk: string) => { writes.push(chunk); return true; },
+        on: (event, handler) => emitter.on(event, handler),
+        removeListener: (event, handler) => emitter.removeListener(event, handler),
+    };
+    return { screen, writes, emitter };
+}
 
 describe('runDashboard', () => {
     let ledger: TempLedger;
@@ -239,6 +263,17 @@ describe('runDashboard', () => {
 
         expect(writes[writes.length - 1]).toBe(`${ANSI.showCursor}${ANSI.altScreenOff}`);
         expect(process.listenerCount(signal)).toBe(before);
+    });
+
+    it('swallows an output error that arrives after a SIGINT restore', async () => {
+        const { screen, writes, emitter } = emitterScreen();
+        const run = runDashboard(ledger.db, screen, { once: false });
+        process.emit('SIGINT', 'SIGINT');
+        await run;
+        const after = writes.length;
+
+        expect(() => emitter.emit('error', new Error('late EPIPE'))).not.toThrow();
+        expect(writes.length).toBe(after);
     });
 
     it('prints one frame on a terminal with --once, without taking over the screen', async () => {
