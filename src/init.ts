@@ -57,7 +57,3 @@ export function detectRemote(currentPath: string = process.cwd()): RemoteInfo | 
     }
     return null;
 }
-
-export function detectVendor(currentPath: string = process.cwd()): 'github' | 'azure_devops' | null {
-    return detectRemote(currentPath)?.vendor ?? null;
-}

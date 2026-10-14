@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { findGitRoot, detectVendor, detectRemote } from '../src/init';
+import { findGitRoot, detectRemote } from '../src/init';
 import * as os from 'os';
 
 describe('init', () => {
@@ -35,60 +35,6 @@ describe('init', () => {
         });
     });
 
-    describe('detectVendor', () => {
-        beforeEach(() => {
-            gitDir = path.join(tmpDir, '.git');
-            fs.mkdirSync(gitDir);
-        });
-
-        it('should return null if no git config', () => {
-            expect(detectVendor(tmpDir)).toBeNull();
-        });
-
-        it('should detect github', () => {
-            const configPath = path.join(gitDir, 'config');
-            fs.writeFileSync(configPath, 'url = https://github.com/user/repo.git');
-            expect(detectVendor(tmpDir)).toBe('github');
-        });
-
-        it('should detect azure_devops', () => {
-            const configPath = path.join(gitDir, 'config');
-            fs.writeFileSync(configPath, 'url = https://dev.azure.com/user/repo');
-            expect(detectVendor(tmpDir)).toBe('azure_devops');
-        });
-
-        it('should detect azure_devops from visualstudio', () => {
-            const configPath = path.join(gitDir, 'config');
-            fs.writeFileSync(configPath, 'url = https://user.visualstudio.com/repo');
-            expect(detectVendor(tmpDir)).toBe('azure_devops');
-        });
-
-        it('should return null if unknown url', () => {
-            const configPath = path.join(gitDir, 'config');
-            fs.writeFileSync(configPath, 'url = https://gitlab.com/user/repo.git');
-            expect(detectVendor(tmpDir)).toBeNull();
-        });
-
-        it('should handle worktrees (.git as file)', () => {
-            fs.rmSync(gitDir, { recursive: true });
-            
-            const realGitDir = path.join(tmpDir, 'realgit');
-            fs.mkdirSync(realGitDir);
-            fs.writeFileSync(path.join(realGitDir, 'config'), 'url = https://github.com/user/repo.git');
-            
-            fs.writeFileSync(gitDir, `gitdir: ${realGitDir}`);
-            expect(detectVendor(tmpDir)).toBe('github');
-        });
-        
-        it('should return null if worktree config not found', () => {
-            fs.rmSync(gitDir, { recursive: true });
-
-            const realGitDir = path.join(tmpDir, 'realgit');
-            fs.writeFileSync(gitDir, `gitdir: ${realGitDir}`); // no config inside realGitDir
-            expect(detectVendor(tmpDir)).toBeNull();
-        });
-    });
-
     describe('detectRemote', () => {
         beforeEach(() => {
             gitDir = path.join(tmpDir, '.git');
@@ -103,6 +49,22 @@ describe('init', () => {
 
         it('returns null for unknown hosts', () => {
             fs.writeFileSync(path.join(gitDir, 'config'), 'url = https://gitlab.com/user/repo.git');
+            expect(detectRemote(tmpDir)).toBeNull();
+        });
+
+        it('returns null when the repository has no config', () => {
+            expect(detectRemote(tmpDir)).toBeNull();
+        });
+
+        it('reads a *.visualstudio.com remote as Azure DevOps', () => {
+            const url = 'https://user.visualstudio.com/repo';
+            fs.writeFileSync(path.join(gitDir, 'config'), `url = ${url}`);
+            expect(detectRemote(tmpDir)).toEqual({ vendor: 'azure_devops', url });
+        });
+
+        it('returns null for a worktree whose git folder has no config', () => {
+            fs.rmSync(gitDir, { recursive: true });
+            fs.writeFileSync(gitDir, `gitdir: ${path.join(tmpDir, 'realgit')}`);
             expect(detectRemote(tmpDir)).toBeNull();
         });
 

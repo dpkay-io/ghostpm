@@ -19,7 +19,8 @@ import { quoteForShell } from '../src/shell-quote';
 import { cleanText } from '../src/surfaces/text';
 import { TaskRow } from '../src/ledger/types';
 import { HOSTILE, NOT_ONE_LINE, TERMINAL_CONTROL } from './hostile-text';
-import { tempLedger, TempLedger, clonedRepo, outboxRows } from './ledger/helpers';
+import { tempLedger, TempLedger, clonedRepo, isolateHomes, outboxRows } from './ledger/helpers';
+import { getGhostpmHome } from '../src/registry';
 import { removeTempDir } from './temp-dir';
 
 jest.mock('child_process');
@@ -36,6 +37,7 @@ describe('mcp server on the ledger', () => {
     let db: Ledger;
     let client: Client;
     let workspaceId: number;
+    let restoreHomes: () => void;
 
     const mockExecFile = (error: Error | null, stdout = '') => {
         (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: unknown[]) => {
@@ -65,6 +67,8 @@ describe('mcp server on the ledger', () => {
     beforeEach(async () => {
         mockExecFile(new Error(GIT_FAILURE));
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-mcp-'));
+        // Anything the server logs or looks up in a home (sync.log, ~/.claude.json) stays in the scratch folder.
+        restoreHomes = isolateHomes(dir);
         db = openLedger(path.join(dir, LEDGER_FILE));
         workspaceId = ensureWorkspace(db, dir).id;
         const server = new PmServer({ db, cwd: dir, sessionId: SESSION_ID, legacyImport: false });
@@ -76,8 +80,14 @@ describe('mcp server on the ledger', () => {
     afterEach(async () => {
         await client.close();
         db.close();
+        restoreHomes();
         removeTempDir(dir);
         jest.clearAllMocks();
+    });
+
+    it('keeps the ghostpm home and the user home in the scratch folder', () => {
+        expect(getGhostpmHome()).toBe(dir);
+        expect(os.homedir()).toBe(dir);
     });
 
     it('registers the ledger tools and none of the removed ones', async () => {
@@ -438,6 +448,7 @@ describe('mcp server on the ledger', () => {
 describe('mcp server in a GitHub workspace', () => {
     let ledger: TempLedger;
     let client: Client;
+    let restoreHomes: () => void;
 
     const call = async (name: string, args: Record<string, unknown> = {}): Promise<string> => {
         const result = await client.callTool({ name, arguments: args }) as { content: { text: string }[] };
@@ -452,6 +463,7 @@ describe('mcp server in a GitHub workspace', () => {
             if (typeof cb === 'function') (cb as (e: Error | null, out: string, err: string) => void)(new Error(GIT_FAILURE), '', '');
         });
         ledger = tempLedger();
+        restoreHomes = isolateHomes(ledger.dir);
         // The global default is off; these tests are about a workspace that opted in.
         setSetting(ledger.db, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO);
         const repo = clonedRepo(ledger.dir, 'widgets');
@@ -463,6 +475,7 @@ describe('mcp server in a GitHub workspace', () => {
 
     afterEach(async () => {
         await client.close();
+        restoreHomes();
         ledger.cleanup();
         jest.clearAllMocks();
     });
