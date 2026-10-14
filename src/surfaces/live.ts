@@ -11,6 +11,7 @@ export const DEFAULT_ROWS = 24;
 const RESERVED_COLUMNS = 1;
 const UNLIMITED_ROWS = Number.MAX_SAFE_INTEGER;
 const RESIZE = 'resize';
+const ERROR = 'error';
 const STOP_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
 
 /** The part of process.stdout the dashboard uses; tests pass a fake. */
@@ -19,8 +20,8 @@ export interface Screen {
     columns?: number;
     rows?: number;
     write(chunk: string): unknown;
-    on(event: 'resize', listener: () => void): unknown;
-    removeListener(event: 'resize', listener: () => void): unknown;
+    on(event: 'resize' | 'error', listener: (error?: Error) => void): unknown;
+    removeListener(event: 'resize' | 'error', listener: (error?: Error) => void): unknown;
 }
 
 export interface LiveOptions {
@@ -74,15 +75,25 @@ export function startLive(options: LiveOptions): LiveHandle {
         }
     };
 
-    const finish = (error?: unknown): void => {
+    /** `broken`: the output stream failed, so the restore sequence cannot be written to it either. */
+    const finish = (error?: unknown, broken = false): void => {
         if (stopped) return;
         stopped = true;
         if (timer) clearInterval(timer);
         screen.removeListener(RESIZE, onResize);
-        screen.write(`${ANSI.showCursor}${ANSI.altScreenOff}`);
-        if (error === undefined) settle.resolve();
-        else settle.reject(error);
+        screen.removeListener(ERROR, onStreamError);
+        try {
+            if (!broken) screen.write(`${ANSI.showCursor}${ANSI.altScreenOff}`);
+        } catch {
+            // The stream is gone; there is nothing left to restore through it.
+        } finally {
+            if (error === undefined) settle.resolve();
+            else settle.reject(error);
+        }
     };
+
+    // An asynchronous write failure (EPIPE, closed console) arrives as an event, not a throw.
+    const onStreamError = (error?: Error): void => finish(error ?? new Error('output stream failed'), true);
 
     const tick = (): void => {
         try {
@@ -96,8 +107,9 @@ export function startLive(options: LiveOptions): LiveHandle {
         }
     };
 
-    screen.write(`${ANSI.altScreenOn}${ANSI.hideCursor}`);
+    screen.on(ERROR, onStreamError);
     try {
+        screen.write(`${ANSI.altScreenOn}${ANSI.hideCursor}`);
         lines = build();
         builtAt = now();
         draw(true);

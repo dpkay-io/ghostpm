@@ -9,14 +9,20 @@ const ESCAPE = '\u001b[';
 
 function fakeScreen(isTTY = true, columns = 40, rows = 10) {
     const writes: string[] = [];
-    let listener: (() => void) | null = null;
+    const listeners: { [event: string]: ((error?: Error) => void) | null } = {};
+    const state = { failWrites: false };
     const screen: Screen = {
         isTTY, columns, rows,
-        write: (chunk: string) => { writes.push(chunk); return true; },
-        on: (_event, handler) => { listener = handler; },
-        removeListener: () => { listener = null; },
+        write: (chunk: string) => {
+            if (state.failWrites) throw new Error('EPIPE');
+            writes.push(chunk);
+            return true;
+        },
+        on: (event, handler) => { listeners[event] = handler; },
+        removeListener: event => { listeners[event] = null; },
     };
-    return { screen, writes, resize: () => { if (listener) listener(); } };
+    const emit = (event: string, error?: Error) => { const handler = listeners[event]; if (handler) handler(error); };
+    return { screen, writes, state, listeners, resize: () => emit('resize'), fail: (error: Error) => emit('error', error) };
 }
 
 const frame = (...texts: string[]): DashboardLine[] => texts.map(text => ({ text, tone: 'normal' as const }));
@@ -142,6 +148,64 @@ describe('startLive', () => {
     });
 });
 
+describe('startLive when things go wrong', () => {
+    const RESTORE = `${ANSI.showCursor}${ANSI.altScreenOff}`;
+    const base = (screen: Screen, build: () => DashboardLine[] = () => frame('A')) => ({ screen, build, changed: () => false });
+
+    it('restores the terminal and rejects when the first build throws', async () => {
+        const { screen, writes } = fakeScreen();
+        const live = startLive(base(screen, () => { throw new Error('no ledger'); }));
+
+        await expect(live.done).rejects.toThrow('no ledger');
+        expect(writes[writes.length - 1]).toBe(RESTORE);
+    });
+
+    it('restores the terminal when a resize redraw cannot write', async () => {
+        const { screen, writes, state, resize } = fakeScreen();
+        const live = startLive(base(screen));
+        const original = screen.write;
+        screen.write = chunk => {
+            if (chunk.startsWith(ANSI.clearScreen)) throw new Error('write failed');
+            return original(chunk);
+        };
+
+        resize();
+
+        await expect(live.done).rejects.toThrow('write failed');
+        expect(writes[writes.length - 1]).toBe(RESTORE);
+        expect(state.failWrites).toBe(false);
+    });
+
+    it('stops and writes nothing more when the output stream fails', async () => {
+        jest.useFakeTimers();
+        try {
+            const { screen, writes, listeners, fail } = fakeScreen();
+            const live = startLive({ ...base(screen), changed: () => true });
+            const before = writes.length;
+
+            fail(new Error('EPIPE'));
+
+            await expect(live.done).rejects.toThrow('EPIPE');
+            jest.advanceTimersByTime(POLL_MS * 3);
+            expect(writes.length).toBe(before);
+            expect(listeners.error).toBeNull();
+            expect(listeners.resize).toBeNull();
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    it('settles done even when the restore write itself throws', async () => {
+        const { screen, state } = fakeScreen();
+        const live = startLive(base(screen));
+        state.failWrites = true;
+
+        live.stop();
+
+        await expect(live.done).resolves.toBeUndefined();
+    });
+});
+
 describe('runDashboard', () => {
     let ledger: TempLedger;
 
@@ -162,6 +226,19 @@ describe('runDashboard', () => {
         expect(writes[0]).toContain('LIVE SESSIONS');
         expect(writes[0]).toContain('Visible');
         expect(writes[0]).not.toContain(ESCAPE);
+    });
+
+    it.each(['SIGINT', 'SIGTERM'] as NodeJS.Signals[])('restores the terminal on %s and removes its listener', async signal => {
+        const { screen, writes } = fakeScreen();
+        const before = process.listenerCount(signal);
+
+        const run = runDashboard(ledger.db, screen, { once: false });
+        expect(process.listenerCount(signal)).toBe(before + 1);
+        process.emit(signal, signal);
+        await run;
+
+        expect(writes[writes.length - 1]).toBe(`${ANSI.showCursor}${ANSI.altScreenOff}`);
+        expect(process.listenerCount(signal)).toBe(before);
     });
 
     it('prints one frame on a terminal with --once, without taking over the screen', async () => {
