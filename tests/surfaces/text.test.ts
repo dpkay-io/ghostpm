@@ -1,3 +1,4 @@
+import { fitToScreen } from '../../src/surfaces/dashboard';
 import { ELLIPSIS, formatClock, formatDateTime, padLeft, padRight, truncate, visibleLength, workspaceLabel, NO_WORKSPACE, cleanText } from '../../src/surfaces/text';
 
 describe('text helpers', () => {
@@ -63,4 +64,21 @@ describe('terminal columns and control characters (I2)', () => {
     it('truncate output never carries a control character', () => {
         expect(truncate('x\ny', 10)).toBe('x y');
     });
+
+    it('counts symbol emoji, emoji-presentation sequences and skin tones as two columns', () => {
+        ['✅', '⚡', '🪄', '❤️', '❌', '⭐', '⌚', '🫠', '🩺', '👍🏽'].forEach(emoji => expect(visibleLength(emoji)).toBe(2));
+    });
+
+    it('cleans bidi controls out of a title', () => {
+        expect(cleanText('abc\u202Edef\u2066g')).toBe('abc def g');
+    });
+
+    it('keeps a line full of symbol emoji within the width', () => {
+        const emoji = '✅⚡🪄❤️❌⭐⌚🫠🩺👍🏽'.repeat(5);
+        [10, 21, 33].forEach(columns => {
+            const [line] = fitToScreen([{ text: emoji, tone: 'normal' }], { columns, rows: 5 });
+            expect(visibleLength(line.text)).toBeLessThanOrEqual(columns);
+        });
+    });
 });
+

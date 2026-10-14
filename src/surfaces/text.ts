@@ -3,8 +3,8 @@ import * as path from 'path';
 /** One character that stands for "there was more here". */
 export const ELLIPSIS = '…';
 
-/** Control characters (C0, DEL, C1) and the Unicode line and paragraph separators. */
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+/** Control characters (C0, DEL, C1), line and paragraph separators, and bidi controls (they enable title spoofing). */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g;
 
 /**
  * Titles come from other tools (vendor items, session cwd): a newline would break the frame
@@ -19,14 +19,16 @@ type CodePointRange = readonly [number, number];
 /** Combining marks, joiners, variation selectors: no column of their own. */
 const ZERO_WIDTH: readonly CodePointRange[] = [
     [0x0300, 0x036f], [0x0483, 0x0489], [0x0591, 0x05bd], [0x0610, 0x061a], [0x064b, 0x065f], [0x1ab0, 0x1aff],
-    [0x1dc0, 0x1dff], [0x200b, 0x200f], [0x20d0, 0x20ff], [0xfe00, 0xfe0f], [0xfe20, 0xfe2f], [0xe0100, 0xe01ef],
+    [0x1dc0, 0x1dff], [0x200b, 0x200f], [0x20d0, 0x20ff], [0xfe00, 0xfe0f], [0xfe20, 0xfe2f], [0x1f3fb, 0x1f3ff], [0xe0100, 0xe01ef],
 ];
 
 /** East Asian wide and fullwidth forms, Hangul, and the emoji planes: two columns. */
 const DOUBLE_WIDTH: readonly CodePointRange[] = [
     [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf],
-    [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f],
-    [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd],
+    [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x20000, 0x3fffd],
+    // Emoji and symbols terminals draw wide. Over-counting is the safe side: a line may end early, never overflow.
+    [0x231a, 0x231b], [0x23e9, 0x23f3], [0x25fd, 0x25fe], [0x2600, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
+    [0x1f000, 0x1f2ff], [0x1f300, 0x1faff],
 ];
 
 const inRanges = (codePoint: number, ranges: readonly CodePointRange[]): boolean =>
@@ -39,9 +41,33 @@ function columnsOf(character: string): number {
     return inRanges(codePoint, DOUBLE_WIDTH) ? 2 : 1;
 }
 
+const EMOJI_SELECTOR = 0xfe0f;
+const EMOJI_COLUMNS = 2;
+
+interface Cluster {
+    text: string;
+    columns: number;
+}
+
+/** Characters with the zero-width marks that follow them. A trailing U+FE0F asks for the emoji form: two columns. */
+function clusters(text: string): Cluster[] {
+    const result: Cluster[] = [];
+    for (const character of Array.from(text)) {
+        const columns = columnsOf(character);
+        const last = result[result.length - 1];
+        if (columns === 0 && last !== undefined) {
+            last.text += character;
+            if (character.codePointAt(0) === EMOJI_SELECTOR) last.columns = EMOJI_COLUMNS;
+        } else {
+            result.push({ text: character, columns });
+        }
+    }
+    return result;
+}
+
 /** Terminal columns the text occupies. */
 export function visibleLength(text: string): number {
-    return Array.from(text).reduce((columns, character) => columns + columnsOf(character), 0);
+    return clusters(text).reduce((columns, cluster) => columns + cluster.columns, 0);
 }
 
 /** Fits text into `width` columns without splitting a surrogate pair or a wide glyph; control characters become spaces. */
@@ -52,13 +78,14 @@ export function truncate(text: string, width: number): string {
     const budget = width - visibleLength(ELLIPSIS);
     let used = 0;
     let kept = '';
-    for (const character of Array.from(clean)) {
-        used += columnsOf(character);
+    for (const cluster of clusters(clean)) {
+        used += cluster.columns;
         if (used > budget) break;
-        kept += character;
+        kept += cluster.text;
     }
     return `${kept}${ELLIPSIS}`;
 }
+
 
 export function padRight(text: string, width: number): string {
     const clean = cleanText(text);
