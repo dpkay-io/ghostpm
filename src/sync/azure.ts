@@ -13,6 +13,8 @@ const nullableStrip = (text: string | null): string | null => (text === null ? n
 const AZ = 'az';
 const JSON_OUTPUT: CliArg[] = ['-o', 'json'];
 const ORG_FLAG = '--org';
+/** Verified with az 2.85: 7.1 answers `workItemTypeStates` for the stock process templates. */
+const WIT_API_VERSION = '7.1';
 const FIELD = {
     id: 'System.Id', title: 'System.Title', state: 'System.State', assignedTo: 'System.AssignedTo',
     changed: 'System.ChangedDate', tags: 'System.Tags', iteration: 'System.IterationPath',
@@ -90,6 +92,44 @@ export interface AzureProcess {
     states: string[];
     /** Most frequent first. */
     workItemTypes: string[];
+    /** The real states of the work item type, in the API's order: empty when az could not say. */
+    typeStates?: AzureTypeState[];
+}
+
+/** One state of a work item type, as `workItemTypeStates` lists it (category: Proposed, InProgress, Resolved, Completed, Removed). */
+export interface AzureTypeState {
+    name: string;
+    category: string;
+}
+
+/** Categories each phase reads, best first. Azure has no brainstorming stage, so it shares planned's. */
+const PHASE_CATEGORIES: { [phase in Phase]: string[] } = {
+    brainstorming: ['Proposed'],
+    planned: ['Proposed'],
+    in_progress: ['InProgress'],
+    in_review: ['Resolved', 'InProgress'],
+    done: ['Completed'],
+    dropped: ['Removed', 'Completed'],
+};
+
+/**
+ * Each phase takes a state of its first available category. Of several in one category, one already `seen` in use
+ * wins, else the first the API lists (its workflow order). A phase with no category stays out; unknown categories are ignored.
+ */
+export function phaseStateMapFromCategories(states: readonly AzureTypeState[], seen: readonly string[] = []): PhaseStateMap {
+    const used = seen.map(state => state.toLowerCase());
+    const map: PhaseStateMap = {};
+    for (const phase of PHASES) {
+        for (const category of PHASE_CATEGORIES[phase]) {
+            const inCategory = states.filter(state => state.category === category);
+            const pick = inCategory.find(state => used.includes(state.name.toLowerCase())) ?? inCategory[0];
+            if (pick !== undefined) {
+                map[phase] = pick.name;
+                break;
+            }
+        }
+    }
+    return map;
 }
 
 /** `itemLevel` calls name one work item or PR: "does not exist" there means it is gone. Anywhere else it means the project or type is wrong. */
@@ -265,7 +305,21 @@ export class AzureAdapter implements VendorAdapter {
         }
         // A stable sort: equally frequent types keep the order they were first seen in.
         const workItemTypes = Array.from(typeCounts.keys()).sort((a, b) => typeCounts.get(b)! - typeCounts.get(a)!);
-        return { states, workItemTypes };
+        return { states, workItemTypes, typeStates: await this.typeStates(workItemTypes[0] ?? this.workItemType) };
+    }
+
+    /** The type's real states and categories. Any failure answers none: init then learns from the sample alone. */
+    private async typeStates(type: string): Promise<AzureTypeState[]> {
+        try {
+            const answer = await this.az<{ value?: AzureTypeState[] }>([
+                'devops', 'invoke', '--area', 'wit', '--resource', 'workItemTypeStates',
+                '--route-parameters', freeText(`project=${this.project}`), freeText(`type=${type}`),
+                ...this.orgArgs(), '--api-version', WIT_API_VERSION,
+            ]);
+            return (answer.value ?? []).filter(state => typeof state?.name === 'string' && typeof state.category === 'string');
+        } catch {
+            return [];
+        }
     }
 
     /** Every match, whatever `_limit` says (`pages` is false). */

@@ -1,5 +1,5 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
-import { AzureAdapter, isLossyCopy, AZ_LOGGED_OUT, AZ_MISSING } from '../../src/sync/azure';
+import { AzureAdapter, AzureTypeState, isLossyCopy, phaseStateMapFromCategories, AZ_LOGGED_OUT, AZ_MISSING } from '../../src/sync/azure';
 import { GoneError, PermanentError, SyncPausedError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
 import { PhaseStateMap } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
@@ -213,7 +213,7 @@ describe('AzureAdapter', () => {
     it('reads no items, not a JSON error, from the empty output az prints for a query with no rows', async () => {
         const az = fakeAz({ 'boards query': '' });
         expect(await adapter(az.run).listChangedSince('2026-09-20T00:00:00.000Z', 1)).toEqual([]);
-        expect(await adapter(az.run).sampleProcess(90, 'ghostpm init')).toEqual({ states: [], workItemTypes: [] });
+        expect(await adapter(az.run).sampleProcess(90, 'ghostpm init')).toEqual({ states: [], workItemTypes: [], typeStates: [] });
     });
 
     it('reports a completed pull request of this organisation, and no other, not even a longer name', async () => {
@@ -355,7 +355,7 @@ describe('AzureAdapter.sampleProcess', () => {
     it('bounds the sample by the vendor timeout', async () => {
         const timeouts: (number | undefined)[] = [];
         await adapter(async (_command, _args, options) => { timeouts.push(options?.timeoutMs); return '[]'; }).sampleProcess(SAMPLE_DAYS, RETRY);
-        expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS]);
+        expect(timeouts).toEqual([VENDOR_CALL_TIMEOUT_MS, VENDOR_CALL_TIMEOUT_MS]);
     });
 
     it('collects distinct states in sampled order and types by frequency', async () => {
@@ -367,7 +367,37 @@ describe('AzureAdapter.sampleProcess', () => {
                 { 'System.State': 'Closed', 'System.WorkItemType': 'Task' },
             ]),
         });
-        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY)).toEqual({ states: ['New', 'Active', 'Closed'], workItemTypes: ['Task', 'Bug'] });
+        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY)).toEqual({ states: ['New', 'Active', 'Closed'], workItemTypes: ['Task', 'Bug'], typeStates: [] });
+    });
+
+    const typeStates = (...states: [string, string][]): string => JSON.stringify({ count: states.length, value: states.map(([name, category]) => ({ name, category })) });
+
+    it('also reads the real states of the dominant work item type, with their categories', async () => {
+        const az = fakeAz({
+            'boards query': sampled([{ 'System.State': 'New', 'System.WorkItemType': 'Bug' }, { 'System.State': 'New', 'System.WorkItemType': 'Task' }, { 'System.State': 'New', 'System.WorkItemType': 'Task' }]),
+            'devops invoke': typeStates(['New', 'Proposed'], ['Active', 'InProgress'], ['Closed', 'Completed']),
+        });
+        const process = await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY);
+        expect(process.typeStates).toEqual([{ name: 'New', category: 'Proposed' }, { name: 'Active', category: 'InProgress' }, { name: 'Closed', category: 'Completed' }]);
+        expect(az.calls[1].args).toEqual([
+            'devops', 'invoke', '--area', 'wit', '--resource', 'workItemTypeStates',
+            '--route-parameters', freeText(`project=${PROJECT}`), freeText('type=Task'), '--org', freeText(ORG), '--api-version', '7.1', '-o', 'json',
+        ]);
+    });
+
+    it("reads the configured work item type's states when the sample names no type", async () => {
+        const az = fakeAz({ 'boards query': '', 'devops invoke': typeStates(['New', 'Proposed']) });
+        await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY);
+        expect(az.calls[1].args).toContainEqual(freeText(`type=${TYPE}`));
+    });
+
+    it.each([
+        ['an az failure', azFailure('ERROR: boom')],
+        ['unreadable output', 'WARNING: not json'],
+        ['an answer without states', '{}'],
+    ])('falls back to the sample alone on %s, never throwing', async (_name, reply) => {
+        const az = fakeAz({ 'boards query': sampled([{ 'System.State': 'New', 'System.WorkItemType': 'Task' }]), 'devops invoke': reply });
+        expect(await adapter(az.run).sampleProcess(SAMPLE_DAYS, RETRY)).toEqual({ states: ['New'], workItemTypes: ['Task'], typeStates: [] });
     });
 
     const sampleFailure = async (stderr: string): Promise<SyncPausedError> =>
@@ -422,5 +452,67 @@ describe('isLossyCopy', () => {
         expect(isLossyCopy('Café', 'Café\r\n')).toBe(true);
         expect(isLossyCopy('Fix login', 'Fix\nlogin')).toBe(false);
         expect(isLossyCopy('Fix login', ' Fix login')).toBe(false);
+    });
+});
+
+describe('phaseStateMapFromCategories', () => {
+    const state = (name: string, category: string): AzureTypeState => ({ name, category });
+    const AGILE = [state('New', 'Proposed'), state('Active', 'InProgress'), state('Resolved', 'Resolved'), state('Closed', 'Completed'), state('Removed', 'Removed')];
+
+    it('maps an Agile type by category', () => {
+        expect(phaseStateMapFromCategories(AGILE)).toEqual({
+            brainstorming: 'New', planned: 'New', in_progress: 'Active', in_review: 'Resolved', done: 'Closed', dropped: 'Removed',
+        });
+    });
+
+    it('maps a Scrum type, which has no Resolved: in_review shares in_progress', () => {
+        const scrum = [state('New', 'Proposed'), state('Approved', 'Proposed'), state('Committed', 'InProgress'), state('Done', 'Completed'), state('Removed', 'Removed')];
+        expect(phaseStateMapFromCategories(scrum)).toEqual({
+            brainstorming: 'New', planned: 'New', in_progress: 'Committed', in_review: 'Committed', done: 'Done', dropped: 'Removed',
+        });
+    });
+
+    it('maps a Basic type, which has no Removed: dropped shares done', () => {
+        const basic = [state('To Do', 'Proposed'), state('Doing', 'InProgress'), state('Done', 'Completed')];
+        expect(phaseStateMapFromCategories(basic)).toEqual({
+            brainstorming: 'To Do', planned: 'To Do', in_progress: 'Doing', in_review: 'Doing', done: 'Done', dropped: 'Done',
+        });
+    });
+
+    it('maps a CMMI-like type', () => {
+        const cmmi = [state('Proposed', 'Proposed'), state('Active', 'InProgress'), state('Resolved', 'Resolved'), state('Closed', 'Completed')];
+        expect(phaseStateMapFromCategories(cmmi)).toEqual({
+            brainstorming: 'Proposed', planned: 'Proposed', in_progress: 'Active', in_review: 'Resolved', done: 'Closed', dropped: 'Closed',
+        });
+    });
+
+    it('leaves a phase out when neither its category nor its fallback exists, and ignores unknown categories', () => {
+        expect(phaseStateMapFromCategories([state('Weird', 'Whatever'), state('New', 'Proposed')])).toEqual({ brainstorming: 'New', planned: 'New' });
+        expect(phaseStateMapFromCategories([])).toEqual({});
+    });
+
+    it('prefers a state of the category that was seen in use, else the first one the API lists', () => {
+        const scrum = [state('New', 'Proposed'), state('Approved', 'Proposed')];
+        expect(phaseStateMapFromCategories(scrum).planned).toBe('New');
+        expect(phaseStateMapFromCategories(scrum, ['approved']).planned).toBe('Approved');
+    });
+});
+
+describe('AzureAdapter.phaseOf with phases that share a state', () => {
+    const shared = adapter(fakeAz().run, { brainstorming: 'New', planned: 'New', in_progress: 'Active', in_review: 'Active', done: 'Closed', dropped: 'Closed' });
+
+    it.each([
+        ['New', 'planned', 'planned'],
+        ['New', 'brainstorming', 'brainstorming'],
+        ['Closed', 'dropped', 'dropped'],
+        ['Closed', 'done', 'done'],
+        ['Active', 'in_review', 'in_review'],
+    ] as [string, Phase, Phase][])('keeps remote %s over local %s as %s', (state, local, expected) => {
+        expect(shared.phaseOf(state, [], local)).toBe(expected);
+    });
+
+    it('reads a remote move to a shared state as the first phase mapped to it', () => {
+        expect(shared.phaseOf('Closed', [], 'in_progress')).toBe('done');
+        expect(shared.phaseOf('new', [], 'in_progress')).toBe('brainstorming');
     });
 });

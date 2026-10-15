@@ -15,7 +15,7 @@ import {
     WorkspaceFootprint, deleteWorkspace, ensureWorkspace, findWorkspace, refreshWorkspaceRemote, workspaceAtPath,
 } from './ledger/workspaces';
 import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
-import { AzureAdapter, AzureProcess } from './sync/azure';
+import { AzureAdapter, AzureProcess, phaseStateMapFromCategories } from './sync/azure';
 import { AzureIdentity, MISSING_REMOTE, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
 import { quoteForShell } from './shell-quote';
@@ -106,7 +106,8 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
     const unrecognised = `None of the states sampled in ${project} (${cleanText(sampled.states.join(', '))}) reads as a GhostPM phase, `
         + `so ${SETTING_PHASE_STATE_MAP} was not set: run \`ghostpm config set ${SETTING_PHASE_STATE_MAP} <phase>=<State>... `
         + `--workspace ${quoteForShell(result.workspace.path)}\`.`;
-    const stateMap = phaseStateMapFrom(sampled.states);
+    // The project's real states by category win; the sampled names fill any phase they leave out.
+    const stateMap = { ...phaseStateMapFrom(sampled.states), ...phaseStateMapFromCategories(sampled.typeStates ?? [], sampled.states) };
     // Each setting: what the sample says, or why it says nothing.
     const learned: { [key: string]: [unknown, string] } = {
         [SETTING_PHASE_STATE_MAP]: [

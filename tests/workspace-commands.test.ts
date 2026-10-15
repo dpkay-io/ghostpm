@@ -246,6 +246,14 @@ describe('workspace commands', () => {
             quiet.warnings.forEach(warning => expect(warning).toContain(`No work items changed in the last ${AZURE_SAMPLE_DAYS} days`));
         });
 
+        it("prefers the project's real states by category over the states recently seen", async () => {
+            const typeStates = [{ name: 'New', category: 'Proposed' }, { name: 'Active', category: 'InProgress' }, { name: 'Closed', category: 'Completed' }];
+            const result = await initWorkspace(ledger.db, repo(AZURE_REMOTE), sniffing({ states: ['New'], workItemTypes: ['Task'], typeStates }));
+            expect(getWorkspaceSetting(ledger.db, result.workspace.id, SETTING_PHASE_STATE_MAP)).toEqual({
+                brainstorming: 'New', planned: 'New', in_progress: 'Active', in_review: 'Active', done: 'Closed', dropped: 'Closed',
+            });
+        });
+
         it('names the sampled states it could not read as phases, and still stores the work item type', async () => {
             const result = await initWorkspace(ledger.db, repo(AZURE_REMOTE), sniffing({ states: ['Ready', 'Doing Stuff'], workItemTypes: ['Bug'] }));
 
