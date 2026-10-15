@@ -3,7 +3,7 @@ import { ensureWorkspace } from '../ledger/workspaces';
 import { getTask } from '../ledger/tasks';
 import { getSession, startSession, touchSession, endSession } from '../ledger/sessions';
 import { activeTaskFor, currentBranch } from '../ledger/branch';
-import { recordEvidence } from '../ledger/work';
+import type * as Work from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
 import { listEvents } from '../ledger/events';
 import { TaskRow, WorkspaceRow, formatTaskId } from '../ledger/types';
@@ -160,8 +160,8 @@ function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     const { files, committed, prUrls } = collectEvidence(payload);
     if (files.length === 0 && !committed && prUrls.length === 0) return null;
 
-    // One transaction per batch: the batch lands whole, with the phase it proves.
-    recordEvidence(db, {
+    // One transaction per batch: the batch lands whole, with the phase it proves. Required here: the prompt hook never writes evidence (spec §15).
+    (require('../ledger/work') as typeof Work).recordEvidence(db, {
         taskId, sessionId: payload.sessionId, source: HOOK_SOURCE, workspaceId: workspace.id,
         cwd: payload.cwd, files, committed, prUrls,
     });
