@@ -166,11 +166,10 @@ describe('AzureAdapter', () => {
     it('pauses on a project or type Azure DevOps does not know, but only a work item is gone', async () => {
         const missing = azFailure('ERROR: TF401232: Work item 42 does not exist, or you do not have permissions to read it.');
         const outcome = (call: (a: AzureAdapter) => Promise<unknown>): Promise<unknown> =>
-            call(adapter(fakeAz({ 'boards work-item': missing, 'boards query': missing, 'account show': missing }).run)).catch((e: unknown) => e);
+            call(adapter(fakeAz({ 'boards work-item': missing, 'boards query': missing }).run)).catch((e: unknown) => e);
         const projectLevel = [
             (a: AzureAdapter) => a.create({ title: 'x', phase: 'planned' }, 'b'),
             (a: AzureAdapter) => a.listChangedSince('2026-09-20T00:00:00.000Z', 1),
-            (a: AzureAdapter) => a.currentUser(),
         ];
         for (const call of projectLevel) {
             const thrown = await outcome(call) as SyncPausedError;
@@ -204,10 +203,17 @@ describe('AzureAdapter', () => {
         expect(other).toBeInstanceOf(CliError);
     });
 
-    it('pauses when the current user is asked for while logged out', async () => {
-        const thrown = await adapter(fakeAz({ 'account show': azFailure(LOGGED_OUT_STDERR) }).run).currentUser().catch((e: unknown) => e) as SyncPausedError;
-        expect(thrown).toBeInstanceOf(SyncPausedError);
-        expect(thrown.reason).toBe(AZ_LOGGED_OUT);
+    it('answers an unknown current user, never a pause, when az account show fails (a PAT-only login has no account)', async () => {
+        for (const failure of [azFailure(LOGGED_OUT_STDERR), azFailure("ERROR: Please run 'az login' to setup account."), azFailure('ERROR: HTTP 401')]) {
+            expect(await adapter(fakeAz({ 'account show': failure }).run).currentUser()).toBeNull();
+        }
+        expect(await adapter(fakeAz({ 'account show': '\n' }).run).currentUser()).toBeNull();
+    });
+
+    it('reads no items, not a JSON error, from the empty output az prints for a query with no rows', async () => {
+        const az = fakeAz({ 'boards query': '' });
+        expect(await adapter(az.run).listChangedSince('2026-09-20T00:00:00.000Z', 1)).toEqual([]);
+        expect(await adapter(az.run).sampleProcess(90, 'ghostpm init')).toEqual({ states: [], workItemTypes: [] });
     });
 
     it('reports a completed pull request of this organisation, and no other, not even a longer name', async () => {

@@ -84,7 +84,8 @@ export interface VendorAdapter {
     hasComment(remoteId: string, marker: string): Promise<boolean>;
     /** When the pull request merged; null if it has not, or if it is not this repository's. */
     mergedAt(prUrl: string): Promise<string | null>;
-    currentUser(): Promise<string>;
+    /** The signed-in user, for @me; null when the vendor cannot tell (nothing is stored, the next pull asks again). Needs no pause: only a call that does the sync's work may pause it. */
+    currentUser(): Promise<string | null>;
     /** The phase a vendor state means; `localPhase` stands wherever the vendor has no opinion. */
     phaseOf(state: string, labels: string[], localPhase: Phase): Phase;
     /** Whether a title read back is the known one, allowing for the CLI's output encoding. */

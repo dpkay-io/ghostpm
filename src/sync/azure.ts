@@ -234,9 +234,12 @@ export class AzureAdapter implements VendorAdapter {
         const wiql = `SELECT ${fields.map(field => `[${field}]`).join(', ')} FROM workitems`
             + ` WHERE ${[`[${FIELD.project}] = ${wiqlText(this.project)}`, ...conditions].join(' AND ')}`
             + ` ORDER BY ${orderBy}`;
-        const result = await this.az<AzWorkItem[] | { items?: AzWorkItem[] }>([
+        const output = await this.azText([
             'boards', 'query', ...this.orgArgs(), '--project', freeText(this.project), '--wiql', freeText(wiql),
         ], false, advice);
+        // Verified with az 2.85: a query with no rows prints nothing at all, not `[]`.
+        if (output.trim() === '') return [];
+        const result = JSON.parse(output) as AzWorkItem[] | { items?: AzWorkItem[] };
         return Array.isArray(result) ? result : result.items ?? [];
     }
 
@@ -309,11 +312,15 @@ export class AzureAdapter implements VendorAdapter {
         return pr.status === PR_COMPLETED && pr.closedDate ? pr.closedDate : null;
     }
 
-    async currentUser(): Promise<string> {
+    /**
+     * `az account show` is the Azure login, which a PAT-only user (`az devops login`) does not have although every
+     * boards call works. So any failure means "unknown", never a pause: a real auth failure surfaces on the boards calls.
+     */
+    async currentUser(): Promise<string | null> {
         try {
-            return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'], TIMED)).trim();
-        } catch (error) {
-            throw classify(error, false, this.project, this.advice);
+            return (await this.run(AZ, ['account', 'show', '--query', 'user.name', '-o', 'tsv'], TIMED)).trim() || null;
+        } catch {
+            return null;
         }
     }
 

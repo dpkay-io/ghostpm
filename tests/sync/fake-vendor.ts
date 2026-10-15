@@ -28,7 +28,7 @@ export class FakeVendor implements VendorAdapter {
     readonly calls: FakeCall[] = [];
     /** PR url → merge time. */
     readonly prs = new Map<string, string>();
-    user = 'octocat';
+    user: string | null = 'octocat';
     /** Comments posted, per item. */
     readonly comments = new Map<string, string[]>();
     /** Thrown by the next vendor call, then cleared. */
@@ -164,7 +164,7 @@ export class FakeVendor implements VendorAdapter {
         return this.prs.get(prUrl) ?? null;
     }
 
-    async currentUser(): Promise<string> {
+    async currentUser(): Promise<string | null> {
         this.guard();
         this.calls.push({ op: 'currentUser' });
         return this.user;

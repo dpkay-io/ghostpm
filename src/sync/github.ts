@@ -259,7 +259,7 @@ export class GitHubAdapter implements VendorAdapter {
         return pr.state === MERGED ? pr.mergedAt : null;
     }
 
-    async currentUser(): Promise<string> {
+    async currentUser(): Promise<string | null> {
         return (await this.gh(['api', 'user', '--jq', '.login'])).trim();
     }
 

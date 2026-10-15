@@ -189,7 +189,7 @@ export async function pullWorkspace(
     // Gap-map N3: without it `@me` and the "assigned to me" candidates never work.
     if (getWorkspaceSetting<string>(db, workspace.id, SETTING_CURRENT_USER) === undefined) {
         const user = await leased().currentUser();
-        leasedWrite(() => setWorkspaceSetting(db, workspace.id, SETTING_CURRENT_USER, user));
+        if (user !== null) leasedWrite(() => setWorkspaceSetting(db, workspace.id, SETTING_CURRENT_USER, user));
     }
 
     const items = await leased().listChangedSince(since, pageLimit);

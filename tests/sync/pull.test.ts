@@ -157,6 +157,17 @@ describe('pulling a vendor workspace', () => {
         expect(vendor.calls.filter(call => call.op === 'currentUser')).toHaveLength(1);
     });
 
+    it('stores no user, and does not pause, while the vendor cannot tell who is signed in; the next pull asks again', async () => {
+        vendor.seed({ title: 'One' });
+        vendor.user = null;
+        expect(await pull()).toMatchObject({ fetched: 1, created: 1 });
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_CURRENT_USER)).toBeUndefined();
+        vendor.user = 'octocat';
+        await pull();
+        expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_CURRENT_USER)).toBe('octocat');
+        expect(vendor.calls.filter(call => call.op === 'currentUser')).toHaveLength(2);
+    });
+
     it("applies a person's rename and close, and drops the push they make moot", async () => {
         vendor.seed({ title: 'Login fix' });
         await pull();
