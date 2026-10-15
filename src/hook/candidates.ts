@@ -27,6 +27,12 @@ export interface CandidateQuery {
 
 const closedPhases = Array.from(CLOSED_PHASES);
 const NOT_CLOSED = `phase NOT IN (${closedPhases.map(() => '?').join(', ')})`;
+/**
+ * Each tier needs no more rows than the whole list: at most the k already ranked repeat, so its first
+ * CANDIDATE_LIMIT rows hold the CANDIDATE_LIMIT - k it can add. Without it a populated workspace reads every
+ * recent task on every prompt (spec §15).
+ */
+const TIER_LIMIT = `LIMIT ${CANDIDATE_LIMIT}`;
 
 /** Tasks this session has already touched, most recently first. */
 function fromThisSession(db: Ledger, query: CandidateQuery): TaskRow[] {
@@ -34,7 +40,7 @@ function fromThisSession(db: Ledger, query: CandidateQuery): TaskRow[] {
         SELECT t.* FROM tasks t JOIN events e ON e.task_id = t.id
         WHERE e.session_id = ? AND t.workspace_id = ? AND t.${NOT_CLOSED}
         GROUP BY t.id
-        ORDER BY MAX(e.seq) DESC`)
+        ORDER BY MAX(e.seq) DESC ${TIER_LIMIT}`)
         .all(query.sessionId, query.workspaceId, ...closedPhases) as TaskRow[];
 }
 
@@ -49,7 +55,7 @@ function recentlyTouched(db: Ledger, query: CandidateQuery): TaskRow[] {
         SELECT * FROM tasks
         WHERE workspace_id = ? AND updated_at >= ? AND ${NOT_CLOSED}
           AND (origin <> ? OR assignee = ? OR EXISTS (SELECT 1 FROM events e WHERE e.task_id = tasks.id AND e.session_id IS NOT NULL))
-        ORDER BY updated_at DESC`)
+        ORDER BY updated_at DESC ${TIER_LIMIT}`)
         .all(query.workspaceId, cutoff, ...closedPhases, VENDOR_ORIGIN, user) as TaskRow[];
 }
 
@@ -60,7 +66,7 @@ function assignedToMe(db: Ledger, query: CandidateQuery): TaskRow[] {
     return db.prepare(`
         SELECT * FROM tasks
         WHERE workspace_id = ? AND origin = ? AND assignee = ? AND ${NOT_CLOSED}
-        ORDER BY updated_at DESC`)
+        ORDER BY updated_at DESC ${TIER_LIMIT}`)
         .all(query.workspaceId, VENDOR_ORIGIN, user, ...closedPhases) as TaskRow[];
 }
 

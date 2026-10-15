@@ -126,6 +126,18 @@ describe('candidate ranking', () => {
         expect(rank().length).toBe(CANDIDATE_LIMIT);
     });
 
+    it('still fills every slot when a later rule repeats the tasks an earlier rule already ranked', () => {
+        const worked = Array.from({ length: CANDIDATE_LIMIT - 1 }, (_, i) => task(`Worked on ${i}`));
+        const others = Array.from({ length: 3 }, (_, i) => task(`Other ${i}`));
+        worked.forEach(row => { workedOnInThisSession(row); agedDays(row, 0); });
+        others.forEach((row, i) => agedDays(row, i + 1));
+
+        const ids = rank().map(t => t.id);
+        expect(ids).toHaveLength(CANDIDATE_LIMIT);
+        expect(ids.slice(0, worked.length).sort()).toEqual(worked.map(t => t.id).sort());
+        expect(ids[CANDIDATE_LIMIT - 1]).toBe(others[0].id);
+    });
+
     it('leaves out pulled team items nobody here has worked on', () => {
         setWorkspaceSetting(ledger.db, workspaceId, SETTING_CURRENT_USER, CURRENT_USER);
         const vendorTask = (title: string, assignee: string): TaskRow =>
