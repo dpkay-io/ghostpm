@@ -15,7 +15,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
   - The human-wins rule settles conflicts with the vendor automatically.
 - **Task ids are ledger ids:** `T42`. `#42` or `42` still means the vendor's issue in the current workspace.
 - **Phases replace free-form states:** brainstorming, planned, in_progress, in_review, done, dropped. Evidence moves them (plan files, edits, commits, PRs), and so does you telling Claude.
-- **`ghostpm init` writes no `.mcp-pm.yml`.** It registers the folder in the ledger, detects the vendor from the git remote, turns sync on, and for Azure DevOps learns `phase_state_map` and `ado_work_item_type` from your recent work items. Existing `.mcp-pm.yml` files are left alone.
+- **`ghostpm init` writes no `.mcp-pm.yml`.** It registers the folder in the ledger, detects the vendor from the git remote, turns sync on, and for Azure DevOps learns `ado_work_item_type` from your recent work items and `phase_state_map` from that work item type's own states, so states you have not used yet are mapped too. An empty project no longer warns. Existing `.mcp-pm.yml` files are left alone.
 - **`ghostpm setup` registers no MCP server and installs no skill.** The Claude Code plugin brings both. `setup --global` is gone, and `setup` now handles only the statusline (`--statusline`, `--restore`).
 - **`ghostpm tasks`, `status` and `dashboard` read the ledger**, never `.mcp-pm.db`. `unregister` forgets a workspace in the ledger and asks for `--yes` first.
 
@@ -24,7 +24,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
 - **Claude Code plugin** (`claude plugin install ghostpm@ghostpm`). Hooks record sessions, edited files, commits and PRs. The session is told which task it is on. The plugin ships the MCP server and the `ghostpm:ghostpm` skill.
 - **`ghostpm dashboard`.** A live view of the machine: live sessions, tasks by workspace and phase, sync health, activity touching another workspace's task, and the recent timeline. It redraws only what changed, and prints one snapshot when piped or with `--once`. Inside Claude Code, ask for "the GhostPM dashboard".
 - **`ghostpm standup [--since 2d|36h|yesterday|2026-09-28]`.** Tasks touched, phase changes, files, commits and PRs, per workspace. No LLM involved.
-- **Statusline** (opt-in, `ghostpm setup --statusline`). Shows `▶ T42 <title> · <phase>`, `⚠<n>` for failed pushes, and a paused-sync reason, after your existing statusline, which stays in place if GhostPM's ledger cannot be read.
+- **Statusline** (opt-in, `ghostpm setup --statusline`). Shows `▶ T42 <title> · <phase>`, `⚠<n>` for failed pushes, and a paused-sync reason, hiding finished tasks, after your existing statusline, which stays in place if GhostPM's ledger cannot be read.
 - **Vendor sync v2** (`ghostpm sync`, `ghostpm config`):
   - one sync runner at a time;
   - a desired-state queue that retries with backoff;
@@ -40,6 +40,11 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
 ### Fixed
 
 - `open_attachment` opens only http and https links.
+- **Azure DevOps keeps its retry marker.** The hidden marker that stops a retried create or comment being posted twice is now an invisible span, because Azure DevOps strips HTML comments.
+- **Azure DevOps with a personal access token only** no longer pauses sync because your user cannot be read; the user is treated as unknown.
+- **A work item moved to a state several phases share** is read as the sensible phase, not the first one in phase order.
+- **A closed GitHub issue loses its `ghostpm:<phase>` label.**
+- **Faster prompts.** The prompt hook finds the session's tasks through an index and loads less code, so it stays quick on a large ledger. The ledger upgrades itself the first time it is opened.
 
 ### Upgrading from 1.4.0
 
