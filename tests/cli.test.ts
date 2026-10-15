@@ -15,7 +15,9 @@ const BOM = '\uFEFF';
 const AUTH_EXIT = 4;
 const KNACK_ENCODING_ENV = 'GHOSTPM_TEST_KNACK_ENCODING';
 const ANSI_ENCODING = 'latin1';
-const LINGER_TEST_TIMEOUT_MS = 20000;
+/** Every test here may start node processes, which crawl when the machine is busy: one timeout for the whole file. */
+const SPAWN_TEST_TIMEOUT_MS = 20000;
+jest.setTimeout(SPAWN_TEST_TIMEOUT_MS);
 const TIMEOUT_MS = 300;
 /** Longer than jest's own test timeout: a child that is not killed fails the test. */
 const HANG_MS = 30000;
@@ -174,7 +176,7 @@ describe('runCli', () => {
         } finally {
             if (fs.existsSync(pidFile)) try { process.kill(Number(fs.readFileSync(pidFile, 'utf8'))); } catch { /* already gone */ }
         }
-    }, LINGER_TEST_TIMEOUT_MS);
+    });
 
     it('starts a vendor CLI in a process group of its own on Linux and macOS, never on Windows (F7)', async () => {
         override('gh', echo);
@@ -212,7 +214,7 @@ describe('runCli', () => {
         } finally {
             if (fs.existsSync(pidFile)) try { process.kill(Number(fs.readFileSync(pidFile, 'utf8'))); } catch { /* already gone */ }
         }
-    }, LINGER_TEST_TIMEOUT_MS);
+    });
 
     it('sweeps argument folders left behind, past the given age, and nothing else (F11)', async () => {
         jest.spyOn(osModule, 'tmpdir').mockReturnValue(dir);
@@ -370,7 +372,7 @@ describe('runCli', () => {
             await new Promise(resolve => setTimeout(resolve, lingerMs * 2));
             removeTempDir(argDir);
             expect(fs.existsSync(argDir)).toBe(false);
-        }, LINGER_TEST_TIMEOUT_MS);
+        });
 
         itOnWindows("kills the whole tree on a timeout, so az.cmd's child cannot finish its work later", async () => {
             const pidFile = path.join(dir, 'child-pid.txt');
@@ -382,7 +384,7 @@ describe('runCli', () => {
             const error = await runCli('az', ['version'], { timeoutMs: BATCH_TIMEOUT_MS }).catch((e: unknown) => e) as CliError;
             expect(error.timedOut).toBe(true);
             expect(await diesWithin(Number(fs.readFileSync(pidFile, 'utf8')), BATCH_TIMEOUT_MS)).toBe(true);
-        }, LINGER_TEST_TIMEOUT_MS);
+        });
 
         itOnWindows('runs an override given as a relative path by its absolute path', async () => {
             process.chdir(dir);

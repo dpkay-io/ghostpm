@@ -7,9 +7,42 @@ const ADO_PAT_84 = `${'A'.repeat(52)}${'b'.repeat(24)}AZDO${'c'.repeat(4)}`;
 const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
 /** The recursive re-scan threw RangeError from about 2,000 links in a chain (measured). */
 const DEEP_CHAIN = 5000;
-const HOSTILE_BYTES = 1 << 20;
-/** Generous: a linear scan of 1 MB takes tens of ms; the quadratic patterns took 3-44 s on far less (measured). */
-const HOSTILE_BOUND_MS = 1000;
+const HOSTILE_BYTES = 1 << 18;
+/** The large input is this many times the small one: linear scanning grows about 4x, quadratic 16x. */
+const HOSTILE_GROWTH = 4;
+/** Best of this many runs per size, so a load spike on one run does not decide the result. */
+const HOSTILE_RUNS = 3;
+/** Between linear (4x) and quadratic (16x), with room for timer and GC noise. */
+const HOSTILE_MAX_RATIO = 10;
+/** Below this the large run is too quick for a ratio to mean anything. */
+const HOSTILE_NOISE_FLOOR_MS = 50;
+/** Absolute backstop, far above any linear scan even under load; the quadratic patterns took 3-44 s (measured). */
+const HOSTILE_BACKSTOP_MS = 10000;
+
+/** The adversarial inputs, each about `bytes` long. */
+const hostileInputs = (bytes: number): string[] => {
+    const fill = (unit: string): string => unit.repeat(Math.ceil(bytes / unit.length));
+    return [
+        fill('_token'), fill('token:'), fill('token='), fill(`"'`), fill('=:'), fill('""""""token"""""":x '), fill('token '),
+        fill('password'), `"${fill('a_')}token":abcdefghij`, `token${' '.repeat(bytes)}x`, `${'a_'.repeat(bytes / 2)}password`,
+        fill('{"user": "octocat", "password": "correcthorse", "client_secret": "abcdefghij"}\n'),
+        fill('-----BEGIN PRIVATE KEY-----'), fill('_eyJaaaaa'),
+        // GitHub tokens are unbounded: one long run, repeated short runs, runs one short of a token.
+        ` ghs_${'a'.repeat(bytes)}`, fill('ghs_'), fill(' ghs_1_'), fill(` ghs_${'a'.repeat(35)}`),
+        // JWT segments are unbounded: a run with no dot, and one whose last dot never comes.
+        ` eyJ${'a'.repeat(bytes)}`, ` eyJaaaaa.eyJ${'a'.repeat(bytes)}`, fill('.eyJaaaaa'),
+        // camelCase keys: chains of them, with and without separators, and boundaries with no keyword.
+        fill('aToken'), fill('aToken:'), fill('"aBcToken": "'), fill(` ${'aB'.repeat(40)}`), fill(` ${`${'aToken'.repeat(10)}_`.repeat(17)}`),
+        // Keywords anywhere in a word: keyword-dense words, and long words a keyword never ends.
+        fill('xtoken'), fill('xtokenx='), fill(`!${'a'.repeat(64)}token`), fill(`!${`${'a'.repeat(64)}_`.repeat(16)}${'a'.repeat(64)}tokex `),
+        fill(`!${`${'token'.repeat(12)}_`.repeat(16)}${'token'.repeat(12)} `),
+        // Values have no length cap but whitespace, a quote or the next key: one long value, quotes never
+        // closed, and prose keys with long digitless quoted values back to back.
+        `password=${'x'.repeat(bytes)}`, `password="${'x'.repeat(bytes)}`, fill('password="'),
+        fill(`token = "${'a'.repeat(4000)}"`), fill(`token = "${'a b'.repeat(1500)}"`),
+    ];
+};
+
 const JWT ='eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
 /** GitHub App installation tokens since 2026-04-27 (Actions' GITHUB_TOKEN): `ghs_<app id>_<JWT>` (synthetic; unverified against a real one). */
 const GITHUB_APP_TOKEN = `ghs_1234567_${JWT}`;
@@ -263,32 +296,23 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(`token=${GITHUB_TOKEN}&`.repeat(times)).count).toBe(times);
     });
 
-    it('scans 1 MB hostile inputs in linear time (each well under a second; the old regexes took seconds or threw)', () => {
-        const fill = (unit: string): string => unit.repeat(Math.ceil(HOSTILE_BYTES / unit.length));
-        const hostile = [
-            fill('_token'), fill('token:'), fill('token='), fill(`"'`), fill('=:'), fill('""""""token"""""":x '), fill('token '),
-            fill('password'), `"${fill('a_')}token":abcdefghij`, `token${' '.repeat(HOSTILE_BYTES)}x`, `${'a_'.repeat(HOSTILE_BYTES / 2)}password`,
-            fill('{"user": "octocat", "password": "correcthorse", "client_secret": "abcdefghij"}\n'),
-            fill('-----BEGIN PRIVATE KEY-----'), fill('_eyJaaaaa'),
-            // GitHub tokens are unbounded: one long run, repeated short runs, runs one short of a token.
-            ` ghs_${'a'.repeat(HOSTILE_BYTES)}`, fill('ghs_'), fill(' ghs_1_'), fill(` ghs_${'a'.repeat(35)}`),
-            // JWT segments are unbounded: a run with no dot, and one whose last dot never comes.
-            ` eyJ${'a'.repeat(HOSTILE_BYTES)}`, ` eyJaaaaa.eyJ${'a'.repeat(HOSTILE_BYTES)}`, fill('.eyJaaaaa'),
-            // camelCase keys: chains of them, with and without separators, and boundaries with no keyword.
-            fill('aToken'), fill('aToken:'), fill('"aBcToken": "'), fill(` ${'aB'.repeat(40)}`), fill(` ${`${'aToken'.repeat(10)}_`.repeat(17)}`),
-            // Keywords anywhere in a word: keyword-dense words, and long words a keyword never ends.
-            fill('xtoken'), fill('xtokenx='), fill(`!${'a'.repeat(64)}token`), fill(`!${`${'a'.repeat(64)}_`.repeat(16)}${'a'.repeat(64)}tokex `),
-            fill(`!${`${'token'.repeat(12)}_`.repeat(16)}${'token'.repeat(12)} `),
-            // Values have no length cap but whitespace, a quote or the next key: one long value, quotes never
-            // closed, and prose keys with long digitless quoted values back to back.
-            `password=${'x'.repeat(HOSTILE_BYTES)}`, `password="${'x'.repeat(HOSTILE_BYTES)}`, fill('password="'),
-            fill(`token = "${'a'.repeat(4000)}"`), fill(`token = "${'a b'.repeat(1500)}"`),
-        ];
-        for (const text of hostile) {
-            const started = Date.now();
-            redactSecrets(text);
-            expect(Date.now() - started).toBeLessThan(HOSTILE_BOUND_MS);
-        }
+    it('scans hostile inputs in linear time (4x the input takes about 4x the time, not 16x; the old regexes were quadratic or threw)', () => {
+        const bestOf = (text: string): number => {
+            let best = Infinity;
+            for (let run = 0; run < HOSTILE_RUNS; run++) {
+                const started = performance.now();
+                redactSecrets(text);
+                best = Math.min(best, performance.now() - started);
+            }
+            return best;
+        };
+        const large = hostileInputs(HOSTILE_BYTES * HOSTILE_GROWTH);
+        hostileInputs(HOSTILE_BYTES).forEach((text, index) => {
+            const smallMs = bestOf(text);
+            const largeMs = bestOf(large[index]!);
+            expect(largeMs).toBeLessThan(HOSTILE_BACKSTOP_MS);
+            if (largeMs > HOSTILE_NOISE_FLOOR_MS) expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(HOSTILE_MAX_RATIO);
+        });
     });
 
     it('never matches its own placeholder again', () => {
