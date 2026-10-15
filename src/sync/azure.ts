@@ -5,7 +5,7 @@ import { PHASES, Phase } from '../ledger/types';
 import { SYNC_COMMAND } from './schedule';
 import {
     DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf,
-    stripMarkers,
+    hasMarker, stripMarkers, toHtmlMarkers,
 } from './vendor';
 
 const nullableStrip = (text: string | null): string | null => (text === null ? null : stripMarkers(text));
@@ -196,7 +196,7 @@ export class AzureAdapter implements VendorAdapter {
     async create(desired: DesiredState, body: string): Promise<RemoteItem> {
         const created = this.toItem(await this.az<AzWorkItem>([
             'boards', 'work-item', 'create', ...this.orgArgs(), '--project', freeText(this.project),
-            '--type', freeText(this.workItemType), '--title', freeText(desired.title), '--description', freeText(body),
+            '--type', freeText(this.workItemType), '--title', freeText(desired.title), '--description', freeText(toHtmlMarkers(body)),
         ]));
         // `create` has no --state (az 2.85 help): a later phase takes one more update.
         const state = this.stateMap[desired.phase];
@@ -212,7 +212,7 @@ export class AzureAdapter implements VendorAdapter {
     }
 
     async comment(remoteId: string, text: string): Promise<RemoteItem | null> {
-        const output = await this.azText(this.updateArgs(remoteId, ['--discussion', freeText(text)]), true);
+        const output = await this.azText(this.updateArgs(remoteId, ['--discussion', freeText(toHtmlMarkers(text))]), true);
         // Posted: an unreadable answer must not read as a failed comment, or a retry posts it twice.
         try {
             return this.toItem(JSON.parse(output) as AzWorkItem);
@@ -281,13 +281,13 @@ export class AzureAdapter implements VendorAdapter {
             `[${FIELD.createdBy}] = ${ME_MACRO}`,
             `[${FIELD.createdDate}] >= ${wiqlDateFrom(Date.now() - ADOPT_LOOKBACK_MS)}`,
         ], `[${FIELD.createdDate}] DESC`);
-        const found = items.find(item => String(item.fields?.[FIELD.description] ?? '').indexOf(marker) >= 0);
+        const found = items.find(item => hasMarker(String(item.fields?.[FIELD.description] ?? ''), marker));
         return found === undefined ? null : this.toItem(found);
     }
 
     /** The latest System.History entry: a comment posted since hides an earlier one (a rare duplicate, never a loss). */
     async hasComment(remoteId: string, marker: string): Promise<boolean> {
-        return String((await this.show(remoteId)).fields?.[FIELD.history] ?? '').indexOf(marker) >= 0;
+        return hasMarker(String((await this.show(remoteId)).fields?.[FIELD.history] ?? ''), marker);
     }
 
     async fetch(remoteId: string): Promise<RemoteItem | null> {

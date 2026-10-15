@@ -286,6 +286,38 @@ describe('AzureAdapter retry lookups', () => {
         expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', "Fix 'x'")).toBeNull();
     });
 
+    // Verified against real az 2.85: Azure strips the comment form and rewrites `display:none` to `display:none;`.
+    const sanitised = '<span style="display:none;">ghostpm:0123456789abcdef</span>';
+
+    it('writes the marker as a span in a created description and in a comment, leaving other text alone', async () => {
+        const az = fakeAz({ 'boards work-item create': workItem(), 'boards work-item update': workItem() });
+        await adapter(az.run).create({ title: 'Login fix', phase: 'planned' }, `body\n\n${marker}`);
+        await adapter(az.run).comment('42', `progress\n\n${marker}`);
+        const sent = (call: number, flag: string): string => {
+            const args = az.calls[call].args;
+            return (args[args.indexOf(flag) + 1] as { freeText: string }).freeText;
+        };
+        expect(sent(0, '--description')).toBe('body\n\n<span style="display:none">ghostpm:0123456789abcdef</span>');
+        expect(sent(1, '--discussion')).toBe('progress\n\n<span style="display:none">ghostpm:0123456789abcdef</span>');
+    });
+
+    it('matches the sanitised, re-wrapped span in a description and in the history, and only its own nonce', async () => {
+        const wrapped = `<div>Tracked by GhostPM as T1.</div><div><br></div><div>${sanitised}</div>`;
+        const az = fakeAz({
+            'boards query': JSON.stringify([JSON.parse(workItem({ 'System.Description': wrapped }, 42))]),
+            'boards work-item show': workItem({ 'System.History': `progress<br><br>${sanitised}` }),
+        });
+        expect((await adapter(az.run).findCreated(marker, 'Login fix'))?.remoteId).toBe('42');
+        expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', 'Login fix')).toBeNull();
+        expect(await adapter(az.run).hasComment('42', marker)).toBe(true);
+        expect(await adapter(az.run).hasComment('42', '<!-- ghostpm:ffffffffffffffff -->')).toBe(false);
+    });
+
+    it('never hands a span marker back, nor the whitespace before it', async () => {
+        const az = fakeAz({ 'boards work-item show': workItem({ 'System.Description': `Tracked by GhostPM as T1.\n\n${sanitised}` }) });
+        expect((await adapter(az.run).fetch('42'))!.body).toBe('Tracked by GhostPM as T1.');
+    });
+
     it('never hands a marker back in a description it read', async () => {
         const az = fakeAz({ 'boards work-item show': workItem({ 'System.Description': `Tracked by GhostPM as T1.\n\n${marker}` }) });
         expect((await adapter(az.run).fetch('42'))!.body).toBe('Tracked by GhostPM as T1.');

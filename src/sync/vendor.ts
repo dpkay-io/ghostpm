@@ -12,9 +12,38 @@ const MARKER_CLOSE = ' -->';
 export const MARKER_NONCE_BYTES = 8;
 const HEX_PER_BYTE = 2;
 export const idempotencyMarker = (nonce: string): string => `${MARKER_OPEN}${nonce}${MARKER_CLOSE}`;
-/** No leading `\s*`: with /g that retries from every whitespace character, quadratic on a long run of it. */
-const MARKER = new RegExp(`${MARKER_OPEN}[0-9a-f]{${MARKER_NONCE_BYTES * HEX_PER_BYTE}}${MARKER_CLOSE}`, 'g');
+/**
+ * Azure DevOps strips HTML comments from descriptions and discussion comments (verified with az 2.85) and rewrites
+ * `display:none` to `display:none;`. This span survives both, and is invisible in its UI.
+ */
+const htmlMarker = (nonce: string): string => `<span style="display:none">ghostpm:${nonce}</span>`;
+const NONCE = `([0-9a-f]{${MARKER_NONCE_BYTES * HEX_PER_BYTE}})`;
+/**
+ * Either form; the span tolerates the sanitiser's `;`, whitespace and case. No leading `\s*`: with /g that retries
+ * from every whitespace character, quadratic on a long run of it.
+ */
+const MARKER = new RegExp(
+    `${MARKER_OPEN}${NONCE}${MARKER_CLOSE}|<span\\s+style\\s*=\\s*"\\s*display\\s*:\\s*none\\s*;?\\s*"\\s*>\\s*ghostpm:${NONCE}\\s*</span\\s*>`, 'gi',
+);
 const WHITESPACE = /\s/;
+const nonceOf = (match: RegExpExecArray): string => (match[1] ?? match[2]).toLowerCase();
+
+/** `text` with each comment-form marker rewritten to the form Azure DevOps keeps. */
+export const toHtmlMarkers = (text: string): string =>
+    text.replace(MARKER, (whole, comment?: string) => (comment === undefined ? whole : htmlMarker(comment)));
+
+/** Whether `text` carries `marker` (given in comment form), in either form. */
+export function hasMarker(text: string, marker: string): boolean {
+    MARKER.lastIndex = 0;
+    const wanted = MARKER.exec(marker);
+    if (wanted === null) return text.indexOf(marker) >= 0;
+    const nonce = nonceOf(wanted);
+    MARKER.lastIndex = 0;
+    for (let found = MARKER.exec(text); found !== null; found = MARKER.exec(text)) {
+        if (nonceOf(found) === nonce) return true;
+    }
+    return false;
+}
 
 /**
  * The text without our markers, and without the whitespace we put before each one. Linear: the backward trim
