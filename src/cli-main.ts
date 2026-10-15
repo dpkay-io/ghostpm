@@ -157,7 +157,7 @@ ${SETUP_USAGE}`);
             const { runDashboard } = await import('./surfaces/live');
             const db = openReader();
             try {
-                await runDashboard(db, process.stdout, { once: hasFlag(args, FLAG_ONCE) });
+                await runDashboard(db, process.stdout, { once: hasFlag(args, FLAG_ONCE) }, process.stdin);
             } finally {
                 db.close();
             }

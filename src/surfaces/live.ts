@@ -13,6 +13,12 @@ const UNLIMITED_ROWS = Number.MAX_SAFE_INTEGER;
 const RESIZE = 'resize';
 const ERROR = 'error';
 const STOP_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
+const DATA = 'data';
+/** Raw mode delivers Ctrl+C as this byte instead of raising SIGINT. */
+const CTRL_C = '\u0003';
+const QUIT_KEYS = ['q', 'Q'];
+/** The stream ending or failing (a closed pseudo-console) means nobody is left to read the dashboard. */
+const INPUT_GONE_EVENTS = ['end', 'close', 'error'];
 
 /** The part of process.stdout the dashboard uses; tests pass a fake. */
 export interface Screen {
@@ -22,6 +28,20 @@ export interface Screen {
     write(chunk: string): unknown;
     on(event: 'resize' | 'error', listener: (error?: Error) => void): unknown;
     removeListener(event: 'resize' | 'error', listener: (error?: Error) => void): unknown;
+}
+
+/**
+ * The part of process.stdin the dashboard uses; tests pass a fake. On Windows, Node only learns about a
+ * console resize while it reads the console input, so a live dashboard has to read stdin (in raw mode).
+ */
+export interface KeyInput {
+    isTTY?: boolean;
+    isRaw?: boolean;
+    setRawMode(mode: boolean): unknown;
+    resume(): unknown;
+    pause(): unknown;
+    on(event: string, listener: (chunk?: Buffer | string) => void): unknown;
+    removeListener(event: string, listener: (chunk?: Buffer | string) => void): unknown;
 }
 
 export interface LiveOptions {
@@ -122,7 +142,39 @@ export function startLive(options: LiveOptions): LiveHandle {
     return { stop: () => finish(), done };
 }
 
-export async function runDashboard(db: Ledger, screen: Screen, flags: DashboardFlags): Promise<void> {
+/**
+ * Reads keys in raw mode so the console reports resizes, and calls onStop for Ctrl+C or q.
+ * Returns the undo: it restores the previous raw mode and releases stdin so the process can exit.
+ * Does nothing (and returns a no-op) when input is not a terminal.
+ */
+function captureKeys(input: KeyInput | undefined, onStop: () => void): () => void {
+    if (!input || !input.isTTY) return () => undefined;
+    const wasRaw = input.isRaw === true;
+    const onData = (chunk?: Buffer | string): void => {
+        const text = String(chunk ?? '');
+        if (text.includes(CTRL_C) || QUIT_KEYS.some(key => text.includes(key))) onStop();
+    };
+    const onGone = (): void => onStop();
+    try {
+        input.setRawMode(true);
+    } catch {
+        return () => undefined;
+    }
+    input.on(DATA, onData);
+    INPUT_GONE_EVENTS.forEach(event => input.on(event, onGone));
+    input.resume();
+    return () => {
+        input.removeListener(DATA, onData);
+        // A late error on a closed stdin must not become an uncaught exception.
+        INPUT_GONE_EVENTS.forEach(event => input.removeListener(event, onGone));
+        if (!wasRaw) {
+            try { input.setRawMode(false); } catch { /* the console is already gone */ }
+        }
+        input.pause();
+    };
+}
+
+export async function runDashboard(db: Ledger, screen: Screen, flags: DashboardFlags, input?: KeyInput): Promise<void> {
     const build = (): DashboardLine[] => renderDashboard(buildSnapshot(db));
     if (!screen.isTTY) {
         // Piped, redirected, or run by a tool such as Claude Code's Bash: one plain snapshot,
@@ -141,9 +193,11 @@ export async function runDashboard(db: Ledger, screen: Screen, flags: DashboardF
     const live = startLive({ screen, build, changed });
     const stop = (): void => live.stop();
     STOP_SIGNALS.forEach(signal => process.once(signal, stop));
+    const releaseKeys = captureKeys(input, stop);
     try {
         await live.done;
     } finally {
+        releaseKeys();
         STOP_SIGNALS.forEach(signal => process.removeListener(signal, stop));
     }
 }

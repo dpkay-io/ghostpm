@@ -3,7 +3,7 @@ import { tempLedger, TempLedger } from '../ledger/helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { createTask } from '../../src/ledger/tasks';
 import { DashboardLine } from '../../src/surfaces/dashboard';
-import { POLL_MS, STALE_REFRESH_MS, Screen, runDashboard, startLive } from '../../src/surfaces/live';
+import { KeyInput, POLL_MS, STALE_REFRESH_MS, Screen, runDashboard, startLive } from '../../src/surfaces/live';
 import { ANSI, cursorTo } from '../../src/surfaces/text';
 
 const ESCAPE = '\u001b[';
@@ -230,6 +230,20 @@ function emitterScreen(): { screen: Screen; writes: string[]; emitter: EventEmit
     return { screen, writes, emitter };
 }
 
+function fakeInput(isTTY = true, isRaw = false) {
+    const emitter = new EventEmitter();
+    const calls: string[] = [];
+    const input: KeyInput & { isRaw: boolean } = {
+        isTTY, isRaw,
+        setRawMode: (mode: boolean) => { calls.push(`raw:${mode}`); input.isRaw = mode; },
+        resume: () => { calls.push('resume'); },
+        pause: () => { calls.push('pause'); },
+        on: (event, listener) => emitter.on(event, listener),
+        removeListener: (event, listener) => emitter.removeListener(event, listener),
+    };
+    return { input, calls, emitter };
+}
+
 describe('runDashboard', () => {
     let ledger: TempLedger;
 
@@ -284,5 +298,79 @@ describe('runDashboard', () => {
         expect(writes).toHaveLength(1);
         expect(writes[0]).not.toContain(ANSI.altScreenOn);
         writes[0].replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').split('\n').forEach(line => expect(Array.from(line).length).toBeLessThanOrEqual(29));
+    });
+
+    describe('keys', () => {
+        const CTRL_C = '\u0003';
+
+        it.each([[CTRL_C], ['q'], ['Q'], [Buffer.from([3])]])('restores the terminal and the input on key %j', async key => {
+            const { screen, writes } = fakeScreen();
+            const { input, calls, emitter } = fakeInput();
+            const run = runDashboard(ledger.db, screen, { once: false }, input);
+            expect(calls).toEqual(['raw:true', 'resume']);
+            emitter.emit('data', key);
+            await run;
+
+            expect(writes[writes.length - 1]).toBe(`${ANSI.showCursor}${ANSI.altScreenOff}`);
+            expect(calls).toEqual(['raw:true', 'resume', 'raw:false', 'pause']);
+            expect(emitter.listenerCount('data')).toBe(0);
+        });
+
+        it('ignores other keys', async () => {
+            const { screen, writes } = fakeScreen();
+            const { input, emitter } = fakeInput();
+            const run = runDashboard(ledger.db, screen, { once: false }, input);
+            const count = writes.length;
+            emitter.emit('data', 'x');
+            expect(writes).toHaveLength(count);
+            process.emit('SIGINT', 'SIGINT');
+            await run;
+        });
+
+        it('leaves raw mode as it found it', async () => {
+            const { screen } = fakeScreen();
+            const { input, calls } = fakeInput(true, true);
+            const run = runDashboard(ledger.db, screen, { once: false }, input);
+            process.emit('SIGINT', 'SIGINT');
+            await run;
+            expect(calls).toEqual(['raw:true', 'resume', 'pause']);
+        });
+
+        it('restores the input on SIGTERM and when the input ends', async () => {
+            const first = fakeInput();
+            const run = runDashboard(ledger.db, fakeScreen().screen, { once: false }, first.input);
+            process.emit('SIGTERM', 'SIGTERM');
+            await run;
+            expect(first.calls).toContain('pause');
+
+            const second = fakeInput();
+            const run2 = runDashboard(ledger.db, fakeScreen().screen, { once: false }, second.input);
+            second.emitter.emit('end');
+            await run2;
+            expect(second.calls).toEqual(['raw:true', 'resume', 'raw:false', 'pause']);
+        });
+
+        it('does not touch input that is not a terminal, nor on a snapshot or --once', async () => {
+            const piped = fakeInput(false);
+            const run = runDashboard(ledger.db, fakeScreen().screen, { once: false }, piped.input);
+            process.emit('SIGINT', 'SIGINT');
+            await run;
+            const snapshot = fakeInput();
+            await runDashboard(ledger.db, fakeScreen(false).screen, { once: false }, snapshot.input);
+            const once = fakeInput();
+            await runDashboard(ledger.db, fakeScreen().screen, { once: true }, once.input);
+            expect(piped.calls).toEqual([]);
+            expect(snapshot.calls).toEqual([]);
+            expect(once.calls).toEqual([]);
+        });
+
+        it('survives a console that refuses raw mode', async () => {
+            const { screen } = fakeScreen();
+            const { input } = fakeInput();
+            input.setRawMode = () => { throw new Error('EIO'); };
+            const run = runDashboard(ledger.db, screen, { once: false }, input);
+            process.emit('SIGINT', 'SIGINT');
+            await run;
+        });
     });
 });
