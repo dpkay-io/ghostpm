@@ -114,6 +114,10 @@ const MIGRATIONS: readonly string[] = [
     ALTER TABLE vendor_links ADD COLUMN intent_phase TEXT;
     ALTER TABLE vendor_links ADD COLUMN intent_rev INTEGER;
     `,
+    // 4: the prompt hook's "this session's tasks" reads the session's events, not every task in the workspace (spec §15).
+    `
+    CREATE INDEX events_session ON events (session_id, task_id);
+    `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

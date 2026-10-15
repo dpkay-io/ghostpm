@@ -188,6 +188,19 @@ describe('ledger db', () => {
         }
     });
 
+    it("finds a session's tasks from its own events, not by reading every task in the workspace", () => {
+        const db = openLedger();
+        try {
+            const plan = (db.prepare(`EXPLAIN QUERY PLAN
+                SELECT t.id FROM tasks t JOIN events e ON e.task_id = t.id
+                WHERE e.session_id = ? AND t.workspace_id = ? GROUP BY t.id ORDER BY MAX(e.seq) DESC`)
+                .all('s', 1) as { detail: string }[]).map(row => row.detail);
+            expect(plan[0]).toMatch(/^SEARCH e USING (COVERING )?INDEX \w+ \(session_id=\?\)/);
+        } finally {
+            db.close();
+        }
+    });
+
     it('allows one pending sync_state per task, beside any number in flight', () => {
         const db = openLedger();
         try {
