@@ -3,7 +3,7 @@ import { Ledger, openLedgerReadOnly, schemaStatus } from './ledger/db';
 import { getSession } from './ledger/sessions';
 import { getSetting, SETTING_PREVIOUS_STATUSLINE } from './ledger/settings';
 import { getTask } from './ledger/tasks';
-import { SessionRow, formatTaskId } from './ledger/types';
+import { CLOSED_PHASES, SessionRow, formatTaskId } from './ledger/types';
 import { getWorkspace } from './ledger/workspaces';
 import { SYNC_OFF, syncOffReason, workspaceSyncHealth } from './surfaces/sync-health';
 import { cleanText, truncate } from './surfaces/text';
@@ -59,7 +59,7 @@ function previousOutput(options: StatuslineOptions): string {
 function taskSegment(db: Ledger, session: SessionRow | undefined): string {
     if (session === undefined || session.task_id === null) return '';
     const task = getTask(db, session.task_id);
-    return task === undefined ? '' : `${TASK_MARKER} ${formatTaskId(task.id)} ${task.title} · ${task.phase}`;
+    return task === undefined || CLOSED_PHASES.has(task.phase) ? '' : `${TASK_MARKER} ${formatTaskId(task.id)} ${task.title} · ${task.phase}`;
 }
 
 /**

@@ -203,14 +203,13 @@ export class GitHubAdapter implements VendorAdapter {
         const reason = CLOSE_REASON[desired.phase];
         const wasClosed = (link.state ?? '').split(REASON_SEPARATOR)[0] === CLOSED;
         const edit: CliArg[] = ['issue', 'edit', link.remoteId, ...this.repoArgs(), '--title', freeText(desired.title)];
-        if (reason === undefined) {
-            const label = phaseLabel(desired.phase);
-            await this.ensureLabel(label);
-            for (const old of link.labels) {
-                if (old.startsWith(PHASE_LABEL_PREFIX) && old !== label) edit.push('--remove-label', freeText(old));
-            }
-            if (link.labels.indexOf(label) < 0) edit.push('--add-label', label);
+        // A closed issue carries no phase label (spec §8.3: labels only for open phases); an open one carries exactly its own.
+        const label = reason === undefined ? phaseLabel(desired.phase) : null;
+        if (label !== null) await this.ensureLabel(label);
+        for (const old of link.labels) {
+            if (old.startsWith(PHASE_LABEL_PREFIX) && old !== label) edit.push('--remove-label', freeText(old));
         }
+        if (label !== null && link.labels.indexOf(label) < 0) edit.push('--add-label', label);
         // `gh issue close` on a closed issue changes nothing, so a done <-> dropped move reopens first. A close that already
         // means the phase stays: a duplicate is dropped, and closing it again as not planned would lose that (ruling F12).
         const needsClose = reason !== undefined && (!wasClosed || githubPhaseOf(link.state ?? '', link.labels, desired.phase) !== desired.phase);

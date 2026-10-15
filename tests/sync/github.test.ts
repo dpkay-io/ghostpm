@@ -94,6 +94,15 @@ describe('GitHubAdapter', () => {
         expect(gh.calls.some(call => call.args[0] === 'label')).toBe(false);
     });
 
+    it.each(['done', 'dropped'] as Phase[])('removes the stale phase label when an issue is closed as %s', async phase => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { state: 'CLOSED' }) });
+        await new GitHubAdapter(repo, gh.run).syncState({ remoteId: '12', state: 'open', labels: ['bug', 'ghostpm:in_review'] }, { title: 'Login fix', phase });
+        expect(gh.calls.map(call => call.args)).toContainEqual(
+            ['issue', 'edit', '12', '--repo', freeText(repo), '--title', freeText('Login fix'), '--remove-label', freeText('ghostpm:in_review')],
+        );
+    });
+
     it('reopens a closed issue that moved back to an open phase', async () => {
         const repo = freshRepo();
         const gh = fakeGh({ 'issue view': issueJson(repo, { labels: ['ghostpm:in_progress'] }) });

@@ -85,6 +85,12 @@ describe('buildStatusline', () => {
         expect(build()).toBe('PREV');
     });
 
+    it.each(['done', 'dropped'] as Phase[])('shows no active task once it is %s', phase => {
+        attach(task('Login fix', phase));
+
+        expect(build()).toBe('PREV');
+    });
+
     it('returns the previous output unchanged when the session is unknown', () => {
         task('Login fix');
 
