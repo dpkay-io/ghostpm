@@ -112,6 +112,9 @@ const PHASE_CATEGORIES: { [phase in Phase]: string[] } = {
     dropped: ['Removed', 'Completed'],
 };
 
+/** Which phase a remote move to a state shared by several phases means (brainstorming only when nothing else maps to it). */
+const SHARED_STATE_PREFERENCE: readonly Phase[] = ['planned', 'in_progress', 'in_review', 'done', 'dropped', 'brainstorming'];
+
 /**
  * Each phase takes a state of its first available category. Of several in one category, one already `seen` in use
  * wins, else the first the API lists (its workflow order). A phase with no category stays out; unknown categories are ignored.
@@ -381,8 +384,8 @@ export class AzureAdapter implements VendorAdapter {
     phaseOf(state: string, _labels: string[], localPhase: Phase): Phase {
         const same = (mapped: string | undefined): boolean => mapped !== undefined && mapped.toLowerCase() === state.toLowerCase();
         if (same(this.stateMap[localPhase])) return localPhase;
-        const mapped = PHASES.filter(phase => same(this.stateMap[phase]));
-        return mapped.length > 0 ? mapped[0] : vendorStateToPhase(state);
+        const picked = SHARED_STATE_PREFERENCE.find(phase => same(this.stateMap[phase]));
+        return picked ?? vendorStateToPhase(state);
     }
 
     titlesMatch(received: string, known: string): boolean {

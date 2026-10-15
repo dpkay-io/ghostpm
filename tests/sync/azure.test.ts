@@ -511,8 +511,14 @@ describe('AzureAdapter.phaseOf with phases that share a state', () => {
         expect(shared.phaseOf(state, [], local)).toBe(expected);
     });
 
-    it('reads a remote move to a shared state as the first phase mapped to it', () => {
-        expect(shared.phaseOf('Closed', [], 'in_progress')).toBe('done');
-        expect(shared.phaseOf('new', [], 'in_progress')).toBe('brainstorming');
+    it.each([
+        ['New', 'in_progress', 'planned'],
+        ['new', 'in_progress', 'planned'],
+        ['Active', 'planned', 'in_progress'],
+        ['Closed', 'in_progress', 'done'],
+        ['Closed', 'planned', 'done'],
+        ['Mystery', 'in_progress', 'planned'],
+    ] as [string, Phase, Phase][])('reads a remote move to shared %s over local %s as the sensible phase %s', (state, local, expected) => {
+        expect(shared.phaseOf(state, [], local)).toBe(expected);
     });
 });
