@@ -7,14 +7,14 @@ import {
     LEGACY_CONFIG_FILE, forgetLegacyRoots, importLegacyWorkspace, phaseStateMapFrom, unforgetLegacyRoot,
 } from './ledger/legacy-import';
 import {
-    DEFAULT_ADO_WORK_ITEM_TYPE, PROGRESS_COMMENTS_NONE, PROGRESS_COMMENTS_PHASE, SETTING_ADO_WORK_ITEM_TYPE, SETTING_PHASE_STATE_MAP,
-    SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SyncPolicy,
-    getWorkspaceSetting, readSetting, setWorkspaceSetting,
+    DEFAULT_ADO_WORK_ITEM_TYPE, PROGRESS_COMMENTS_NONE, PROGRESS_COMMENTS_PHASE, PhaseStateMap, SETTING_ADO_WORK_ITEM_TYPE,
+    SETTING_PHASE_STATE_MAP, SETTING_PROGRESS_COMMENTS, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF,
+    SyncPolicy, getWorkspaceSetting, readSetting, setWorkspaceSetting,
 } from './ledger/settings';
 import {
     WorkspaceFootprint, deleteWorkspace, ensureWorkspace, findWorkspace, refreshWorkspaceRemote, workspaceAtPath,
 } from './ledger/workspaces';
-import { AZURE_DEVOPS, NO_VENDOR, WorkspaceRow } from './ledger/types';
+import { AZURE_DEVOPS, NO_VENDOR, PHASES, Phase, WorkspaceRow } from './ledger/types';
 import { AzureAdapter, AzureProcess, phaseStateMapFromCategories } from './sync/azure';
 import { AzureIdentity, MISSING_REMOTE, identityOf } from './sync/identity';
 import { syncOffHint } from './sync/schedule';
@@ -77,12 +77,20 @@ function sampleFailure(project: string, error: unknown): string {
     return cleanText(`Could not sample work items in ${project} (${(error as Error).message}). Fix that, then run \`${INIT_COMMAND}\`.`);
 }
 
+/** The phases a saved phase_state_map has no state for (every phase when there is none). */
+const unmappedPhases = (saved: PhaseStateMap | undefined): Phase[] => PHASES.filter(phase => saved?.[phase] === undefined);
+
 /**
  * Fills phase_state_map and ado_work_item_type from a sample of the project. A value already there came from an
- * earlier init, the 1.4.0 import or a person and always stays; when both are there, az is not asked at all.
+ * earlier init, the 1.4.0 import or a person and always stays; a saved map only gains the phases it leaves out (an
+ * older init stored only the states it saw). When nothing is missing, az is not asked at all.
  */
 async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitResult): Promise<void> {
-    const missing = AZURE_SETTINGS.filter(key => getWorkspaceSetting(db, result.workspace.id, key) === undefined);
+    const savedMap = getWorkspaceSetting<PhaseStateMap>(db, result.workspace.id, SETTING_PHASE_STATE_MAP);
+    const unmapped = unmappedPhases(savedMap);
+    const missing = AZURE_SETTINGS.filter(key => (key === SETTING_PHASE_STATE_MAP
+        ? unmapped.length > 0
+        : getWorkspaceSetting(db, result.workspace.id, key) === undefined));
     result.kept.push(...AZURE_SETTINGS.filter(key => missing.indexOf(key) < 0));
     if (missing.length === 0) return;
     const identity = identityOf(result.workspace);
@@ -117,6 +125,10 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
         [SETTING_ADO_WORK_ITEM_TYPE]: [sampled.workItemTypes[0], noneChanged(SETTING_ADO_WORK_ITEM_TYPE)],
     };
     for (const key of missing) {
+        if (key === SETTING_PHASE_STATE_MAP && savedMap !== undefined) {
+            fillSavedMap(db, result, savedMap, unmapped.filter(phase => stateMap[phase] !== undefined), stateMap);
+            continue;
+        }
         const [value, why] = learned[key];
         if (value === undefined) {
             result.warnings.push(why);
@@ -125,6 +137,19 @@ async function detectAzureSettings(db: Ledger, sniff: SniffAzure, result: InitRe
             result.applied.push(key);
         }
     }
+}
+
+/** Adds the detected state of each `added` phase to the saved map, whose own phases never change, and says which. */
+function fillSavedMap(db: Ledger, result: InitResult, saved: PhaseStateMap, added: Phase[], detected: PhaseStateMap): void {
+    if (added.length === 0) {
+        result.kept.push(SETTING_PHASE_STATE_MAP);
+        return;
+    }
+    const filled: PhaseStateMap = { ...saved };
+    added.forEach(phase => { filled[phase] = detected[phase]; });
+    setWorkspaceSetting(db, result.workspace.id, SETTING_PHASE_STATE_MAP, filled);
+    // The states are the vendor's: printed cleaned.
+    result.applied.push(`${SETTING_PHASE_STATE_MAP} (added ${added.map(phase => `${phase}=${cleanText(detected[phase]!)}`).join(', ')})`);
 }
 
 /**

@@ -228,7 +228,9 @@ describe('workspace commands', () => {
 
         it('samples for the one Azure DevOps setting that is missing and keeps the other', async () => {
             const folder = repo(AZURE_REMOTE);
-            const chosen = { in_progress: 'Doing' };
+            const chosen = {
+                brainstorming: 'Idea', planned: 'Ready', in_progress: 'Doing', in_review: 'Review', done: 'Shipped', dropped: 'Cut',
+            };
             setWorkspaceSetting(ledger.db, ensureWorkspace(ledger.db, folder).id, SETTING_PHASE_STATE_MAP, chosen);
 
             const result = await initWorkspace(ledger.db, folder, sniff);
@@ -237,6 +239,44 @@ describe('workspace commands', () => {
             expect(result.kept).toEqual([SETTING_PHASE_STATE_MAP]);
             expect(result.applied).toEqual([SETTING_ADO_WORK_ITEM_TYPE]);
             expect(getWorkspaceSetting(ledger.db, result.workspace.id, SETTING_PHASE_STATE_MAP)).toEqual(chosen);
+        });
+
+        it('fills only the phases a saved partial map leaves out, keeps every saved one, says what it added, and is idempotent', async () => {
+            const folder = repo(AZURE_REMOTE);
+            const workspaceId = ensureWorkspace(ledger.db, folder).id;
+            // What an init before the category detection stored: planned's state only, and a person's in_progress.
+            const partial = { brainstorming: 'New', planned: 'New', in_progress: 'Doing' };
+            setWorkspaceSetting(ledger.db, workspaceId, SETTING_PHASE_STATE_MAP, partial);
+            setWorkspaceSetting(ledger.db, workspaceId, SETTING_ADO_WORK_ITEM_TYPE, 'Task');
+
+            const first = await initWorkspace(ledger.db, folder, sniff);
+
+            expect(sniffed).toHaveLength(1);
+            expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PHASE_STATE_MAP)).toEqual({
+                brainstorming: 'New', planned: 'New', in_progress: 'Doing', in_review: 'Resolved', done: 'Closed', dropped: 'Removed',
+            });
+            expect(first.kept).toEqual([SETTING_ADO_WORK_ITEM_TYPE]);
+            expect(describeInit(first)).toContain(
+                `Detected: ${SETTING_PHASE_STATE_MAP} (added in_review=Resolved, done=Closed, dropped=Removed).`,
+            );
+
+            const second = await initWorkspace(ledger.db, folder, sniff);
+            expect(sniffed).toHaveLength(1);
+            expect(second.applied).toEqual([]);
+            expect(second.kept).toEqual([SETTING_PHASE_STATE_MAP, SETTING_ADO_WORK_ITEM_TYPE]);
+        });
+
+        it('keeps a partial map as it is when the sample adds nothing to it', async () => {
+            const folder = repo(AZURE_REMOTE);
+            const workspaceId = ensureWorkspace(ledger.db, folder).id;
+            const partial = { planned: 'Ready' };
+            setWorkspaceSetting(ledger.db, workspaceId, SETTING_PHASE_STATE_MAP, partial);
+
+            const result = await initWorkspace(ledger.db, folder, sniffing({ states: ['Ready', 'Doing Stuff'], workItemTypes: ['Bug'] }));
+
+            expect(getWorkspaceSetting(ledger.db, workspaceId, SETTING_PHASE_STATE_MAP)).toEqual(partial);
+            expect(result.kept).toEqual([SETTING_PHASE_STATE_MAP]);
+            expect(result.applied).toEqual([SETTING_ADO_WORK_ITEM_TYPE]);
         });
 
         it('says when nothing changed in the sample window, apart from states it does not recognise', async () => {

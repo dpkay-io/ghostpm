@@ -83,12 +83,14 @@ describe('AzureAdapter', () => {
         ]);
     });
 
-    it('fails a phase with no mapped state for good, naming the command that fixes it', async () => {
+    it('fails a phase with no mapped state for good, naming the commands that fix it', async () => {
         const az = fakeAz();
         const error = await adapter(az.run, { planned: 'New' }).syncState({ remoteId: '42', state: 'New', labels: [] }, { title: 'x', phase: 'in_review' })
             .catch((e: unknown) => e) as PermanentError;
         expect(error).toBeInstanceOf(PermanentError);
         expect(error.message).toContain('ghostpm config set phase_state_map in_review=');
+        // Init fills the phases a saved map leaves out from the project's own states.
+        expect(error.message).toContain('`ghostpm init`');
         expect(az.calls).toEqual([]);
     });
 

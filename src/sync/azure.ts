@@ -78,8 +78,10 @@ const azNotFound = (project: string, advice: Advice): string => (advice.workItem
     : `Azure DevOps does not know project "${project}" or work item type "${advice.workItemType}". Check the remote and run: `
         + `ghostpm config set ado_work_item_type <Type> --workspace <repo folder>, then \`${advice.retry}\`.`);
 const azRefused = (detail: string, retry: string): string => `GhostPM will not run az this way (${detail}). Fix that, then run \`${retry}\`.`;
+/** Init fills the phases a saved phase_state_map leaves out from the project's own states. */
 const noState = (phase: Phase): string =>
-    `No Azure DevOps state is set for phase ${phase}. Run: ghostpm config set phase_state_map ${phase}=<State> --workspace <repo folder>`;
+    `No Azure DevOps state is set for phase ${phase}. Run \`ghostpm init\` in the repo folder to fill it from the project's states, `
+    + `or set one: ghostpm config set phase_state_map ${phase}=<State> --workspace <repo folder>`;
 
 interface AzWorkItem {
     id: number;
