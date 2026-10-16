@@ -143,7 +143,7 @@ export function startLive(options: LiveOptions): LiveHandle {
 }
 
 /**
- * Reads keys in raw mode so the console reports resizes, and calls onStop for Ctrl+C or q.
+ * Reads keys in raw mode so the console reports resizes, and calls onStop for Ctrl+C or a lone q.
  * Returns the undo: it restores the previous raw mode and releases stdin so the process can exit.
  * Does nothing (and returns a no-op) when input is not a terminal.
  */
@@ -152,7 +152,8 @@ function captureKeys(input: KeyInput | undefined, onStop: () => void): () => voi
     const wasRaw = input.isRaw === true;
     const onData = (chunk?: Buffer | string): void => {
         const text = String(chunk ?? '');
-        if (text.includes(CTRL_C) || QUIT_KEYS.some(key => text.includes(key))) onStop();
+        // q only as a chunk of its own, a keypress: pasted text arrives as one chunk and may contain a q.
+        if (text.includes(CTRL_C) || QUIT_KEYS.includes(text)) onStop();
     };
     const onGone = (): void => onStop();
     try {

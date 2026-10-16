@@ -303,7 +303,7 @@ describe('runDashboard', () => {
     describe('keys', () => {
         const CTRL_C = '\u0003';
 
-        it.each([[CTRL_C], ['q'], ['Q'], [Buffer.from([3])]])('restores the terminal and the input on key %j', async key => {
+        it.each([[CTRL_C], ['q'], ['Q'], [Buffer.from([3])], [`pasted${CTRL_C}`]])('restores the terminal and the input on key %j', async key => {
             const { screen, writes } = fakeScreen();
             const { input, calls, emitter } = fakeInput();
             const run = runDashboard(ledger.db, screen, { once: false }, input);
@@ -316,13 +316,14 @@ describe('runDashboard', () => {
             expect(emitter.listenerCount('data')).toBe(0);
         });
 
-        it('ignores other keys', async () => {
+        it('ignores other keys, and pasted text that merely contains q', async () => {
             const { screen, writes } = fakeScreen();
-            const { input, emitter } = fakeInput();
+            const { input, calls, emitter } = fakeInput();
             const run = runDashboard(ledger.db, screen, { once: false }, input);
             const count = writes.length;
-            emitter.emit('data', 'x');
+            ['x', 'quit', 'Quit', 'qq', ' q'].forEach(chunk => emitter.emit('data', chunk));
             expect(writes).toHaveLength(count);
+            expect(calls).toEqual(['raw:true', 'resume']);
             process.emit('SIGINT', 'SIGINT');
             await run;
         });
