@@ -28,6 +28,8 @@ npm install -g ghostpm
 
 A plugin cannot add commands to your terminal, so `ghostpm dashboard` and the other commands come from this package. Without it, ask Claude Code to "show the GhostPM dashboard": the same view comes back through the plugin.
 
+npm 12 blocks dependency install scripts by default, as does any install with scripts disabled, so the SQLite addon is not built. Run `ghostpm bootstrap` once after installing.
+
 ## What it does
 
 - **Captures work.** When a prompt starts real work, Claude creates a task or attaches to one (`track_work`). Edits, commits and PRs are recorded as evidence and move the phase: brainstorming, planned, in_progress, in_review, done (or dropped).
