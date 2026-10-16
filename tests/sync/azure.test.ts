@@ -501,6 +501,13 @@ describe('phaseStateMapFromCategories', () => {
         });
         // Only Active seen in use: in_progress keeps it, and in_review still gets a state of its own.
         expect(phaseStateMapFromCategories(REAL_TASK_STATES.CMMI, ['Active'])).toMatchObject({ in_progress: 'Active', in_review: 'Resolved' });
+        // Only Resolved seen (seen live): a state in use must not pull in_progress past Active.
+        expect(phaseStateMapFromCategories(REAL_TASK_STATES.CMMI, ['Resolved'])).toMatchObject({ in_progress: 'Active', in_review: 'Resolved' });
+    });
+
+    it('keeps workflow order in a category another phase falls back to, whatever was seen', () => {
+        const completed = [state('New', 'Proposed'), state('Done', 'Completed'), state("Won't Fix", 'Completed')];
+        expect(phaseStateMapFromCategories(completed, ["won't fix"])).toMatchObject({ done: 'Done', dropped: "Won't Fix" });
     });
 
     it('leaves a phase out when neither its category nor its fallback exists, and ignores unknown categories', () => {

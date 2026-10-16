@@ -117,11 +117,14 @@ const PHASE_CATEGORIES: { [phase in Phase]: string[] } = {
 /** Which phase a remote move to a state shared by several phases means (brainstorming only when nothing else maps to it). */
 const SHARED_STATE_PREFERENCE: readonly Phase[] = ['planned', 'in_progress', 'in_review', 'done', 'dropped', 'brainstorming'];
 
+/** Categories a phase falls back to: shared by two phases in workflow order (CMMI's Task: Active, then Resolved). */
+const FALLBACK_CATEGORIES = new Set(PHASES.flatMap(phase => PHASE_CATEGORIES[phase].slice(1)));
+
 /**
  * Each phase takes a state of its first available category. Of several in one category, one already `seen` in use
- * wins, else the first the API lists (its workflow order). A fallback category offers first the states no earlier
- * phase took (CMMI's Task lists Resolved as InProgress, after Active). A phase with no category stays out; unknown
- * categories are ignored.
+ * wins, else the first the API lists (its workflow order). In a category another phase falls back to, workflow order
+ * alone decides, and the fallback takes a state no earlier phase took when there is one (CMMI's Task lists Resolved as
+ * InProgress, after Active). A phase with no category stays out; unknown categories are ignored.
  */
 export function phaseStateMapFromCategories(states: readonly AzureTypeState[], seen: readonly string[] = []): PhaseStateMap {
     const used = seen.map(state => state.toLowerCase());
@@ -131,7 +134,8 @@ export function phaseStateMapFromCategories(states: readonly AzureTypeState[], s
             const all = states.filter(state => state.category === category);
             const untaken = all.filter(state => !Object.values(map).includes(state.name));
             const inCategory = rank > 0 && untaken.length > 0 ? untaken : all;
-            const pick = inCategory.find(state => used.includes(state.name.toLowerCase())) ?? inCategory[0];
+            const pick = (FALLBACK_CATEGORIES.has(category) ? undefined : inCategory.find(state => used.includes(state.name.toLowerCase())))
+                ?? inCategory[0];
             if (pick !== undefined) {
                 map[phase] = pick.name;
                 break;
