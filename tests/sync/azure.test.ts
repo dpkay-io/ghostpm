@@ -467,25 +467,40 @@ describe('phaseStateMapFromCategories', () => {
         });
     });
 
-    it('maps a Scrum type, which has no Resolved: in_review shares in_progress', () => {
-        const scrum = [state('New', 'Proposed'), state('Approved', 'Proposed'), state('Committed', 'InProgress'), state('Done', 'Completed'), state('Removed', 'Removed')];
-        expect(phaseStateMapFromCategories(scrum)).toEqual({
-            brainstorming: 'New', planned: 'New', in_progress: 'Committed', in_review: 'Committed', done: 'Done', dropped: 'Removed',
+    // The `value` of workItemTypeStates for type Task in a new project of each stock process (dev.azure.com, api-version 7.1, 2026-10-16).
+    const REAL_TASK_STATES = {
+        Scrum: [
+            { category: 'Proposed', color: 'b2b2b2', name: 'To Do' }, { category: 'InProgress', color: '007acc', name: 'In Progress' },
+            { category: 'Completed', color: '339933', name: 'Done' }, { category: 'Removed', color: 'ffffff', name: 'Removed' },
+        ],
+        Basic: [
+            { category: 'Proposed', color: 'b2b2b2', name: 'To Do' }, { category: 'InProgress', color: '007acc', name: 'Doing' },
+            { category: 'Completed', color: '339933', name: 'Done' },
+        ],
+        CMMI: [
+            { category: 'Proposed', color: 'b2b2b2', name: 'Proposed' }, { category: 'InProgress', color: '007acc', name: 'Active' },
+            { category: 'InProgress', color: '007acc', name: 'Resolved' }, { category: 'Completed', color: '339933', name: 'Closed' },
+        ],
+    };
+
+    it("maps Scrum's Task, which has no Resolved: in_review shares in_progress", () => {
+        expect(phaseStateMapFromCategories(REAL_TASK_STATES.Scrum)).toEqual({
+            brainstorming: 'To Do', planned: 'To Do', in_progress: 'In Progress', in_review: 'In Progress', done: 'Done', dropped: 'Removed',
         });
     });
 
-    it('maps a Basic type, which has no Removed: dropped shares done', () => {
-        const basic = [state('To Do', 'Proposed'), state('Doing', 'InProgress'), state('Done', 'Completed')];
-        expect(phaseStateMapFromCategories(basic)).toEqual({
+    it("maps Basic's Task, which has no Removed: dropped shares done", () => {
+        expect(phaseStateMapFromCategories(REAL_TASK_STATES.Basic)).toEqual({
             brainstorming: 'To Do', planned: 'To Do', in_progress: 'Doing', in_review: 'Doing', done: 'Done', dropped: 'Done',
         });
     });
 
-    it('maps a CMMI-like type', () => {
-        const cmmi = [state('Proposed', 'Proposed'), state('Active', 'InProgress'), state('Resolved', 'Resolved'), state('Closed', 'Completed')];
-        expect(phaseStateMapFromCategories(cmmi)).toEqual({
+    it("maps CMMI's Task, whose Resolved is an InProgress state: in_review takes the one in_progress did not", () => {
+        expect(phaseStateMapFromCategories(REAL_TASK_STATES.CMMI)).toEqual({
             brainstorming: 'Proposed', planned: 'Proposed', in_progress: 'Active', in_review: 'Resolved', done: 'Closed', dropped: 'Closed',
         });
+        // Only Active seen in use: in_progress keeps it, and in_review still gets a state of its own.
+        expect(phaseStateMapFromCategories(REAL_TASK_STATES.CMMI, ['Active'])).toMatchObject({ in_progress: 'Active', in_review: 'Resolved' });
     });
 
     it('leaves a phase out when neither its category nor its fallback exists, and ignores unknown categories', () => {

@@ -119,14 +119,18 @@ const SHARED_STATE_PREFERENCE: readonly Phase[] = ['planned', 'in_progress', 'in
 
 /**
  * Each phase takes a state of its first available category. Of several in one category, one already `seen` in use
- * wins, else the first the API lists (its workflow order). A phase with no category stays out; unknown categories are ignored.
+ * wins, else the first the API lists (its workflow order). A fallback category offers first the states no earlier
+ * phase took (CMMI's Task lists Resolved as InProgress, after Active). A phase with no category stays out; unknown
+ * categories are ignored.
  */
 export function phaseStateMapFromCategories(states: readonly AzureTypeState[], seen: readonly string[] = []): PhaseStateMap {
     const used = seen.map(state => state.toLowerCase());
     const map: PhaseStateMap = {};
     for (const phase of PHASES) {
-        for (const category of PHASE_CATEGORIES[phase]) {
-            const inCategory = states.filter(state => state.category === category);
+        for (const [rank, category] of PHASE_CATEGORIES[phase].entries()) {
+            const all = states.filter(state => state.category === category);
+            const untaken = all.filter(state => !Object.values(map).includes(state.name));
+            const inCategory = rank > 0 && untaken.length > 0 ? untaken : all;
             const pick = inCategory.find(state => used.includes(state.name.toLowerCase())) ?? inCategory[0];
             if (pick !== undefined) {
                 map[phase] = pick.name;
