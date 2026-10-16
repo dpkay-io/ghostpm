@@ -1,5 +1,6 @@
 import * as path from 'path';
 import { bootstrappedBindingPath, isMissingBinding, BINDING_DIR, BINDING_FILE } from '../../src/ledger/binding';
+import { BOOTSTRAP_FIX, MISSING_BINDING_HELP } from '../../src/ledger/db';
 
 /**
  * The native addon is the one dependency a plugin install cannot provide: Claude Code
@@ -26,6 +27,14 @@ describe('native binding', () => {
         const real = new Error('Could not locate the bindings file. Tried:\n → /x/better_sqlite3.node');
 
         expect(isMissingBinding(real)).toBe(true);
+    });
+
+    it('names both ways an install ends up without the addon, and the one fix', () => {
+        // npm 12 blocks dependency install scripts by default, with no --ignore-scripts involved:
+        // a message that blamed only the plugin install would send those users the wrong way.
+        expect(MISSING_BINDING_HELP).toMatch(/--ignore-scripts/);
+        expect(MISSING_BINDING_HELP).toMatch(/npm 12|blocks? .*install scripts/i);
+        expect(MISSING_BINDING_HELP).toContain(`\`${BOOTSTRAP_FIX}\``);
     });
 
     it('does not mistake an unrelated failure for a missing addon', () => {

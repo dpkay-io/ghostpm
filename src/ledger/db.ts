@@ -194,7 +194,8 @@ export const BOOTSTRAP_FIX = 'ghostpm bootstrap';
  */
 export const MISSING_BINDING_HELP =
     'GhostPM cannot load SQLite: its native addon was never compiled. A Claude Code plugin '
-    + 'install runs `npm ci --ignore-scripts`, which skips the step that builds it. '
+    + 'install runs `npm ci --ignore-scripts`, and npm 12 blocks dependency install scripts by default; '
+    + 'either way the step that builds it was skipped. '
     + `Run \`${BOOTSTRAP_FIX}\` to build it into the ghostpm home.`;
 
 /** Falls back to a bootstrapped addon before giving up, so one build survives every update. */
