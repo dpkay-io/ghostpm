@@ -75,6 +75,43 @@ describe('bootstrap', () => {
         calls[0].args.forEach(arg => expect(arg).toMatch(SAFE_NPM_ARG));
     });
 
+    it('lets npm 12 run better-sqlite3\'s install script, and only that exact version\'s: a pinned allowScripts entry in the build folder\'s own package.json', () => {
+        const manifests: unknown[] = [];
+        const record = fakeNpm([]);
+
+        bootstrapBinding((args, cwd) => {
+            manifests.push(JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8')));
+            record(args, cwd);
+        }, home);
+
+        expect(manifests).toEqual([{ private: true, allowScripts: { [`better-sqlite3@${INSTALLED}`]: true } }]);
+    });
+
+    it('replaces a package.json an earlier build left, so its approval always names the version being built', () => {
+        const manifest = path.join(home, BUILD_DIR, 'package.json');
+        fs.mkdirSync(path.dirname(manifest), { recursive: true });
+        fs.writeFileSync(manifest, JSON.stringify({ dependencies: { 'better-sqlite3': '^12.0.0' }, allowScripts: { 'better-sqlite3@12.0.0': true } }));
+        const seen: string[] = [];
+        const record = fakeNpm([]);
+
+        bootstrapBinding((args, cwd) => {
+            seen.push(fs.readFileSync(manifest, 'utf8'));
+            record(args, cwd);
+        }, home);
+
+        expect(JSON.parse(seen[0])).toEqual({ private: true, allowScripts: { [`better-sqlite3@${INSTALLED}`]: true } });
+    });
+
+    it('writes nothing outside the ghostpm home', () => {
+        bootstrapBinding(fakeNpm([]), home);
+
+        const written = (fs.readdirSync(root, { recursive: true }) as string[])
+            .map(entry => path.join(root, entry))
+            .filter(entry => fs.statSync(entry).isFile());
+        expect(written.length).toBeGreaterThan(0);
+        written.forEach(file => expect(file.startsWith(home + path.sep)).toBe(true));
+    });
+
     it('refuses to hand a shell anything it would reinterpret', () => {
         expect(() => assertSafeNpmArgs(['install', 'x & calc'])).toThrow('Refusing');
         expect(() => assertSafeNpmArgs(['--prefix', 'C:\\Users\\A B'])).toThrow('Refusing');

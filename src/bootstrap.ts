@@ -11,6 +11,7 @@ const NPM = 'npm';
 export const BUILD_DIR = 'native-build';
 const BUILT_ADDON = path.join('node_modules', PACKAGE, 'build', 'Release', BINDING_FILE);
 const EXACT_VERSION = /^\d+\.\d+\.\d+$/;
+const MANIFEST = 'package.json';
 /** cmd.exe cannot start in a UNC folder: it falls back to the Windows folder, where `--prefix .` would then point. */
 const UNC_PREFIX = '\\\\';
 /**
@@ -37,6 +38,15 @@ export function installedAddonVersion(): string {
  */
 export function npmInstallArgs(version: string): string[] {
     return ['install', `${PACKAGE}@${version}`, '--prefix', '.', '--no-audit', '--no-fund'];
+}
+
+/**
+ * The build folder's own package.json. npm 12 blocks dependency install scripts unless `allowScripts` approves them, and
+ * rejects `--allow-scripts` in a project install (EALLOWSCRIPTS); this pinned entry approves exactly the version being
+ * built and nothing else. npm 10 and 11 ignore the field. Rewritten on every build, so a stale pin never lingers.
+ */
+function buildManifest(version: string): object {
+    return { private: true, allowScripts: { [`${PACKAGE}@${version}`]: true } };
 }
 
 export function assertSafeNpmArgs(args: string[]): void {
@@ -81,6 +91,7 @@ export function bootstrapBinding(run: NpmRunner = runNpm, home: string = getGhos
     }
     const version = installedAddonVersion();
     fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, MANIFEST), JSON.stringify(buildManifest(version)));
     try {
         run(npmInstallArgs(version), buildDir);
     } catch (error) {
