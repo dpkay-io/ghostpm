@@ -38,7 +38,8 @@ const WIQL_QUOTE = /'/g;
 const WIQL_ESCAPED_QUOTE = "''";
 /** Verified with az 2.85 while logged out: "...you need to run the login command(az login if using AAD/MSA identity else az devops login ...". */
 const LOGGED_OUT = /az login|az devops login/i;
-const GONE = /TF401232|does not exist/i;
+/** Verified with az 2.85: a work item answers TF401232 ("... does not exist"), a pull request TF401180 ("... was not found"). */
+const GONE = /TF401232|TF401180|does not exist/i;
 /** Expired or missing credentials, or a sign-in only a person can complete. */
 const NOT_AUTHENTICATED = /HTTP 401|HTTP 403|TF400813|AADSTS|Interactive authentication is needed/i;
 const PULL_REQUEST_ID = /\/pullrequest\/(\d+)/i;

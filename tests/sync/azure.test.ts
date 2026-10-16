@@ -236,7 +236,8 @@ describe('AzureAdapter', () => {
     });
 
     it('answers a pull request Azure DevOps no longer has as gone (F5)', async () => {
-        const az = fakeAz({ 'repos pr': azFailure('ERROR: The pull request 12 does not exist.') });
+        // az 2.85's stderr for `az repos pr show --id 999999` on dev.azure.com (2026-10-16).
+        const az = fakeAz({ 'repos pr': azFailure('ERROR: TF401180: The requested pull request was not found.') });
         await expect(adapter(az.run).mergedAt(`${ORG}/Widgets/_git/web/pullrequest/12`)).rejects.toBeInstanceOf(GoneError);
     });
 
