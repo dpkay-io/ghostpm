@@ -185,6 +185,9 @@ export function migrate(db: Ledger, targetVersion: number = SCHEMA_VERSION): voi
     while (write(db, applyNext)) { /* one schema version per transaction */ }
 }
 
+/** The command that builds the addon into the ghostpm home. */
+export const BOOTSTRAP_FIX = 'ghostpm bootstrap';
+
 /**
  * Carries the fix in the message on purpose. Hooks swallow their errors so a session is
  * never blocked, which means this text is often the only trace a user will ever see.
@@ -192,7 +195,7 @@ export function migrate(db: Ledger, targetVersion: number = SCHEMA_VERSION): voi
 export const MISSING_BINDING_HELP =
     'GhostPM cannot load SQLite: its native addon was never compiled. A Claude Code plugin '
     + 'install runs `npm ci --ignore-scripts`, which skips the step that builds it. '
-    + 'Run `ghostpm bootstrap` to build it into the ghostpm home.';
+    + `Run \`${BOOTSTRAP_FIX}\` to build it into the ghostpm home.`;
 
 /** Falls back to a bootstrapped addon before giving up, so one build survives every update. */
 function openDatabase(filePath: string, options: Database.Options = {}): Ledger {
@@ -203,6 +206,16 @@ function openDatabase(filePath: string, options: Database.Options = {}): Ledger 
         const bootstrapped = bootstrappedBindingPath();
         if (!fs.existsSync(bootstrapped)) throw new Error(MISSING_BINDING_HELP);
         return new Database(filePath, { ...options, nativeBinding: bootstrapped });
+    }
+}
+
+/** True only when neither this copy's addon nor a bootstrapped one loads. In memory: touches no file. */
+export function sqliteAddonMissing(): boolean {
+    try {
+        openDatabase(':memory:').close();
+        return false;
+    } catch (error) {
+        return error instanceof Error && error.message === MISSING_BINDING_HELP;
     }
 }
 

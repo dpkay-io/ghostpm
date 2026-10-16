@@ -2,7 +2,9 @@
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Ledger, SCHEMA_VERSION, openLedgerReadOnly, schemaVersion } from './ledger/db';
+import {
+    BOOTSTRAP_FIX, Ledger, MISSING_BINDING_HELP, SCHEMA_VERSION, openLedgerReadOnly, schemaVersion, sqliteAddonMissing,
+} from './ledger/db';
 import { claudeConfigPath } from './ledger/legacy-import';
 import { normalizePath } from './ledger/workspaces';
 import { PLUGIN_ID } from './help';
@@ -18,6 +20,7 @@ export const FINDING_CLAUDE_JSON_REGISTRATION = 'claude_json_registration';
 export const FINDING_STALE_SKILL = 'stale_skill';
 export const FINDING_NEWER_LEDGER = 'ledger_newer_than_build';
 export const FINDING_NODE_TOO_OLD = 'node_too_old';
+export const FINDING_SQLITE_MISSING = 'sqlite_addon_missing';
 
 /** Tools GhostPM 1.4.0 exposed that 2.0 removed (spec D10). A skill naming them predates the ledger. */
 export const REMOVED_TOOLS = ['start_task', 'resolve_conflict'];
@@ -65,6 +68,8 @@ export interface DiagnosisProbe {
     platform: string;
     /** The running Node.js, as process.versions.node gives it. */
     nodeVersion: string;
+    /** No SQLite addon loads: npm skipped the install script that builds it and nobody bootstrapped one. */
+    sqliteMissing: boolean;
 }
 
 interface Settings {
@@ -214,6 +219,7 @@ export function diagnose(probe: DiagnosisProbe): Finding[] {
     const findings: Finding[] = [];
     const old = nodeTooOld(probe);
     if (old !== null) findings.push(old);
+    if (probe.sqliteMissing) findings.push({ code: FINDING_SQLITE_MISSING, message: MISSING_BINDING_HELP, fix: BOOTSTRAP_FIX });
     const stale = staleRegistration(readSettings(probe.settingsPath), probe);
     if (stale !== null) findings.push(stale);
     findings.push(...claudeJsonRegistrations(parseClaudeJson(probe.claudeJson), probe.platform));
@@ -294,5 +300,7 @@ export function machineProbe(): DiagnosisProbe {
         version: packageVersion(),
         platform: process.platform,
         nodeVersion: process.versions.node,
+        // Its own probe: with no ledger yet (a fresh install, the usual case) ledgerFacts never loads the addon.
+        sqliteMissing: sqliteAddonMissing(),
     };
 }

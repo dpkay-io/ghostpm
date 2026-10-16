@@ -7,7 +7,8 @@ import { removeTempDir } from './temp-dir';
 import { systemTool } from '../src/cli';
 import {
     diagnose, DiagnosisProbe, FINDING_STALE_REGISTRATION, FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL,
-    FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, removeDirCommand, skillCandidates,
+    FINDING_NEWER_LEDGER, FINDING_NODE_TOO_OLD, FINDING_SQLITE_MISSING, MCP_SERVER_KEY, REMOVED_TOOLS, machineProbe, removeDirCommand,
+    skillCandidates,
 } from '../src/doctor';
 import { changeDirCommand, quoteForShell } from '../src/shell-quote';
 import { POWERSHELL, runPowerShell } from './powershell';
@@ -15,7 +16,7 @@ import { PLUGIN_ID } from '../src/help';
 import { userSettingsPath } from '../src/plugin-setup';
 import { minimumNodeMajor, packageVersion } from '../src/package-info';
 import Database from 'better-sqlite3';
-import { SCHEMA_VERSION, ledgerPath } from '../src/ledger/db';
+import { BOOTSTRAP_FIX, MISSING_BINDING_HELP, SCHEMA_VERSION, ledgerPath } from '../src/ledger/db';
 import { homeDir } from '../src/registry';
 import { isolateHomes } from './ledger/helpers';
 
@@ -41,6 +42,7 @@ describe('diagnose', () => {
         version: '2.0.0',
         platform: 'win32',
         nodeVersion: SUPPORTED_NODE,
+        sqliteMissing: false,
         ...over,
     });
 
@@ -229,6 +231,7 @@ describe('diagnose', () => {
                 fs.writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: MCP_SERVER_KEY }));
                 const found = machineProbe();
                 expect(found.ledgerSchema).toBeNull();
+                expect(found.sqliteMissing).toBe(false);
                 expect(found.nodeVersion).toBe(process.versions.node);
                 expect(found.skills.map(skill => skill.skillMd)).toEqual([path.join(dir, 'SKILL.md')]);
                 expect(diagnose(onSupportedNode(found)).map(finding => finding.code)).toEqual([FINDING_CLAUDE_JSON_REGISTRATION, FINDING_STALE_SKILL]);
@@ -359,6 +362,46 @@ describe('diagnose', () => {
             });
             expect(found.ledgerSchema).toBe(SCHEMA_VERSION + 1);
             expect(diagnose(onSupportedNode(found)).map(finding => finding.code)).toEqual([FINDING_NEWER_LEDGER]);
+        });
+    });
+
+    describe('a SQLite addon that was never compiled', () => {
+        it('reports the same text the hooks log, with bootstrap as the fix', () => {
+            const found = diagnose(probe({ sqliteMissing: true }));
+            expect(found).toEqual([{ code: FINDING_SQLITE_MISSING, message: MISSING_BINDING_HELP, fix: BOOTSTRAP_FIX }]);
+            expect(BOOTSTRAP_FIX).toBe('ghostpm bootstrap');
+        });
+
+        it('stays quiet when the addon loads', () => {
+            expect(diagnose(probe({ sqliteMissing: false }))).toEqual([]);
+        });
+
+        it('finds it on the real machine path, with or without a ledger, and neither throws nor creates anything', () => {
+            const restore = isolateHomes(home);
+            const previous = process.env.GHOSTPM_HOME;
+            const ghostpmHome = path.join(home, '.ghostpm');
+            process.env.GHOSTPM_HOME = ghostpmHome;
+            try {
+                jest.isolateModules(() => {
+                    // What `bindings` throws when npm skipped the install script that builds the addon.
+                    jest.doMock('better-sqlite3', () => function Missing(): never {
+                        throw new Error('Could not locate the bindings file. Tried:\n → /x/build/Release/better_sqlite3.node');
+                    });
+                    const doctor = require('../src/doctor') as typeof import('../src/doctor');
+                    const noLedger = doctor.machineProbe();
+                    expect(noLedger.sqliteMissing).toBe(true);
+                    expect(doctor.diagnose(onSupportedNode(noLedger)).map(finding => finding.code)).toEqual([FINDING_SQLITE_MISSING]);
+                    expect(fs.existsSync(ghostpmHome)).toBe(false);
+
+                    fs.mkdirSync(ghostpmHome, { recursive: true });
+                    fs.writeFileSync(ledgerPath(), 'a ledger an earlier build wrote');
+                    expect(doctor.machineProbe().sqliteMissing).toBe(true);
+                });
+            } finally {
+                jest.dontMock('better-sqlite3');
+                if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
+                restore();
+            }
         });
     });
 
