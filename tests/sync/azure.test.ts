@@ -91,6 +91,8 @@ describe('AzureAdapter', () => {
         expect(error.message).toContain('ghostpm config set phase_state_map in_review=');
         // Init fills the phases a saved map leaves out from the project's own states.
         expect(error.message).toContain('`ghostpm init`');
+        // A sync run by hand retries the failed push (seen live).
+        expect(error.message).toContain('then `ghostpm sync`');
         expect(az.calls).toEqual([]);
     });
 
