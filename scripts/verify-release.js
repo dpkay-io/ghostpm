@@ -127,6 +127,16 @@ function isolate(work) {
     return process.env.GHOSTPM_HOME;
 }
 
+/**
+ * Read from the tarball, not npm's version: npm 12 leaves the shrinkwrap out of every package it packs, and without it
+ * Claude Code's `npm ci` has no pinned dependencies to install. Every later check reads it, so this one stops the run.
+ */
+function shrinkwrapRefusal(shipped) {
+    if (shipped.indexOf(SHRINKWRAP) >= 0) return null;
+    return `The npm that packed this (npm -v above) left ${SHRINKWRAP} out of the tarball, as npm 12 does. `
+        + 'Pack and publish the release with npm 10 or 11; nothing else was checked.';
+}
+
 /** Relative paths with forward slashes, the way npm lists a package's files. */
 function filesUnder(dir) {
     return fs.readdirSync(dir, { recursive: true })
@@ -176,7 +186,7 @@ function stringEnv() {
     return env;
 }
 
-/** Runs every check in `work`; answers how long the dependency install took. */
+/** Runs every check in `work`; answers how long the dependency install took, or null when it stopped before installing. */
 async function verify(work) {
     const version = readJson(path.join(ROOT, MANIFEST)).version;
     const ghostpmHome = isolate(work);
@@ -184,6 +194,8 @@ async function verify(work) {
 
     // 1. Stage and pack exactly what `npm publish ./release` would upload, then unpack it the way Claude Code's cache holds it.
     const staged = stageRelease(ROOT, path.join(work, RELEASE_DIR));
+    console.log('npm -v:');
+    runNpm(['-v'], staged, NPM_PACK_TIMEOUT_MS);
     runNpm(['pack', '--pack-destination', '..', '--loglevel=warn'], staged, NPM_PACK_TIMEOUT_MS);
     const tarball = fs.readdirSync(work).find(file => file.endsWith(TARBALL_EXTENSION));
     fs.mkdirSync(path.join(work, EXTRACT_DIR));
@@ -191,6 +203,11 @@ async function verify(work) {
     execFileSync('tar', ['-xzf', tarball, '-C', EXTRACT_DIR], { cwd: work, timeout: COMMAND_TIMEOUT_MS });
     const pkg = path.join(work, EXTRACT_DIR, PACKAGE_DIR);
     const shipped = filesUnder(pkg);
+    const refusal = shrinkwrapRefusal(shipped);
+    if (refusal !== null) {
+        check(refusal, false);
+        return null;
+    }
     const manifest = readJson(path.join(pkg, MANIFEST));
     PLUGIN_COMPONENTS.forEach(file => check(`tarball contains ${file}`, shipped.indexOf(file) >= 0));
     manifest.files.forEach(entry => check(`tarball contains files entry ${entry}`, shipped.some(file => file === entry || file.indexOf(`${entry}/`) === 0)));
@@ -309,11 +326,12 @@ async function main() {
     console.log(`\nAll ${results.length} checks passed. The dependency install took ${installMs} ms.`);
 }
 
-module.exports = { stopLeftovers };
+module.exports = { stopLeftovers, shrinkwrapRefusal, main };
 
 if (require.main === module) {
     main().catch(error => {
-        console.error(error);
+        // The message names the step that failed; a stack trace through this script only hides it.
+        console.error(`verify-release stopped: ${error && error.message ? error.message : error}`);
         process.exitCode = 1;
     });
 }
