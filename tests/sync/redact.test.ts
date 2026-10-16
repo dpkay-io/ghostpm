@@ -5,6 +5,9 @@ const ADO_PAT_52 = Array.from({ length: 52 }, (_, i) => BASE32[(i * 7) % BASE32.
 /** The 84-character Azure DevOps PAT shape: `AZDO` at 76-79 (per Microsoft's announcement; unverified against a real PAT). */
 const ADO_PAT_84 = `${'A'.repeat(52)}${'b'.repeat(24)}AZDO${'c'.repeat(4)}`;
 const GITHUB_TOKEN = `ghp_${'a1'.repeat(18)}`;
+/** Built from parts so no scanner mistakes these fixtures for real Slack tokens in the source. */
+const SLACK_BOT_TOKEN = `xox${'b'}-1234567890-abcdefghij`;
+const SLACK_REFRESH_TOKEN = `xox${'e'}-1-abcdefghijklmnop`;
 /** The recursive re-scan threw RangeError from about 2,000 links in a chain (measured). */
 const DEEP_CHAIN = 5000;
 const HOSTILE_BYTES = 1 << 18;
@@ -65,8 +68,8 @@ describe('redactSecrets (spec §8.9)', () => {
         ['fine-grained GitHub token', `github_pat_${'A'.repeat(22)}_${'b'.repeat(59)}`, `github_pat_${'A'.repeat(22)}`],
         ['AWS access key id', 'key AKIAIOSFODNN7EXAMPLE here', 'AKIAIOSFODNN7EXAMPLE'],
         ['AWS temporary access key id', 'ASIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE'],
-        ['Slack token', 'xoxb-1234567890-abcdefghij', 'xoxb-1234567890'],
-        ['Slack refresh token', 'xoxe-1-abcdefghijklmnop', 'xoxe-1-abcdefghijklmnop'],
+        ['Slack token', SLACK_BOT_TOKEN, 'xox' + 'b-1234567890'],
+        ['Slack refresh token', SLACK_REFRESH_TOKEN, SLACK_REFRESH_TOKEN],
         ['API key', `sk-ant-api03-${'x'.repeat(40)}`, `sk-ant-api03-${'x'.repeat(40)}`],
         ['Google API key', `AIza${'B'.repeat(35)}`, `AIza${'B'.repeat(35)}`],
         ['Azure DevOps PAT (52)', `pat ${ADO_PAT_52}`, ADO_PAT_52],
@@ -116,7 +119,7 @@ describe('redactSecrets (spec §8.9)', () => {
     it.each([
         ['a JWT later in the same query value', `https://x.test/login?password=Hunter2Hunter2x&jwt=${JWT}`, `https://x.test/login?password=${REDACTED}`],
         ['an AWS key after a comma', 'password=Hunter2Hunter2x,AKIAIOSFODNN7EXAMPLE', `password=${REDACTED}`],
-        ['a Slack token after a semicolon, in prose form', 'password: Hunter2Hunter2x1;xoxb-1234567890-abcdefghij', `password: ${REDACTED}`],
+        ['a Slack token after a semicolon, in prose form', `password: Hunter2Hunter2x1;${SLACK_BOT_TOKEN}`, `password: ${REDACTED}`],
         ['a GitHub token in the same quoted value', `password="Hunter2Hunter2x ${GITHUB_TOKEN}"`, `password="${REDACTED}"`],
     ])('never lets a token redaction shield the secret beside it: %s', (_kind, text, redacted) => {
         expect(redactSecrets(text).text).toBe(redacted);
