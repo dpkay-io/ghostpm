@@ -28,7 +28,7 @@ npm install -g ghostpm
 
 A plugin cannot add commands to your terminal, so `ghostpm dashboard` and the other commands come from this package. Without it, ask Claude Code to "show the GhostPM dashboard": the same view comes back through the plugin.
 
-npm 12 blocks dependency install scripts by default, as does any install with scripts disabled, so the SQLite addon is not built. Run `ghostpm bootstrap` once after installing.
+npm 12 blocks dependency install scripts by default, as does any install with scripts disabled, so the SQLite addon is not built. Run `ghostpm bootstrap` once after installing: it allows only better-sqlite3's install script, pinned to its exact version, in its own folder under `~/.ghostpm`.
 
 ## What it does
 
