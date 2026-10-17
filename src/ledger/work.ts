@@ -4,7 +4,7 @@ import { recordEvent } from './events';
 import { applyPhaseChange, bumpRevision, getTask, getVendorLink, insertTaskRow, resolveTaskRef, ChangeContext } from './tasks';
 import { setSessionTask } from './sessions';
 import { readSetting, SETTING_PLAN_GLOBS } from './settings';
-import { getWorkspace } from './workspaces';
+import { followLinks, getWorkspace } from './workspaces';
 import { matchesAnyGlob } from './glob';
 import { CLOSED_PHASES, INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
 import { enqueueCloseDuplicate, handOverVendorItem, projectTask } from './projection';
@@ -156,9 +156,9 @@ export interface EvidenceInput {
     prUrls: string[];
 }
 
-/** The path relative to the workspace root, or null when the file lives outside it. */
+/** The path relative to the workspace root, or null when the file lives outside it. The root is stored with links followed, so the file is too. */
 function relativeToRoot(root: string, cwd: string, file: string): string | null {
-    const relative = path.relative(root, path.resolve(cwd, file));
+    const relative = path.relative(root, followLinks(path.resolve(cwd, file)));
     const outside = relative === PARENT_SEGMENT || relative.startsWith(OUTSIDE_PREFIX) || path.isAbsolute(relative);
     return outside ? null : relative;
 }

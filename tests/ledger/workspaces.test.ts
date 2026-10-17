@@ -56,8 +56,10 @@ describe('workspaces', () => {
         });
 
         it('folds case on Windows only', () => {
-            const upper = normalizePath(root.toUpperCase());
-            const lower = normalizePath(root.toLowerCase());
+            // A folder that does not exist: on a case-insensitive disk (macOS) an existing one resolves to its one real name.
+            const missing = path.join(path.parse(root).root, 'ghostpm-no-such-folder', 'Sub');
+            const upper = normalizePath(missing.toUpperCase());
+            const lower = normalizePath(missing.toLowerCase());
             if (process.platform === 'win32') expect(upper).toBe(lower);
             else expect(upper).not.toBe(lower);
         });

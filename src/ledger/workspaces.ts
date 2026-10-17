@@ -9,7 +9,7 @@ const COMMONDIR_FILE = 'commondir';
 const FOLD_PATH_CASE = process.platform === 'win32';
 
 /** `resolved` with symlinks and junctions followed as far as it exists; a part that is gone stays as given. */
-function followLinks(resolved: string): string {
+export function followLinks(resolved: string): string {
     try {
         return fs.realpathSync.native(resolved);
     } catch {

@@ -1,6 +1,7 @@
 import { tempLedger, TempLedger, eventKinds } from './helpers';
 import { write } from '../../src/ledger/db';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
+import * as fs from 'fs';
 import * as path from 'path';
 import { createTask, getTask, updateTask } from '../../src/ledger/tasks';
 import { startSession, getSession } from '../../src/ledger/sessions';
@@ -156,6 +157,16 @@ describe('recordEvidence: which files count as phase evidence', () => {
 
     it('moves to in_progress when an outside edit comes with an in-workspace non-plan edit', () => {
         expect(record('planned', [OUTSIDE, path.join(root, 'src', 'login.ts')])).toBe('in_progress');
+    });
+
+    it('counts an edit named through a link to the workspace as inside it (macOS /var is /private/var)', () => {
+        const link = `${root}-link`;
+        fs.symlinkSync(root, link, 'junction');
+        try {
+            expect(record('planned', [path.join(link, 'src', 'login.ts')])).toBe('in_progress');
+        } finally {
+            fs.unlinkSync(link);
+        }
     });
 
     it('treats an in-root name starting with two dots as inside the workspace', () => {
