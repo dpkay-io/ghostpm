@@ -45,7 +45,7 @@ describe('GitHubAdapter', () => {
         const gh = fakeGh({ 'issue create': `https://github.com/${repo}/issues/12\n`, 'issue view': issueJson(repo) });
         const item = await new GitHubAdapter(repo, gh.run).create({ title: 'Fix a&b "q"', phase: 'planned' }, 'Tracked by GhostPM as T1.');
         expect(gh.calls).toEqual([
-            { command: 'gh', args: ['label', 'create', 'ghostpm:planned', '--repo', freeText(repo), '--force'], input: undefined },
+            { command: 'gh', args: ['label', 'create', 'ghostpm:planned', '--repo', freeText(repo)], input: undefined },
             {
                 command: 'gh',
                 args: ['issue', 'create', '--repo', freeText(repo), '--title', freeText('Fix a&b "q"'), '--label', 'ghostpm:planned', '--body-file', '-'],
@@ -57,6 +57,31 @@ describe('GitHubAdapter', () => {
             remoteId: '12', url: `https://github.com/${repo}/issues/12`, title: 'Login fix', body: 'Tracked by GhostPM as T1.',
             markers: [], state: 'open', labels: ['ghostpm:planned'], assignee: 'octocat', milestone: 'Sprint 3', updatedAt: '2026-09-20T10:00:00Z',
         });
+    });
+
+    it("never recolours a label that exists: no --force, and gh's 'already exists' answer counts as ensured", async () => {
+        // --force without --color gives the label a new random colour and clears its description on every sync process.
+        const repo = freshRepo();
+        const exists = new CliError(
+            'gh failed (exit 1): label with name "ghostpm:planned" already exists; use `--force` to update its color and description', 1,
+            'label with name "ghostpm:planned" already exists; use `--force` to update its color and description\n', false, false,
+        );
+        const gh = fakeGh({ 'label create': exists, 'issue create': `https://github.com/${repo}/issues/12\n`, 'issue view': issueJson(repo) });
+        const adapter = new GitHubAdapter(repo, gh.run);
+        await adapter.create({ title: 'One', phase: 'planned' }, 'body');
+        await adapter.create({ title: 'Two', phase: 'planned' }, 'body');
+
+        const labelCalls = gh.calls.filter(call => call.args[0] === 'label');
+        expect(labelCalls).toHaveLength(1);
+        expect(labelCalls[0].args).not.toContain('--force');
+        expect(gh.calls.filter(call => call.args[1] === 'create' && call.args[0] === 'issue')).toHaveLength(2);
+    });
+
+    it('still fails a label create that went wrong for another reason', async () => {
+        const repo = freshRepo();
+        const denied = new CliError('gh failed (exit 1): HTTP 403: Resource not accessible by integration', 1, 'HTTP 403: Resource not accessible by integration\n', false, false);
+        const gh = fakeGh({ 'label create': denied });
+        await expect(new GitHubAdapter(repo, gh.run).create({ title: 'One', phase: 'planned' }, 'body')).rejects.toThrow('HTTP 403');
     });
 
     it('creates each label once per repo', async () => {
@@ -76,7 +101,7 @@ describe('GitHubAdapter', () => {
             { title: 'Renamed', phase: 'in_progress' },
         );
         expect(gh.calls.map(call => call.args)).toEqual([
-            ['label', 'create', 'ghostpm:in_progress', '--repo', freeText(repo), '--force'],
+            ['label', 'create', 'ghostpm:in_progress', '--repo', freeText(repo)],
             ['issue', 'edit', '12', '--repo', freeText(repo), '--title', freeText('Renamed'),
                 '--remove-label', freeText('ghostpm:planned'), '--add-label', 'ghostpm:in_progress'],
             ['issue', 'view', '12', '--repo', freeText(repo), '--json', ISSUE_FIELDS],

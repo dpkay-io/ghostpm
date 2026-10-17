@@ -58,8 +58,12 @@ interface GhIssue {
     url?: string;
 }
 
-/** Created once per repo per process: `gh label create --force` before first use (spec §8.3). */
+/**
+ * Ensured once per repo per process before first use (spec §8.3). Never with --force: without --color that gives an
+ * existing label a new random colour and clears its description every time. gh refuses an existing label instead.
+ */
 const ensuredLabels = new Set<string>();
+const LABEL_EXISTS = /already exists/i;
 /** Canonical owner/name per repo (lower-cased), resolved once per process: a renamed repo's issues answer under the new name. */
 const canonicalNames = new Map<string, string>();
 
@@ -142,7 +146,12 @@ export class GitHubAdapter implements VendorAdapter {
     private async ensureLabel(label: string): Promise<void> {
         const key = `${this.repo.toLowerCase()} ${label}`;
         if (ensuredLabels.has(key)) return;
-        await this.gh(['label', 'create', label, ...this.repoArgs(), '--force']);
+        try {
+            await this.gh(['label', 'create', label, ...this.repoArgs()]);
+        } catch (error) {
+            // Already there, as someone left it: ensured. Anything else (auth, permissions) is a real failure.
+            if (!(error instanceof CliError && LABEL_EXISTS.test(error.stderr))) throw error;
+        }
         ensuredLabels.add(key);
     }
 

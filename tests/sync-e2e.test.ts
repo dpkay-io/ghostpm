@@ -163,7 +163,7 @@ describeBuilt('sync against a fake gh, end to end on the built CLI', () => {
         });
         expect(nonce).toMatch(NONCE);
         const pushed = calls();
-        expect(pushed[0]).toEqual({ args: ['label', 'create', 'ghostpm:planned', '--repo', REPO, '--force'], stdin: '' });
+        expect(pushed[0]).toEqual({ args: ['label', 'create', 'ghostpm:planned', '--repo', REPO], stdin: '' });
         expect(pushed[1]).toEqual({
             args: ['issue', 'create', '--repo', REPO, '--title', TITLE, '--label', 'ghostpm:planned', '--body-file', '-'],
             stdin: `Tracked by GhostPM as T${taskId}.\n\n<!-- ghostpm:${nonce} -->`,
