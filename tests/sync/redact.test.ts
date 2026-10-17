@@ -11,12 +11,12 @@ const SLACK_REFRESH_TOKEN = `xox${'e'}-1-abcdefghijklmnop`;
 /** The recursive re-scan threw RangeError from about 2,000 links in a chain (measured). */
 const DEEP_CHAIN = 5000;
 const HOSTILE_BYTES = 1 << 18;
-/** The large input is this many times the small one: linear scanning grows about 4x, quadratic 16x. */
-const HOSTILE_GROWTH = 4;
-/** Best of this many runs per size, so a load spike on one run does not decide the result. */
+/** The large input is this many times the small one: linear scanning grows about 8x, quadratic 64x. */
+const HOSTILE_GROWTH = 8;
+/** Best of this many runs per size, the sizes taking turns, so a load spike on one run does not decide the result. */
 const HOSTILE_RUNS = 3;
-/** Between linear (4x) and quadratic (16x), with room for timer and GC noise. */
-const HOSTILE_MAX_RATIO = 10;
+/** Near the geometric middle of linear (8x) and quadratic (64x): a busy machine measured 11x at a 4x growth. */
+const HOSTILE_MAX_RATIO = 24;
 /** Below this the large run is too quick for a ratio to mean anything. */
 const HOSTILE_NOISE_FLOOR_MS = 50;
 /** Absolute backstop, far above any linear scan even under load; the quadratic patterns took 3-44 s (measured). */
@@ -299,20 +299,20 @@ describe('redactSecrets (spec §8.9)', () => {
         expect(redactSecrets(`token=${GITHUB_TOKEN}&`.repeat(times)).count).toBe(times);
     });
 
-    it('scans hostile inputs in linear time (4x the input takes about 4x the time, not 16x; the old regexes were quadratic or threw)', () => {
-        const bestOf = (text: string): number => {
-            let best = Infinity;
-            for (let run = 0; run < HOSTILE_RUNS; run++) {
-                const started = performance.now();
-                redactSecrets(text);
-                best = Math.min(best, performance.now() - started);
-            }
-            return best;
+    it('scans hostile inputs in linear time (8x the input takes about 8x the time, not 64x; the old regexes were quadratic or threw)', () => {
+        const timed = (text: string): number => {
+            const started = performance.now();
+            redactSecrets(text);
+            return performance.now() - started;
         };
         const large = hostileInputs(HOSTILE_BYTES * HOSTILE_GROWTH);
         hostileInputs(HOSTILE_BYTES).forEach((text, index) => {
-            const smallMs = bestOf(text);
-            const largeMs = bestOf(large[index]!);
+            let smallMs = Infinity;
+            let largeMs = Infinity;
+            for (let run = 0; run < HOSTILE_RUNS; run++) {
+                smallMs = Math.min(smallMs, timed(text));
+                largeMs = Math.min(largeMs, timed(large[index]!));
+            }
             expect(largeMs).toBeLessThan(HOSTILE_BACKSTOP_MS);
             if (largeMs > HOSTILE_NOISE_FLOOR_MS) expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(HOSTILE_MAX_RATIO);
         });
