@@ -83,6 +83,14 @@ describe('sessions', () => {
             expect(currentSessionOf(ledger.db, SESSION_ID)).toBe('after-clear');
         });
 
+        it('picks the open conversation when /clear lands in the same millisecond as the one it ended', () => {
+            // Every write at one instant: last_seen_at alone ties, and SQLite may then answer either row.
+            startSession(ledger.db, input({ clientPid: CLAUDE_PID }), T0);
+            endSession(ledger.db, SESSION_ID, T0);
+            startSession(ledger.db, input({ id: 'after-clear', clientPid: CLAUDE_PID }), T0);
+            expect(currentSessionOf(ledger.db, SESSION_ID)).toBe('after-clear');
+        });
+
         it('is the session itself when no client process id is known, or the session is unknown', () => {
             startSession(ledger.db, input(), T0);
             startSession(ledger.db, input({ id: 'unrelated' }), T1);

@@ -66,13 +66,14 @@ export function seeSession(db: Ledger, session: SessionInput, at: string = nowIs
 
 /**
  * The newest session of the client process `sessionId` runs in: Claude Code keeps one process (and one MCP server)
- * across /clear, which starts a session with a new id. `sessionId` itself when no process is known.
+ * across /clear, which starts a session with a new id. An open session before an ended one, and the later of two
+ * written in the same millisecond. `sessionId` itself when no process is known.
  */
 export function currentSessionOf(db: Ledger, sessionId: string): string {
     // ponytail: no index on client_pid; the sessions table is small and this runs per MCP tool call, never in a hook.
     const row = db.prepare(`
         SELECT id FROM sessions WHERE client_pid = (SELECT client_pid FROM sessions WHERE id = ?)
-        ORDER BY last_seen_at DESC, started_at DESC LIMIT 1`).get(sessionId) as { id: string } | undefined;
+        ORDER BY ended_at IS NULL DESC, last_seen_at DESC, started_at DESC, rowid DESC LIMIT 1`).get(sessionId) as { id: string } | undefined;
     return row?.id ?? sessionId;
 }
 
