@@ -27,9 +27,13 @@ const CONTINUING_SOURCES: ReadonlySet<unknown> = new Set(['resume', 'compact']);
 const HOOK_SOURCE = `hook:${HOOK_CLIENT}`;
 /** Tools whose use means a file was changed. */
 const FILE_TOOLS: ReadonlySet<string> = new Set(['Write', 'Edit', 'NotebookEdit']);
-const BASH_TOOL = 'Bash';
-/** Word-bounded: `git status` is not a commit. */
-const GIT_COMMIT = /\bgit\s+commit\b/;
+/** Claude Code's shell tools: both take `command` and answer with the printed output as a string (observed). */
+const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'PowerShell']);
+/**
+ * Word-bounded: `git status` is not a commit. Global options may come first (`git -C <path> commit`,
+ * `git -c k=v commit`, `--git-dir=…`), each with an optional value, quoted or not, that is never `commit` itself.
+ */
+const GIT_COMMIT = /\bgit(?:\s+-[^\s=]+(?:=\S*|\s+(?!-|commit\b)(?:"[^"]*"|'[^']*'|\S+))?)*\s+commit\b/;
 const PR_CREATE = /\b(?:gh\s+pr\s+create|az\s+repos\s+pr\s+create)\b/;
 /**
  * A pull request's own URL (ruling F9): GitHub `/pull/<n>`, Azure DevOps `/pullrequest/<n>`. Not any URL: git push
@@ -123,7 +127,7 @@ function collectEvidence(payload: HookPayload): BatchEvidence {
             if (file.length > 0 && evidence.files.indexOf(file) < 0) evidence.files.push(file);
             continue;
         }
-        if (name !== BASH_TOOL) continue;
+        if (!SHELL_TOOLS.has(name)) continue;
         const command = readString(call.tool_input, 'command');
         if (GIT_COMMIT.test(command)) evidence.committed = true;
         if (!PR_CREATE.test(command)) continue;

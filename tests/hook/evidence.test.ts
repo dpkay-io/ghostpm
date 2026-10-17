@@ -73,8 +73,37 @@ describe('PostToolBatch evidence', () => {
         expect(kindsFor(active.id)).toContain('commit');
     });
 
-    it('does not treat every git command as a commit', () => {
-        batch({ tool_name: 'Bash', tool_input: { command: 'git status' } });
+    it("records a commit and a pr made through Claude Code's PowerShell tool, as through Bash", () => {
+        // The payload shape Claude Code 2.1.302 sends for its PowerShell tool (captured from a real PostToolBatch).
+        batch(
+            { tool_name: 'PowerShell', tool_input: { command: 'git commit --allow-empty -m probe' }, tool_response: '[master 1e2b438] probe' },
+            { tool_name: 'PowerShell', tool_input: { command: 'gh pr create --fill' }, tool_response: 'https://github.com/acme/app/pull/44\n' },
+        );
+
+        expect(kindsFor(active.id)).toContain('commit');
+        expect(payloadsOf(active.id, 'pr').map(pr => pr.url)).toEqual(['https://github.com/acme/app/pull/44']);
+    });
+
+    it.each([
+        'git -C "C:\\my repo" commit -m "fix upload"',
+        "git -C '/tmp/my repo' commit -m x",
+        'git -c user.name=Probe -c user.email=p@x commit --allow-empty -m probe',
+        'git --no-pager commit -m x',
+        'git --git-dir=.git --work-tree=. commit -m x',
+        'cd app && git -C . commit -am x',
+    ])('records a commit with git options before the subcommand: %s', command => {
+        batch({ tool_name: 'Bash', tool_input: { command } });
+
+        expect(kindsFor(active.id)).toContain('commit');
+    });
+
+    it.each([
+        'git status',
+        'git -C repo log --grep commit',
+        'git -c core.pager=less show HEAD',
+        'echo commit',
+    ])('does not treat every git command as a commit: %s', command => {
+        batch({ tool_name: 'Bash', tool_input: { command } });
 
         expect(kindsFor(active.id)).not.toContain('commit');
     });
