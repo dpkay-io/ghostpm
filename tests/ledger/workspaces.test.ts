@@ -34,6 +34,27 @@ describe('workspaces', () => {
             expect(normalizePath(root.split(path.sep).join('/'))).toBe(normalizePath(root));
         });
 
+        it('names a folder the same through a symlink as by its real path (macOS /var is /private/var)', () => {
+            // A hook is told the cwd by the client, the CLI reads process.cwd(), which is always the real path.
+            const real = path.join(root, 'real');
+            const link = path.join(root, 'link');
+            fs.mkdirSync(path.join(real, 'inner'), { recursive: true });
+            fs.symlinkSync(real, link, 'junction');
+
+            expect(normalizePath(link)).toBe(normalizePath(real));
+            expect(normalizePath(path.join(link, 'inner'))).toBe(normalizePath(path.join(real, 'inner')));
+            expect(ensureWorkspace(ledger.db, link).id).toBe(ensureWorkspace(ledger.db, real).id);
+        });
+
+        it('resolves the part of a path that exists when the folder itself is gone', () => {
+            const real = path.join(root, 'real');
+            const link = path.join(root, 'link');
+            fs.mkdirSync(real);
+            fs.symlinkSync(real, link, 'junction');
+
+            expect(normalizePath(path.join(link, 'deleted', 'sub'))).toBe(normalizePath(path.join(real, 'deleted', 'sub')));
+        });
+
         it('folds case on Windows only', () => {
             const upper = normalizePath(root.toUpperCase());
             const lower = normalizePath(root.toLowerCase());

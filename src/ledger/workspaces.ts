@@ -8,8 +8,22 @@ const GIT_ENTRY = '.git';
 const COMMONDIR_FILE = 'commondir';
 const FOLD_PATH_CASE = process.platform === 'win32';
 
+/** `resolved` with symlinks and junctions followed as far as it exists; a part that is gone stays as given. */
+function followLinks(resolved: string): string {
+    try {
+        return fs.realpathSync.native(resolved);
+    } catch {
+        const parent = path.dirname(resolved);
+        return parent === resolved ? resolved : path.join(followLinks(parent), path.basename(resolved));
+    }
+}
+
+/**
+ * One name per folder: a client may report a cwd through a link (macOS /var is /private/var) while the CLI's
+ * process.cwd() is always the real path, and two names would register two workspaces.
+ */
 export function normalizePath(p: string): string {
-    const resolved = path.resolve(p);
+    const resolved = followLinks(path.resolve(p));
     return FOLD_PATH_CASE ? resolved.toLowerCase() : resolved;
 }
 
