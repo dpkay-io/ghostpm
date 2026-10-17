@@ -285,7 +285,7 @@ describe('AzureAdapter', () => {
 describe('AzureAdapter retry lookups', () => {
     const marker = '<!-- ghostpm:0123456789abcdef -->';
 
-    it('finds the work item an earlier create made: exact title, created by me, recently, marker in the description', async () => {
+    it('finds the work item an earlier create made: created by me, recently, marker in the description', async () => {
         const listing = JSON.stringify([
             JSON.parse(workItem({ 'System.Description': 'Same title, someone else' }, 41)),
             JSON.parse(workItem({ 'System.Description': `Tracked by GhostPM as T1.\n\n${marker}` }, 42)),
@@ -294,10 +294,19 @@ describe('AzureAdapter retry lookups', () => {
         expect((await adapter(az.run).findCreated(marker, "Fix 'x'"))?.remoteId).toBe('42');
         const wiql = (az.calls[0].args[7] as { freeText: string }).freeText;
         expect(wiql).toContain("[System.TeamProject] = 'Widgets ''Next'''");
-        expect(wiql).toContain("[System.Title] = 'Fix ''x'''");
+        expect(wiql).not.toMatch(/\[System\.Title\] =/);
         expect(wiql).toContain('[System.CreatedBy] = @Me');
         expect(wiql).toMatch(/\[System\.CreatedDate\] >= '\d{4}-\d{2}-\d{2}'/);
         expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', "Fix 'x'")).toBeNull();
+    });
+
+    it('finds the item by its marker although a person renamed it before the retry', async () => {
+        const renamed = JSON.parse(workItem({ 'System.Title': 'Renamed by a person', 'System.Description': `Tracked.\n\n${marker}` }, 106));
+        const other = JSON.parse(workItem({ 'System.Description': 'x <!-- ghostpm:ffffffffffffffff -->' }, 107));
+        const az = fakeAz({ 'boards query': JSON.stringify([other, renamed]) });
+        expect((await adapter(az.run).findCreated(marker, 'Check2 orphan'))?.remoteId).toBe('106');
+        expect(await adapter(fakeAz({ 'boards query': JSON.stringify([other]) }).run).findCreated(marker, 'Check2 orphan')).toBeNull();
+        expect(await adapter(fakeAz({ 'boards query': '' }).run).findCreated(marker, 'Check2 orphan')).toBeNull();
     });
 
     // Verified against real az 2.85: Azure strips the comment form and rewrites `display:none` to `display:none;`.

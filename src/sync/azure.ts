@@ -343,10 +343,9 @@ export class AzureAdapter implements VendorAdapter {
         return items.map(item => this.toItem(item));
     }
 
-    /** Narrowed by exact title, creator and creation date, then confirmed by the marker in the description. */
-    async findCreated(marker: string, title: string): Promise<RemoteItem | null> {
+    /** Narrowed by creator and creation date (not title: a person may have renamed the item since), then confirmed by the marker in the description. */
+    async findCreated(marker: string, _title: string): Promise<RemoteItem | null> {
         const items = await this.query([
-            `[${FIELD.title}] = ${wiqlText(title)}`,
             `[${FIELD.createdBy}] = ${ME_MACRO}`,
             `[${FIELD.createdDate}] >= ${wiqlDateFrom(Date.now() - ADOPT_LOOKBACK_MS)}`,
         ], `[${FIELD.createdDate}] DESC`);
