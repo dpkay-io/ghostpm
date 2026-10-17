@@ -1,9 +1,9 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getWorkspaces, homeDir } from '../registry';
 import { loadConfig, McpPmConfig } from '../config';
-import { Ledger, write, nowIso } from './db';
+import { Ledger, openDatabase, write, nowIso } from './db';
 import { ensureWorkspace, findWorkspace, normalizePath, setWorkspaceVendor } from './workspaces';
 import {
     getSetting, getWorkspaceSetting, setSetting, setWorkspaceSetting, PhaseStateMap, PROGRESS_COMMENTS_NONE,
@@ -278,7 +278,7 @@ export function importLegacyWorkspace(db: Ledger, root: string): LegacyImportRes
         return { root, workspaceId: workspace.id, imported: 0, skipped: 0, queued: 0 };
     }
 
-    const legacy = new Database(legacyPath, { readonly: true, fileMustExist: true });
+    const legacy = openDatabase(legacyPath, { readonly: true, fileMustExist: true });
     let rows: LegacyTaskRow[];
     let metadata: Map<string, string>;
     let pending: LegacyOutboxRow[];

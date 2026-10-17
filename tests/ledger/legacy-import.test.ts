@@ -144,6 +144,37 @@ describe('legacy import', () => {
         expect(getWorkspaceSetting(ledger.db, result.workspaceId, SETTING_ACTIVE_SPRINT)).toBe('Sprint 1');
     });
 
+    it('reads the 1.4.0 database through the bootstrapped addon when the plugin copy has none (a plugin install)', () => {
+        seedLegacyRepo(repo);
+        const previous = process.env.GHOSTPM_HOME;
+        process.env.GHOSTPM_HOME = path.join(tmpHome, '.ghostpm');
+        try {
+            jest.isolateModules(() => {
+                // What a plugin install leaves: no addon of its own (`npm ci --ignore-scripts`), only the one
+                // `ghostpm bootstrap` built into the ghostpm home, which loads only when named as nativeBinding.
+                jest.doMock('better-sqlite3', () => {
+                    const Real = jest.requireActual('better-sqlite3');
+                    return function PluginInstall(file: string, options: { nativeBinding?: string } = {}) {
+                        if (options.nativeBinding === undefined) {
+                            throw new Error('Could not locate the bindings file. Tried:\n → /x/build/Release/better_sqlite3.node');
+                        }
+                        const { nativeBinding: _bootstrapped, ...rest } = options;
+                        return new Real(file, rest);
+                    };
+                });
+                const binding = require('../../src/ledger/binding') as typeof import('../../src/ledger/binding');
+                fs.mkdirSync(path.dirname(binding.bootstrappedBindingPath()), { recursive: true });
+                fs.writeFileSync(binding.bootstrappedBindingPath(), 'stands in for the bootstrapped addon');
+                const isolated = require('../../src/ledger/legacy-import') as typeof import('../../src/ledger/legacy-import');
+
+                expect(isolated.importLegacyWorkspace(ledger.db, repo)).toMatchObject({ imported: 2, skipped: 0 });
+            });
+        } finally {
+            jest.dontMock('better-sqlite3');
+            if (previous === undefined) delete process.env.GHOSTPM_HOME; else process.env.GHOSTPM_HOME = previous;
+        }
+    });
+
     it('skips tasks that are already imported when run again', () => {
         seedLegacyRepo(repo);
         importLegacyWorkspace(ledger.db, repo);

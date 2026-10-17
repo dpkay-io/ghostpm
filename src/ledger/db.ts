@@ -203,8 +203,11 @@ export const MISSING_BINDING_HELP =
     + 'either way the step that builds it was skipped. '
     + `Run \`${BOOTSTRAP_FIX}\` to build it into the ghostpm home.`;
 
-/** Falls back to a bootstrapped addon before giving up, so one build survives every update. */
-function openDatabase(filePath: string, options: Database.Options = {}): Ledger {
+/**
+ * Every SQLite file GhostPM opens goes through here: falls back to a bootstrapped addon before giving up, so one build
+ * survives every update (a plugin install has no addon of its own).
+ */
+export function openDatabase(filePath: string, options: Database.Options = {}): Ledger {
     try {
         return new Database(filePath, options);
     } catch (error) {
