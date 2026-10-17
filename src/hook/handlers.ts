@@ -1,7 +1,7 @@
 import { Ledger, openLedger, ledgerPath } from '../ledger/db';
 import { ensureWorkspace } from '../ledger/workspaces';
 import { getTask } from '../ledger/tasks';
-import { getSession, startSession, touchSession, endSession } from '../ledger/sessions';
+import { HOOK_CLIENT, SessionInput, getSession, startSession, touchSession, endSession } from '../ledger/sessions';
 import { activeTaskFor, currentBranch } from '../ledger/branch';
 import type * as Work from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
@@ -12,13 +12,17 @@ import { HookPayload } from './payload';
 import type * as Spawn from './spawn';
 import { logHookError } from './log';
 
-/** Distinguishes hook-captured sessions from the MCP server's own (`mcp`). */
-export const HOOK_CLIENT = 'claude-code';
+export { HOOK_CLIENT };
 
 export const SESSION_START = 'SessionStart';
 const USER_PROMPT_SUBMIT = 'UserPromptSubmit';
 const POST_TOOL_BATCH = 'PostToolBatch';
 const SESSION_END = 'SessionEnd';
+/**
+ * SessionStart sources that go on with the same conversation under the same id (observed: `claude --resume`, and
+ * /compact), so the session keeps its task. startup and clear begin afresh.
+ */
+const CONTINUING_SOURCES: ReadonlySet<unknown> = new Set(['resume', 'compact']);
 
 const HOOK_SOURCE = `hook:${HOOK_CLIENT}`;
 /** Tools whose use means a file was changed. */
@@ -57,16 +61,18 @@ function resumeLine(db: Ledger, task: TaskRow): string {
     return `Resuming ${formatTaskId(task.id)} ${task.title} · ${task.phase}${tail}`;
 }
 
+/** The session this hook reports, as every handler registers it. */
+function sessionOf(payload: HookPayload, workspace: WorkspaceRow): SessionInput {
+    return { id: payload.sessionId, client: HOOK_CLIENT, cwd: payload.cwd, workspaceId: workspace.id, clientPid: payload.clientPid };
+}
+
 function onSessionStart(db: Ledger, payload: HookPayload, options: HookOptions): string | null {
     const workspace = ensureWorkspace(db, payload.cwd);
     const transcriptPath = payload.raw.transcript_path;
-    startSession(db, {
-        id: payload.sessionId,
-        client: HOOK_CLIENT,
-        cwd: payload.cwd,
-        workspaceId: workspace.id,
-        transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null,
-    });
+    const session = { ...sessionOf(payload, workspace), transcriptPath: typeof transcriptPath === 'string' ? transcriptPath : null };
+    // Spec §5: a resumed (or compacted) conversation is the same work, so it keeps its task.
+    if (CONTINUING_SOURCES.has(payload.raw.source)) touchSession(db, session);
+    else startSession(db, session);
     try {
         startSyncIfDue(db, workspace, options);
     } catch (error) {
@@ -80,12 +86,7 @@ function onUserPromptSubmit(db: Ledger, payload: HookPayload): string | null {
     const workspace = ensureWorkspace(db, payload.cwd);
     // touchSession, not startSession: a prompt is not a new session, and restarting one
     // clears task_id, which would drop the attachment on every prompt.
-    touchSession(db, {
-        id: payload.sessionId,
-        client: HOOK_CLIENT,
-        cwd: payload.cwd,
-        workspaceId: workspace.id,
-    });
+    touchSession(db, sessionOf(payload, workspace));
 
     // "Has a task" means the session is attached to one. A task/<ref> branch is only a
     // candidate signal (spec §7.4 tier 1), not an attachment.
@@ -146,12 +147,7 @@ function onSessionEnd(db: Ledger, payload: HookPayload): string | null {
 /** Writes what the batch proves. Injects nothing: evidence is recorded, not narrated back. */
 function onPostToolBatch(db: Ledger, payload: HookPayload): string | null {
     const workspace = ensureWorkspace(db, payload.cwd);
-    touchSession(db, {
-        id: payload.sessionId,
-        client: HOOK_CLIENT,
-        cwd: payload.cwd,
-        workspaceId: workspace.id,
-    });
+    touchSession(db, sessionOf(payload, workspace));
 
     // Evidence with nothing to attach it to is noise.
     const taskId = getSession(db, payload.sessionId)?.task_id ?? null;

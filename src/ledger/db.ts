@@ -118,6 +118,11 @@ const MIGRATIONS: readonly string[] = [
     `
     CREATE INDEX events_session ON events (session_id, task_id);
     `,
+    // 5: the client process a session runs in (Claude Code's CLAUDE_PID), so the MCP server, which keeps running
+    // across /clear, finds the conversation that is current now.
+    `
+    ALTER TABLE sessions ADD COLUMN client_pid INTEGER;
+    `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -4,6 +4,7 @@ import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { STDIO_BANNER } from '../src/mcp-server';
+import { CLAUDE_SESSION_ENV } from '../src/ledger/sessions';
 import { removeTempDir } from './temp-dir';
 
 const CLI = path.join(__dirname, '..', 'dist', 'cli-main.js');
@@ -57,8 +58,11 @@ describeBuilt('ghostpm serve over stdio', () => {
             args: [CLI, 'serve'],
             cwd: workspace,
             // HOME/USERPROFILE keep the legacy import away from the real ~/.claude.json, and the temporary folder
-            // keeps the start-up sweep of argument folders away from the real one.
-            env: inheritedEnv({ GHOSTPM_HOME: home, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, TMPDIR: home }),
+            // keeps the start-up sweep of argument folders away from the real one. An empty CLAUDE_CODE_SESSION_ID: the
+            // server is a plain MCP client's here, even when these tests run inside Claude Code.
+            env: inheritedEnv({
+                GHOSTPM_HOME: home, HOME: home, USERPROFILE: home, TEMP: home, TMP: home, TMPDIR: home, [CLAUDE_SESSION_ENV]: '',
+            }),
             // The SDK's default, inherit, would print the server's stderr into the test output.
             stderr: 'pipe',
         });

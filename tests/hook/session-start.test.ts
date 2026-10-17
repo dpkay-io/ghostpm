@@ -3,7 +3,7 @@ import * as path from 'path';
 import { tempLedger, TempLedger, clonedRepo } from '../ledger/helpers';
 import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { createTask } from '../../src/ledger/tasks';
-import { getSession } from '../../src/ledger/sessions';
+import { endSession, getSession, setSessionTask } from '../../src/ledger/sessions';
 import { taskBranchName } from '../../src/ledger/branch';
 import { Phase, TaskRow } from '../../src/ledger/types';
 import { HookPayload, readPayload } from '../../src/hook/payload';
@@ -71,6 +71,37 @@ describe('SessionStart handler', () => {
         expect(text).toContain(`T${resuming.id}`);
         expect(text).toContain('Login fix');
         expect(text).toContain('in_progress');
+    });
+
+    describe('the same session id again (spec §5)', () => {
+        const sessionStartAs = (source: string): string | null =>
+            handle(readPayload(JSON.stringify({
+                hook_event_name: 'SessionStart', session_id: SESSION_ID, cwd: repo, source,
+            }), 'SessionStart'));
+
+        let attached: TaskRow;
+        beforeEach(() => {
+            attached = task('Login fix');
+            sessionStart();
+            setSessionTask(ledger.db, SESSION_ID, attached.id);
+            endSession(ledger.db, SESSION_ID);
+        });
+
+        it('keeps the task of a resumed session and says so, with no task branch to go on', () => {
+            const text = sessionStartAs('resume');
+            expect(text).toContain(`Resuming T${attached.id} Login fix`);
+            expect(getSession(ledger.db, SESSION_ID)).toMatchObject({ task_id: attached.id, ended_at: null });
+        });
+
+        it('keeps the task across /compact, which starts the same session id again', () => {
+            sessionStartAs('compact');
+            expect(getSession(ledger.db, SESSION_ID)!.task_id).toBe(attached.id);
+        });
+
+        it('starts afresh on any other start, such as a recycled id at startup', () => {
+            expect(sessionStartAs('startup')).toBeNull();
+            expect(getSession(ledger.db, SESSION_ID)!.task_id).toBeNull();
+        });
     });
 
     it('injects nothing when the branch names no task', () => {

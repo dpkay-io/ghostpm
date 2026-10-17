@@ -37,6 +37,13 @@ describe('readPayload', () => {
         expect(payload.toolCalls).toEqual([]);
     });
 
+    it("reads Claude Code's process id from CLAUDE_PID, and nothing that is not a process id", () => {
+        expect(readPayload('{}', 'SessionStart', { CLAUDE_PID: '16064' }).clientPid).toBe(16064);
+        expect(readPayload('{}', 'SessionStart', {}).clientPid).toBeNull();
+        expect(readPayload('{}', 'SessionStart', { CLAUDE_PID: '' }).clientPid).toBeNull();
+        expect(readPayload('{}', 'SessionStart', { CLAUDE_PID: '12ab' }).clientPid).toBeNull();
+    });
+
     it('defaults cwd to the process directory when absent', () => {
         expect(readPayload('{}', 'SessionStart').cwd).toBe(process.cwd());
         expect(readPayload(JSON.stringify({ cwd: 'C:/repo' }), 'SessionStart').cwd).toBe('C:/repo');

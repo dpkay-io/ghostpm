@@ -76,6 +76,7 @@ export interface SessionRow {
     workspace_id: number | null;
     task_id: number | null;
     transcript_path: string | null;
+    client_pid: number | null;
     started_at: string;
     last_seen_at: string;
     ended_at: string | null;

@@ -14,7 +14,8 @@ import { parseSince } from "./surfaces/since";
 import { mergeTask, trackWork } from "./ledger/work";
 import { activeTaskFor, taskBranchName } from "./ledger/branch";
 import {
-    MCP_CLIENT, endSession, getSession, listLiveSessions, mcpSessionId, startSession, touchSession,
+    CLAUDE_SESSION_ENV, HOOK_CLIENT, MCP_CLIENT, currentSessionOf, endSession, getSession, listLiveSessions, mcpSessionId,
+    seeSession, startSession, touchSession,
 } from "./ledger/sessions";
 import {
     SETTING_ACTIVE_SPRINT, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_STALE_SESSION_MINUTES,
@@ -153,27 +154,44 @@ export class PmServer {
     private readonly db: Ledger;
     private readonly cwd: string;
     private readonly sessionId: string;
+    /** Started by Claude Code: its hooks own the session row, and tool calls follow its current conversation. */
+    private readonly inClaudeCode: boolean;
     private readonly legacyImport: boolean;
 
     constructor(options: PmServerOptions = {}) {
         this.server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
         this.db = options.db ?? openLedger();
         this.cwd = options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
-        this.sessionId = options.sessionId ?? mcpSessionId();
+        // Claude Code's own id, so track_work attaches the session its hooks read. An empty value is no id.
+        const claudeSession = options.sessionId === undefined ? process.env[CLAUDE_SESSION_ENV] || undefined : undefined;
+        this.inClaudeCode = claudeSession !== undefined;
+        this.sessionId = options.sessionId ?? claudeSession ?? mcpSessionId();
         this.legacyImport = options.legacyImport ?? true;
-        startSession(this.db, {
-            id: this.sessionId,
-            client: MCP_CLIENT,
-            cwd: this.cwd,
-            workspaceId: ensureWorkspace(this.db, this.cwd).id,
-        });
+        if (!this.inClaudeCode) {
+            startSession(this.db, {
+                id: this.sessionId,
+                client: MCP_CLIENT,
+                cwd: this.cwd,
+                workspaceId: ensureWorkspace(this.db, this.cwd).id,
+            });
+        }
         this.registerTools();
+    }
+
+    /** The session tool calls belong to: under Claude Code its current conversation, which /clear replaces while this server runs on. */
+    private session(): string {
+        return this.inClaudeCode ? currentSessionOf(this.db, this.sessionId) : this.sessionId;
     }
 
     /** Heartbeat plus the workspace every tool call works against. */
     private context(): WorkspaceRow {
         const workspace = ensureWorkspace(this.db, this.cwd);
-        touchSession(this.db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: workspace.id });
+        if (this.inClaudeCode) {
+            // The hooks own Claude Code's row: its cwd is where Claude Code works now, not CLAUDE_PROJECT_DIR.
+            seeSession(this.db, { id: this.session(), client: HOOK_CLIENT, cwd: this.cwd, workspaceId: workspace.id });
+        } else {
+            touchSession(this.db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: workspace.id });
+        }
         return workspace;
     }
 
@@ -191,7 +209,7 @@ export class PmServer {
 
     /** The session's task, or the task named by a task/<ref> branch. */
     private activeTask(branch: string | null, workspaceId: number): TaskRow | undefined {
-        return activeTaskFor(this.db, this.sessionId, branch, workspaceId);
+        return activeTaskFor(this.db, this.session(), branch, workspaceId);
     }
 
     private renderTable(tasks: TaskRow[]): string {
@@ -390,7 +408,7 @@ export class PmServer {
                 const workspace = this.context();
                 try {
                     const result = trackWork(this.db, {
-                        sessionId: this.sessionId, source: this.source(), workspaceId: workspace.id,
+                        sessionId: this.session(), source: this.source(), workspaceId: workspace.id,
                         title, intent, taskRef: task_id,
                     });
                     const verb = result.created ? 'Created' : result.reopened ? 'Reopened' : 'Attached to';
@@ -421,7 +439,7 @@ export class PmServer {
                 if (!task) return text(`Task ${task_id} not found.`);
                 try {
                     // A tool call carries the user's instruction, so it counts as a human change (spec §8.6).
-                    const ctx = { source: this.source(), sessionId: this.sessionId, human: true };
+                    const ctx = { source: this.source(), sessionId: this.session(), human: true };
                     // Ruling F13: the publish goes after the phase and title (a task closed here is not published) and
                     // before the comment, which is queued only for a task on its way to the vendor.
                     updateTask(this.db, task.id, { phase, title }, ctx);
@@ -450,7 +468,7 @@ export class PmServer {
                 try {
                     const result = mergeTask(this.db, {
                         fromRef: from, intoRef: into, workspaceId: workspace.id,
-                        source: this.source(), sessionId: this.sessionId,
+                        source: this.source(), sessionId: this.session(),
                     });
                     const crossNote = this.crossWorkspaceNote(workspace.id, result.into, result.from);
                     return text(`Merged ${formatTaskId(result.from.id)} into ${formatTaskId(result.into.id)} "${cleanText(result.into.title)}".${crossNote}`);
@@ -497,7 +515,8 @@ export class PmServer {
         if (this.legacyImport) runLegacyImport(this.db);
         const stdio = transport === undefined;
         if (stdio) {
-            process.once('exit', () => endSession(this.db, this.sessionId));
+            // Under Claude Code its SessionEnd hook ends the session: the hooks own that row.
+            if (!this.inClaudeCode) process.once('exit', () => endSession(this.db, this.sessionId));
             // A real client: this process competes for the sync lease (spec §8.1). An injected
             // transport (tests) never starts a background timer, nor sweeps the temporary folder.
             void sweepStaleArgDirs();
