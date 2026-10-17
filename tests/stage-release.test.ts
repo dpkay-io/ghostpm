@@ -28,6 +28,7 @@ describe('stageRelease', () => {
         engines: { node: '>=22' },
         dependencies: { 'runtime-dep': '^1.0.0' },
         devDependencies: { 'dev-dep': '^2.0.0' },
+        allowScripts: { 'dev-dep@2.0.0': true },
     });
 
     const lock = () => ({
@@ -64,6 +65,8 @@ describe('stageRelease', () => {
         const published = readOut('package.json');
         expect(published.devDependencies).toBeUndefined();
         expect(published.scripts).toBeUndefined();
+        // A contributor's npm 12 install allowance: a consumer must get no say-so over install scripts from us.
+        expect(published.allowScripts).toBeUndefined();
         expect(published.private).toBeUndefined();
         expect(published).toMatchObject({ name: 'ghostpm', version: '9.9.9', bin: { ghostpm: './dist/cli-main.js' }, engines: { node: '>=22' } });
         expect(published.files).toEqual(manifest().files);
@@ -111,6 +114,14 @@ describe('the repository lockfile', () => {
             expect(pruned.packages[`node_modules/${dependency}`]).toBeDefined());
         Object.keys(repoManifest.devDependencies).forEach(dependency =>
             expect(pruned.packages[`node_modules/${dependency}`]).toBeUndefined());
+    });
+
+    it('allows install scripts only for the better-sqlite3 version it locks (a stale pin makes npm 12 skip the build again)', () => {
+        const repo = path.join(__dirname, '..');
+        const repoManifest = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8'));
+        const lockfile = JSON.parse(fs.readFileSync(path.join(repo, 'package-lock.json'), 'utf8'));
+
+        expect(repoManifest.allowScripts).toEqual({ [`better-sqlite3@${lockfile.packages['node_modules/better-sqlite3'].version}`]: true });
     });
 });
 

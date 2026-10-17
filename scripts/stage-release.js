@@ -16,7 +16,7 @@ const SHRINKWRAP = 'npm-shrinkwrap.json';
 const ALWAYS_SHIPPED = ['README.md', 'LICENSE'];
 const BUILD_ENTRY = path.join('dist', 'cli-main.js');
 /** Only the development checkout needs these. */
-const DEV_ONLY_FIELDS = ['devDependencies', 'scripts', 'private'];
+const DEV_ONLY_FIELDS = ['devDependencies', 'scripts', 'private', 'allowScripts'];
 const ROOT_PACKAGE = '';
 
 function readJson(file) {

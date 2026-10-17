@@ -48,6 +48,9 @@ const IS_WINDOWS = process.platform === 'win32';
 const itOnWindows = IS_WINDOWS ? it : it.skip;
 /** Process groups are POSIX: this one cannot run on Windows, where the taskkill tests cover the same. */
 const itOnPosix = IS_WINDOWS ? it.skip : it;
+/** The test below runs the compiled runCli: without `npm run build` there is nothing to run. */
+const BUILT_CLI = path.resolve(__dirname, '..', 'dist', 'cli.js');
+const itOnWindowsBuilt = IS_WINDOWS && fs.existsSync(BUILT_CLI) ? it : it.skip;
 /** A pid no test process has: the kill selection test only records the signal. */
 const FAKE_PID = 4321;
 /** What spawn answers in a test that must not start anything: stdout as given, then a clean exit. */
@@ -306,7 +309,7 @@ describe('runCli', () => {
         expect((looked.mock.calls[0][2] as { cwd?: string }).cwd).toBe(systemDir);
     });
 
-    itOnWindows('prints nothing of its own when a command cannot be found', () => {
+    itOnWindowsBuilt('prints nothing of its own when a command cannot be found', () => {
         const script = "require('./dist/cli').runCli('ghostpm-surely-missing-cmd', []).then(() => process.exit(2), e => process.exit(e.notFound ? 0 : 3))";
         const result = child_process.spawnSync(process.execPath, ['-e', script], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
         expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });

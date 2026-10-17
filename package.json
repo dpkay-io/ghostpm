@@ -30,6 +30,9 @@
   "author": "dpkay",
   "license": "MIT",
   "type": "commonjs",
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/jest": "^30.0.0",

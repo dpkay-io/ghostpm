@@ -8,6 +8,8 @@ The repository root is `private`. What gets published is the staged `release/` f
 
 Pack and publish with npm 10 or 11: check `npm -v` first. `npm pack`, `npm run verify-release` and `npm publish` all need it, because npm 12 leaves `npm-shrinkwrap.json` out of the tarball (`npm run verify-release` stops and says so).
 
+Developing on npm 12: the root `package.json` `allowScripts` pins `better-sqlite3@<version>`, so `npm ci` builds the addon and `npm test` works. When that dependency's locked version changes, update the pin (a test fails until you do). `npm run stage` strips the field from the published manifest.
+
 The commands below are PowerShell, run from the repository root unless a step says otherwise. Where a step says `ghostpm`, use the 2.0 CLI: `node dist/cli-main.js` from this checkout, or `ghostpm` once 2.0 is installed globally.
 
 ## 1. Before publishing (maintainer or agent)
