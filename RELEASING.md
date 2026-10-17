@@ -6,7 +6,7 @@ There is one artifact: the npm package `ghostpm`.
 
 The repository root is `private`. What gets published is the staged `release/` folder: a manifest without devDependencies, plus a production `npm-shrinkwrap.json`. Claude Code runs `npm ci --ignore-scripts` on that lockfile and stops it after 60 seconds.
 
-Pack and publish with npm 10 or 11: check `npm -v` first. `npm pack`, `npm run verify-release` and `npm publish` all need it, because npm 12 leaves `npm-shrinkwrap.json` out of the tarball (`npm run verify-release` stops and says so).
+Pack and publish with npm 10 or 11: check `npm -v` first. `npm pack`, `npm run verify-release` and `npm publish` all need it, because npm 12 leaves `npm-shrinkwrap.json` out of the tarball (`npm run verify-release` stops and says so). `verify-release` packs and installs with the npm that runs it, so on npm 12 `npx -y npm@11 run verify-release` checks an npm 11 pack.
 
 Developing on npm 12: the root `package.json` `allowScripts` pins `better-sqlite3@<version>`, so `npm ci` builds the addon and `npm test` works. When that dependency's locked version changes, update the pin (a test fails until you do). `npm run stage` strips the field from the published manifest.
 

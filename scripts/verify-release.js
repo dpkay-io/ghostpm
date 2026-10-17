@@ -89,6 +89,35 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/** What npm_execpath names when npm runs this script. */
+const NPM_CLI = 'npm-cli.js';
+const NPM_SHIM_DIR = 'npm-bin';
+/** Characters a launcher would have to escape in a path (cmd.exe expands %, sh expands $ and `): no launcher then. */
+const UNQUOTABLE = /["%$`]/;
+const EXECUTABLE = 0o755;
+
+/**
+ * A launcher in `dir` for the npm that ran `npm run verify-release`, on the running node, so the npm 10 or 11 chosen
+ * packs and installs: the node's folder holds its own npm (nvm puts one there), and npm's own launchers only work from
+ * inside a node install. Null when no npm ran this script, or its path cannot be quoted.
+ */
+function chosenNpmLauncher(dir, env = process.env, nodePath = process.execPath) {
+    const cli = env.npm_execpath;
+    if (!cli || path.basename(cli) !== NPM_CLI || UNQUOTABLE.test(cli + nodePath)) return null;
+    fs.mkdirSync(dir, { recursive: true });
+    if (process.platform === 'win32') fs.writeFileSync(path.join(dir, 'npm.cmd'), `@"${nodePath}" "${cli}" %*\r\n`);
+    else fs.writeFileSync(path.join(dir, 'npm'), `#!/bin/sh\nexec "${nodePath}" "${cli}" "$@"\n`, { mode: EXECUTABLE });
+    return dir;
+}
+
+/**
+ * The node running this script first, as a user's PATH has one node for Claude Code, npm and the hooks: the bootstrap's
+ * npm then fetches the addon for the node that loads it. Ahead of it, the chosen npm's launcher when there is one.
+ */
+function searchPath(env, nodePath, npmDir) {
+    return [...(npmDir ? [npmDir] : []), path.dirname(nodePath), env.PATH].join(path.delimiter);
+}
+
 /**
  * Points everything a started process could reach outside `work` inside it. It changes this process's own
  * environment, so every child inherits it: npm, tar, the hooks, the detached bootstrap and its npm, and the
@@ -108,9 +137,7 @@ function isolate(work) {
     // The MCP server would take it as its workspace.
     delete process.env.CLAUDE_PROJECT_DIR;
     Object.assign(process.env, {
-        // The node running this script first, as a user's PATH has one node for Claude Code, npm and the hooks: the
-        // bootstrap's npm then fetches the addon for the node that loads it.
-        PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
+        PATH: searchPath(process.env, process.execPath, chosenNpmLauncher(path.join(work, NPM_SHIM_DIR))),
         HOME: home,
         USERPROFILE: home,
         GHOSTPM_HOME: path.join(home, '.ghostpm'),
@@ -326,7 +353,7 @@ async function main() {
     console.log(`\nAll ${results.length} checks passed. The dependency install took ${installMs} ms.`);
 }
 
-module.exports = { stopLeftovers, shrinkwrapRefusal, main };
+module.exports = { stopLeftovers, shrinkwrapRefusal, searchPath, chosenNpmLauncher, main };
 
 if (require.main === module) {
     main().catch(error => {

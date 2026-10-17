@@ -19,6 +19,8 @@ const NPM_12 = '12.2.0';
 interface VerifyRelease {
     stopLeftovers(folder: string): number;
     shrinkwrapRefusal(shipped: string[]): string | null;
+    searchPath(env: NodeJS.ProcessEnv, nodePath: string, npmDir: string | null): string;
+    chosenNpmLauncher(dir: string, env: NodeJS.ProcessEnv, nodePath: string): string | null;
     main(): Promise<void>;
 }
 
@@ -80,6 +82,49 @@ describeBuilt('the release check on an npm that drops the shrinkwrap', () => {
             Object.assign(process.env, env);
             if (work !== undefined) removeTempDir(work);
         }
+    });
+});
+
+describeBuilt('the npm the release check packs with', () => {
+    // nvm keeps an npm beside every node: putting only the node's folder first packed with that npm, not the one chosen.
+    const nodePath = path.join(path.sep, 'nvm', 'v24', 'bin', 'node');
+    const chosenCli = path.join(path.sep, 'scratch', 'npm11', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+
+    let dir: string;
+    beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ghostpm-npm-shim-')); });
+    afterEach(() => removeTempDir(dir));
+
+    it('puts the chosen npm launcher first, then the running node, then the PATH', () => {
+        const parts = loadScript().searchPath({ PATH: 'rest' }, nodePath, 'launcher').split(path.delimiter);
+
+        expect(parts).toEqual(['launcher', path.dirname(nodePath), 'rest']);
+        expect(loadScript().searchPath({ PATH: 'rest' }, nodePath, null).split(path.delimiter)).toEqual([path.dirname(nodePath), 'rest']);
+    });
+
+    it('launches exactly the npm that ran it, on the running node, and none when npm did not run it', () => {
+        const { chosenNpmLauncher } = loadScript();
+        const launchers = path.join(dir, 'bin');
+
+        expect(chosenNpmLauncher(launchers, { npm_execpath: chosenCli }, nodePath)).toBe(launchers);
+        const [launcher] = fs.readdirSync(launchers);
+        const text = fs.readFileSync(path.join(launchers, launcher), 'utf8');
+        expect(text).toContain(`"${nodePath}" "${chosenCli}"`);
+
+        expect(chosenNpmLauncher(path.join(dir, 'none'), {}, nodePath)).toBeNull();
+        expect(chosenNpmLauncher(path.join(dir, 'yarn'), { npm_execpath: path.join(path.sep, 'yarn', 'bin', 'yarn.js') }, nodePath)).toBeNull();
+        expect(chosenNpmLauncher(path.join(dir, 'odd'), { npm_execpath: path.join(path.sep, '%x%', 'npm-cli.js') }, nodePath)).toBeNull();
+    });
+
+    it('really runs the chosen npm: the launcher answers that npm\'s version', () => {
+        // A stand-in npm-cli.js that prints a version no real npm on this machine has.
+        const cli = path.join(dir, 'npm', 'bin', 'npm-cli.js');
+        fs.mkdirSync(path.dirname(cli), { recursive: true });
+        fs.writeFileSync(cli, "console.log('99.0.0-chosen ' + process.argv.slice(2).join(' '))");
+        const launchers = loadScript().chosenNpmLauncher(path.join(dir, 'bin'), { npm_execpath: cli }, process.execPath)!;
+
+        const printed = child_process.execSync('npm -v', { env: { ...process.env, PATH: `${launchers}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' });
+
+        expect(printed.trim()).toBe('99.0.0-chosen -v');
     });
 });
 
