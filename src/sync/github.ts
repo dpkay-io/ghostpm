@@ -82,6 +82,13 @@ export function githubPhaseOf(state: string, labels: string[], localPhase: Phase
     return CLOSED_PHASES.has(localPhase) ? REOPEN_PHASE : localPhase;
 }
 
+/** Spec §8.3: a pushed issue carries exactly its own phase label while open, and none once closed. */
+export function githubShowsPhase(state: string, labels: string[], phase: Phase): boolean {
+    const own = labels.filter(label => label.startsWith(PHASE_LABEL_PREFIX));
+    const wanted = CLOSED_PHASES.has(phase) ? [] : [phaseLabel(phase)];
+    return githubPhaseOf(state, labels, phase) === phase && own.length === wanted.length && own.every(label => wanted.indexOf(label) >= 0);
+}
+
 function toItem(issue: GhIssue): RemoteItem {
     const state = issue.state.toLowerCase();
     const reason = (issue.stateReason ?? '').toLowerCase();
@@ -266,6 +273,10 @@ export class GitHubAdapter implements VendorAdapter {
 
     phaseOf(state: string, labels: string[], localPhase: Phase): Phase {
         return githubPhaseOf(state, labels, localPhase);
+    }
+
+    showsPhase(state: string, labels: string[], phase: Phase): boolean {
+        return githubShowsPhase(state, labels, phase);
     }
 
     titlesMatch(received: string, known: string): boolean {

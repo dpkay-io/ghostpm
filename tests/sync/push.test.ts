@@ -21,7 +21,7 @@ import { acquireLease, releaseLease, LEASE_TTL_MS } from '../../src/sync/lease';
 import { GoneError, PermanentError, SyncPausedError } from '../../src/sync/vendor';
 import { GitHubAdapter, GH_LOGGED_OUT } from '../../src/sync/github';
 import { unregisterWorkspace } from '../../src/workspace-commands';
-import { FakeVendor } from './fake-vendor';
+import { AZURE_STATES, FakeVendor } from './fake-vendor';
 
 const SESSION_ID = 'push-session';
 const SOURCE = 'mcp:test';
@@ -875,5 +875,76 @@ describe('pushing the outbox', () => {
         expect(statuses(landed.id)).toEqual(['create:done']);
         expect(statuses(lost.id)).toEqual(['create:done']);
         expect(outboxHealth(ledger.db, workspace.id)).toEqual({ pending: 0, failed: 0 });
+    });
+
+    it("applies the title a person gave an adopted item before the retry, and pushes nothing back over it", async () => {
+        const task = track('Login fix');
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // landed, answer lost
+        expect((await push()).retried).toBe(1);
+        vendor.humanEdit('1', { title: 'Login fix HUMAN-EDITED' });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        expect((await push()).pushed).toBe(1);
+
+        expect(getTask(ledger.db, task.id)!.title).toBe('Login fix HUMAN-EDITED');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed'] }).map(event => event.source)).toEqual(['vendor']);
+        expect(vendor.items.get('1')!.title).toBe('Login fix HUMAN-EDITED');
+        expect(vendor.calls.map(call => call.op)).toEqual(['create', 'findCreated']);
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({
+            remote_title: 'Login fix HUMAN-EDITED', remote_updated_at: vendor.items.get('1')!.updatedAt,
+            last_pushed_rev: getTask(ledger.db, task.id)!.rev,
+        });
+        expect(statuses(task.id)).toEqual(['create:done']);
+    });
+
+    it('applies a close a person made on an adopted item, keeping their reason and tidying only the phase label we left', async () => {
+        const task = track('Login fix');
+        vendor.failAfterApply = new Error(LOST_ANSWER);
+        expect((await push()).retried).toBe(1);
+        vendor.humanEdit('1', { state: 'closed:not_planned' });   // GitHub keeps the issue's ghostpm:planned label
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(getTask(ledger.db, task.id)).toMatchObject({ phase: 'dropped', title: 'Login fix' });
+        expect(getTask(ledger.db, task.id)!.human_phase_at).not.toBeNull();
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['phase'] }).map(event => event.source)).toEqual(['vendor']);
+        expect(vendor.items.get('1')).toMatchObject({ title: 'Login fix', state: 'closed:not_planned', labels: [] });
+        expect(vendor.calls.filter(call => call.op === 'syncState')).toEqual([{ op: 'syncState', remoteId: '1', title: 'Login fix', phase: 'dropped' }]);
+        expect(await push()).toMatchObject({ pushed: 0 });
+    });
+
+    it('keeps, and pushes, the phase a task moved to after its attempt when nobody touched the adopted item', async () => {
+        const task = track('Login fix');
+        vendor.failAfterApply = new Error(LOST_ANSWER);
+        expect((await push()).retried).toBe(1);
+        change(task.id, { phase: 'in_review' });
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(getTask(ledger.db, task.id)!.phase).toBe('in_review');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['phase'] }).map(event => event.source)).toEqual([SOURCE]);
+        expect(vendor.items.get('1')).toMatchObject({ state: 'open', labels: ['ghostpm:in_review'] });
+    });
+
+    it("takes the first state Azure DevOps creates an adopted item in as the attempt's, not as a person's move", async () => {
+        vendor.azureStates = AZURE_STATES;
+        const task = track('Login fix');
+        change(task.id, { phase: 'in_progress' });             // the create sends in_progress
+        const create = vendor.create.bind(vendor);
+        jest.spyOn(vendor, 'create').mockImplementationOnce(async (desired, body) => {
+            const made = await create(desired, body);
+            vendor.items.get(made.remoteId)!.state = AZURE_STATES.planned!;   // az made it in its first state; the move never ran
+            throw new Error(LOST_ANSWER);
+        });
+        expect((await push()).retried).toBe(1);
+        skewMs = PUSH_BACKOFF_BASE_MS + SLACK_MS;
+
+        await push();
+
+        expect(getTask(ledger.db, task.id)!.phase).toBe('in_progress');
+        expect(listEvents(ledger.db, { taskId: task.id, kinds: ['phase'] }).map(event => event.source)).toEqual([SOURCE]);
+        expect(vendor.calls.filter(call => call.op === 'syncState').map(call => call.phase)).toEqual(['in_progress']);
     });
 });

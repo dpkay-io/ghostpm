@@ -400,6 +400,11 @@ export class AzureAdapter implements VendorAdapter {
         return picked ?? vendorStateToPhase(state);
     }
 
+    /** A work item shows a phase by its state alone: one that already reads as `phase` needs no push (nor a revision). */
+    showsPhase(state: string, labels: string[], phase: Phase): boolean {
+        return this.phaseOf(state, labels, phase) === phase;
+    }
+
     titlesMatch(received: string, known: string): boolean {
         return received === known || isLossyCopy(received, known);
     }

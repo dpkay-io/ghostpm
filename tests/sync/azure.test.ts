@@ -262,6 +262,15 @@ describe('AzureAdapter', () => {
         expect(adapter(fakeAz().run).phaseOf(state, [], local)).toBe(expected);
     });
 
+    it.each([
+        ['Done', 'done', true],
+        ['Resolved', 'in_review', true],
+        ['Committed', 'in_review', true],
+        ['Committed', 'done', false],
+    ] as [string, Phase, boolean][])('reads %s as showing %s: %s, tags or not', (state, phase, expected) => {
+        expect(adapter(fakeAz().run).showsPhase(state, ['ghostpm:in_progress'], phase)).toBe(expected);
+    });
+
     it('treats a title az dropped characters from as the same title', () => {
         const titles = adapter(fakeAz().run);
         expect(titles.titlesMatch('Déjà vu  ', 'Déjà vu — ✓')).toBe(true);

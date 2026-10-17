@@ -9,7 +9,7 @@ import {
 import {
     readSetting, SETTING_MAX_PUSH_ATTEMPTS, SETTING_SYNC_POLICY, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, setSyncPause,
 } from '../ledger/settings';
-import { getTask, getVendorLink, insertVendorLink } from '../ledger/tasks';
+import { NewVendorLink, getTask, getVendorLink, insertVendorLink } from '../ledger/tasks';
 import { CLOSED_PHASES, NO_VENDOR, SYNC_SOURCE, TaskRow, VendorLinkRow, WorkspaceRow, formatTaskId } from '../ledger/types';
 import { MERGED_PHASE } from '../ledger/work';
 import { getWorkspace } from '../ledger/workspaces';
@@ -157,6 +157,7 @@ async function pushCreate(ctx: PushContext): Promise<Outcome> {
     let sent = earlier.title ?? desired.title;
     // An earlier attempt may have created the item and failed after it: adopt that one rather than make a second.
     let item: RemoteItem | null = earlier.nonce === undefined ? null : await leased(ctx).findCreated(idempotencyMarker(earlier.nonce), sent);
+    const adopted = item !== null;
     if (item === null && lookOnly) {
         // Nothing landed. The task may have reopened while the lookup was out: read it again and complete this row in
         // the same write, since a reopen between the two would find this create still in flight and queue nothing.
@@ -179,22 +180,53 @@ async function pushCreate(ctx: PushContext): Promise<Outcome> {
         item = await leased(ctx).create(desired, withMarker(body, nonce));
     }
     const created = item;
-    // An adapter whose follow-up read or state move failed answers with the item as first created, and an adopted
-    // item shows what its own attempt sent: either is linked all the same, and a sync_state moves it the rest of the way.
+    // An adapter whose follow-up read or state move failed answers with the item as first created: it is linked all
+    // the same, and a sync_state moves it the rest of the way.
     const landed = sent === desired.title && ctx.adapter.phaseOf(created.state, created.labels, desired.phase) === desired.phase;
     finish(ctx, () => {
         insertVendorLink(ctx.db, {
             taskId: ctx.task.id, vendor: ctx.workspace.vendor, remoteId: created.remoteId, remoteUrl: created.url,
-            remoteState: created.state, labels: JSON.stringify(created.labels), remoteUpdatedAt: created.updatedAt,
-            remoteTitle: sent, lastPushedRev: landed ? ctx.task.rev : null,
+            ...(adopted ? attemptBaseline(ctx, created) : {
+                remoteState: created.state, labels: JSON.stringify(created.labels), remoteUpdatedAt: created.updatedAt,
+                lastPushedRev: landed ? ctx.task.rev : null,
+            }),
+            remoteTitle: sent,
         });
         recordEvent(ctx.db, {
             taskId: ctx.task.id, kind: 'linked', source: SYNC_SOURCE,
             payload: { vendor: ctx.workspace.vendor, remoteId: created.remoteId, url: created.url },
         });
-        if (!landed) projectTask(ctx.db, getTask(ctx.db, ctx.task.id)!, 'change', nowIso());
+        if (adopted) adoptItem(ctx, created, desired);
+        else if (!landed) projectTask(ctx.db, getTask(ctx.db, ctx.task.id)!, 'change', nowIso());
     });
     return 'pushed';
+}
+
+/**
+ * What an adopted item's earlier attempt left on it, as far as can be told: the title it sent, and the state the item
+ * shows while open. An attempt only ever creates an open item (a closed task is looked for, never created), and not
+ * always in the phase it sent (Azure DevOps creates in the type's first state and moves it after), so a close is the
+ * one phase move known to be a person's. No baseline time: applyRemoteItem then compares everything the item shows.
+ */
+function attemptBaseline(ctx: PushContext, item: RemoteItem): Pick<NewVendorLink, 'remoteState' | 'labels'> {
+    const open = !CLOSED_PHASES.has(ctx.adapter.phaseOf(item.state, item.labels, ctx.task.phase));
+    return open ? { remoteState: item.state, labels: JSON.stringify(item.labels) } : {};
+}
+
+/**
+ * Spec §8.6 for an item adopted from an earlier attempt, which a person may have edited since: what they changed is
+ * applied here, and whatever the task still holds that the item does not is pushed. Call inside write().
+ */
+function adoptItem(ctx: PushContext, item: RemoteItem, desired: DesiredState): void {
+    applyRemoteItem(ctx.db, ctx.adapter, getTask(ctx.db, ctx.task.id)!, getVendorLink(ctx.db, ctx.task.id)!, item);
+    const task = getTask(ctx.db, ctx.task.id)!;
+    // The title redacted outside this write, unless the task holds another now (the person's, read from the item).
+    const title = task.title === ctx.task.title ? desired.title : task.title;
+    if (ctx.adapter.titlesMatch(item.title, title) && ctx.adapter.showsPhase(item.state, item.labels, task.phase)) {
+        recordOwnPush(ctx.db, getVendorLink(ctx.db, task.id)!, item, title, task.rev);   // the item holds this revision
+    } else {
+        projectTask(ctx.db, task, 'change', nowIso());
+    }
 }
 
 async function pushSyncState(ctx: PushContext): Promise<Outcome> {

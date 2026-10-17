@@ -1,6 +1,6 @@
-import { Ledger } from '../ledger/db';
+import { Ledger, nowIso } from '../ledger/db';
 import { recordEvent } from '../ledger/events';
-import { dropPendingSyncState } from '../ledger/projection';
+import { dropPendingSyncState, projectTask } from '../ledger/projection';
 import { updateTask } from '../ledger/tasks';
 import { SYNC_SOURCE, TaskRow, VENDOR_SOURCE, VendorLinkRow } from '../ledger/types';
 import { DesiredState, RemoteItem, VendorAdapter, parseLabels } from './vendor';
@@ -76,11 +76,14 @@ export function applyRemoteItem(db: Ledger, adapter: VendorAdapter, task: TaskRo
     const phaseEdited = !ours.phase && remotePhase !== knownPhase && remotePhase !== task.phase;
     const edited = titleEdited || phaseEdited;
     if (edited) {
-        updateTask(db, task.id, {
+        const updated = updateTask(db, task.id, {
             title: titleEdited ? item.title : undefined,
             phase: phaseEdited ? remotePhase : undefined,
         }, { source: VENDOR_SOURCE, human: true });
         if (titleEdited && phaseEdited) dropPendingSyncState(db, task.id);
+        // A person's move leaves our own phase markings behind (GitHub keeps the label of an issue a person closes):
+        // the push of their phase tidies them, and keeps their close as it is (GitHubAdapter.syncState).
+        if (phaseEdited && !adapter.showsPhase(item.state, item.labels, remotePhase)) projectTask(db, updated, 'change', nowIso());
     }
     // Vendor-owned fields: shown locally, never pushed. The adapter already stripped our markers from the body.
     db.prepare('UPDATE tasks SET body = ?, assignee = ?, milestone = ? WHERE id = ?')

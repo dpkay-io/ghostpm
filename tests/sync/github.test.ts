@@ -1,5 +1,5 @@
 import { CliArg, CliError, RunOptions, Runner, freeText } from '../../src/cli';
-import { GitHubAdapter, githubPhaseOf, GH_LOGGED_OUT, GH_MISSING } from '../../src/sync/github';
+import { GitHubAdapter, githubPhaseOf, githubShowsPhase, GH_LOGGED_OUT, GH_MISSING } from '../../src/sync/github';
 import { GoneError, SyncPausedError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
 import { LEASE_TTL_MS } from '../../src/sync/lease';
 import { Phase } from '../../src/ledger/types';
@@ -188,6 +188,18 @@ describe('GitHubAdapter', () => {
         ]);
     });
 
+    it("removes the phase label left on an issue a person closed as a duplicate, never reopening or re-closing it", async () => {
+        const repo = freshRepo();
+        const gh = fakeGh({ 'issue view': issueJson(repo, { number: 51, state: 'CLOSED', stateReason: 'DUPLICATE', labels: ['bug'] }) });
+        await new GitHubAdapter(repo, gh.run).syncState(
+            { remoteId: '51', state: 'closed:duplicate', labels: ['bug', 'ghostpm:in_progress'] }, { title: 'Login fix', phase: 'dropped' },
+        );
+        expect(gh.calls.map(call => call.args)).toEqual([
+            ['issue', 'edit', '51', '--repo', freeText(repo), '--title', freeText('Login fix'), '--remove-label', freeText('ghostpm:in_progress')],
+            ['issue', 'view', '51', '--repo', freeText(repo), '--json', ISSUE_FIELDS],
+        ]);
+    });
+
     it('still closes a duplicate again as completed when its task is done', async () => {
         const repo = freshRepo();
         const gh = fakeGh({ 'issue view': issueJson(repo, { number: 51, state: 'CLOSED', stateReason: 'COMPLETED', labels: [] }) });
@@ -226,6 +238,20 @@ describe('githubPhaseOf', () => {
         ['open', ['ghostpm:done'], 'planned', 'planned'],
     ] as [string, string[], Phase, Phase][])('%s with %j over local %s reads as %s', (state, labels, local, expected) => {
         expect(githubPhaseOf(state, labels, local)).toBe(expected);
+    });
+});
+
+describe('githubShowsPhase', () => {
+    it.each([
+        ['closed:completed', ['bug'], 'done', true],
+        ['closed:completed', ['bug', 'ghostpm:in_progress'], 'done', false],
+        ['closed:not_planned', [], 'done', false],
+        ['open', ['bug', 'ghostpm:in_review'], 'in_review', true],
+        ['open', ['bug'], 'in_review', false],
+        ['open', ['ghostpm:planned', 'ghostpm:in_review'], 'in_review', false],
+        ['open', ['ghostpm:in_review'], 'planned', false],
+    ] as [string, string[], Phase, boolean][])('%s with %j shows %s: %s', (state, labels, phase, expected) => {
+        expect(githubShowsPhase(state, labels, phase)).toBe(expected);
     });
 });
 

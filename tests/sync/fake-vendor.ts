@@ -1,6 +1,7 @@
+import { PhaseStateMap } from '../../src/ledger/settings';
 import { Phase } from '../../src/ledger/types';
-import { githubPhaseOf, phaseLabel, PHASE_LABEL_PREFIX } from '../../src/sync/github';
-import { isLossyCopy } from '../../src/sync/azure';
+import { githubPhaseOf, githubShowsPhase, phaseLabel, PHASE_LABEL_PREFIX } from '../../src/sync/github';
+import { AzureAdapter, isLossyCopy } from '../../src/sync/azure';
 import { DesiredState, GoneError, LinkState, RemoteItem, VendorAdapter, markerNonces, stripMarkers } from '../../src/sync/vendor';
 
 const TICK_MS = 1000;
@@ -8,6 +9,10 @@ const CLOSED_STATE: Partial<Record<Phase, string>> = { done: 'closed:completed',
 const OPEN = 'open';
 const DUPLICATE_STATE = 'closed:duplicate';
 const REPO_URL = 'https://github.com/acme/widgets/issues/';
+/** A Scrum-like Azure DevOps process, for FakeVendor.azureStates. */
+export const AZURE_STATES: PhaseStateMap = {
+    brainstorming: 'New', planned: 'New', in_progress: 'Committed', in_review: 'Committed', done: 'Done', dropped: 'Removed',
+};
 
 export interface FakeCall {
     op: string;
@@ -43,6 +48,8 @@ export class FakeVendor implements VendorAdapter {
     hold: Promise<void> | null = null;
     /** Compare titles the way the Azure DevOps adapter does. */
     lossyTitles = false;
+    /** Read phases the way the Azure DevOps adapter does with these states (what the fake writes stays GitHub-like). */
+    azureStates: PhaseStateMap | null = null;
     /** Lists by page, as GitHub does; false answers every match, as Azure DevOps does. */
     pages = true;
     private next = 1;
@@ -174,8 +181,17 @@ export class FakeVendor implements VendorAdapter {
         return this.user;
     }
 
+    /** The real Azure DevOps rules, over azureStates; it makes no CLI call for them. */
+    private azure(): AzureAdapter | null {
+        return this.azureStates === null ? null : new AzureAdapter('', '', '', this.azureStates);
+    }
+
     phaseOf(state: string, labels: string[], localPhase: Phase): Phase {
-        return githubPhaseOf(state, labels, localPhase);
+        return this.azure()?.phaseOf(state, labels, localPhase) ?? githubPhaseOf(state, labels, localPhase);
+    }
+
+    showsPhase(state: string, labels: string[], phase: Phase): boolean {
+        return this.azure()?.showsPhase(state, labels, phase) ?? githubShowsPhase(state, labels, phase);
     }
 
     titlesMatch(received: string, known: string): boolean {

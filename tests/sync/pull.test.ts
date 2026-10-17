@@ -19,7 +19,7 @@ import { pushDue, PushDeps } from '../../src/sync/push';
 import { pullIsDue } from '../../src/sync/schedule';
 import { GoneError, VENDOR_CALL_TIMEOUT_MS, idempotencyMarker } from '../../src/sync/vendor';
 import { SYNC_LOG_FILE } from '../../src/hook/log';
-import { FakeVendor } from './fake-vendor';
+import { AZURE_STATES, FakeVendor } from './fake-vendor';
 
 const SOURCE = 'mcp:test';
 const SESSION_ID = 'pull-session';
@@ -184,6 +184,53 @@ describe('pulling a vendor workspace', () => {
         expect(pendingOps(task.id)).toEqual([]);
         expect(listEvents(ledger.db, { taskId: task.id, kinds: ['renamed', 'phase'] }).map(event => event.source))
             .toEqual([SOURCE, 'vendor', 'vendor']);
+    });
+
+    it('removes the phase label it left on an issue a person closed, keeping their close, and then has nothing more to push', async () => {
+        const task = track('A');
+        await push();                                                // open, labelled ghostpm:planned
+        vendor.humanEdit('1', { state: 'closed:not_planned' });     // GitHub keeps the label
+        expect((await pull()).humanEdits).toBe(1);
+        expect(getTask(ledger.db, task.id)!.phase).toBe('dropped');
+        const before = vendor.calls.length;
+
+        await push();
+
+        expect(vendorOps(before)).toEqual(['fetch', 'syncState']);
+        expect(vendor.items.get('1')).toMatchObject({ title: 'A', state: 'closed:not_planned', labels: [] });
+        expect((await pull()).humanEdits).toBe(0);
+        expect(pendingOps(task.id)).toEqual([]);
+        expect(getTask(ledger.db, task.id)!.phase).toBe('dropped');
+    });
+
+    it("takes its label tidy that landed without an answer as its own, never as a person's edit to push again", async () => {
+        const task = track('A');
+        await push();
+        vendor.humanEdit('1', { state: 'closed:completed' });
+        await pull();
+        vendor.failAfterApply = new Error(LOST_ANSWER);   // the tidy landed; its answer did not
+        expect((await push()).retried).toBe(1);
+
+        expect((await pull()).humanEdits).toBe(0);
+
+        expect(getTask(ledger.db, task.id)!.phase).toBe('done');
+        expect(vendor.items.get('1')).toMatchObject({ state: 'closed:completed', labels: [] });
+        expect(getVendorLink(ledger.db, task.id)).toMatchObject({ intent_title: null, last_pushed_rev: getTask(ledger.db, task.id)!.rev });
+    });
+
+    it('pushes nothing back after a person closes an Azure DevOps work item: its state is all a phase shows there', async () => {
+        vendor.azureStates = AZURE_STATES;
+        vendor.seed({ title: 'Login fix', state: AZURE_STATES.in_progress! });
+        await pull();
+        const task = taskFor('1');
+        vendor.humanEdit('1', { state: AZURE_STATES.done! });
+
+        expect((await pull()).humanEdits).toBe(1);
+
+        expect(getTask(ledger.db, task.id)!.phase).toBe('done');
+        expect(pendingOps(task.id)).toEqual([]);
+        expect((await push()).pushed).toBe(0);
+        expect(vendor.calls.some(call => call.op === 'syncState')).toBe(false);
     });
 
     it('keeps a pending local change the vendor edit does not cover', async () => {

@@ -124,6 +124,8 @@ export interface VendorAdapter {
     currentUser(): Promise<string | null>;
     /** The phase a vendor state means; `localPhase` stands wherever the vendor has no opinion. */
     phaseOf(state: string, labels: string[], localPhase: Phase): Phase;
+    /** Whether the item shows `phase` just as a push of it would leave it, our own phase markings included. */
+    showsPhase(state: string, labels: string[], phase: Phase): boolean;
     /** Whether a title read back is the known one, allowing for the CLI's output encoding. */
     titlesMatch(received: string, known: string): boolean;
 }
