@@ -55,7 +55,7 @@ describe('GitHubAdapter', () => {
         ]);
         expect(item).toEqual({
             remoteId: '12', url: `https://github.com/${repo}/issues/12`, title: 'Login fix', body: 'Tracked by GhostPM as T1.',
-            state: 'open', labels: ['ghostpm:planned'], assignee: 'octocat', milestone: 'Sprint 3', updatedAt: '2026-09-20T10:00:00Z',
+            markers: [], state: 'open', labels: ['ghostpm:planned'], assignee: 'octocat', milestone: 'Sprint 3', updatedAt: '2026-09-20T10:00:00Z',
         });
     });
 
@@ -353,6 +353,16 @@ describe('GitHubAdapter retry lookups', () => {
         expect((await adapter.findCreated(marker, 'Login fix'))?.remoteId).toBe('12');
         expect(gh.calls[0].args).toEqual(['issue', 'list', '--repo', freeText(repo), '--state', 'all', '--limit', '30', '--json', ISSUE_FIELDS]);
         expect(await adapter.findCreated('<!-- ghostpm:ffffffffffffffff -->', 'Login fix')).toBeNull();
+    });
+
+    it('reports the nonce of the marker it stripped from an issue it read, none when there is none', async () => {
+        const repo = freshRepo();
+        const marked = fakeGh({ 'issue view': JSON.stringify(withBody(repo, 12, `Tracked by GhostPM as T1.
+
+${marker}`)) });
+        expect((await new GitHubAdapter(repo, marked.run).fetch('12'))?.markers).toEqual(['0123456789abcdef']);
+        const plain = fakeGh({ 'issue view': issueJson(repo) });
+        expect((await new GitHubAdapter(repo, plain.run).fetch('12'))?.markers).toEqual([]);
     });
 
     it('never hands a marker back in a body it read', async () => {

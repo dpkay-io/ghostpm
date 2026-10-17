@@ -8,6 +8,7 @@ import { advancePhase } from '../ledger/work';
 import { isStillRegistered } from '../ledger/workspaces';
 import { CLOSED_PHASES, EventKind, Phase, SYNC_SOURCE, VENDOR_SOURCE, VendorLinkRow, WorkspaceRow } from '../ledger/types';
 import { appendLog, SYNC_LOG_FILE } from '../hook/log';
+import { unfinishedCreateNonces } from './outbox';
 import { holdLease, LeaseLostError } from './lease';
 import { PushDeps, guardWith } from './push';
 import { applyRemoteItem, markLinkBroken } from './reconcile';
@@ -45,7 +46,7 @@ export class WorkspaceGoneError extends Error {
     }
 }
 
-type UpsertOutcome = 'created' | 'edited' | 'refreshed';
+type UpsertOutcome = 'created' | 'edited' | 'refreshed' | 'awaiting_adoption';
 
 /** A vendor item with what a new task needs from it worked out before any write (no vendor text work under the write lock). */
 interface Incoming {
@@ -67,12 +68,17 @@ function linkByRemote(db: Ledger, workspace: WorkspaceRow, remoteId: string): Ve
 
 /**
  * New items become vendor-origin tasks; linked ones go through human wins (which also repairs a broken link).
- * The adapter already stripped our retry markers from the body. Call inside write().
+ * The adapter already stripped our retry markers from the body. An unlinked item that carries the marker of a create
+ * not yet done is that create's own: its retry adopts it, so importing it here would link a second task to it. Call inside write().
  */
 function upsertItem(db: Ledger, workspace: WorkspaceRow, adapter: VendorAdapter, { item, phase, labels }: Incoming): UpsertOutcome {
     const link = linkByRemote(db, workspace, item.remoteId);
     if (link !== undefined) {
         return applyRemoteItem(db, adapter, getTask(db, link.task_id)!, link, item) ? 'edited' : 'refreshed';
+    }
+    if (item.markers.length > 0) {
+        const owned = unfinishedCreateNonces(db, workspace.id);
+        if (item.markers.some(nonce => owned.has(nonce))) return 'awaiting_adoption';
     }
     const task = insertTaskRow(db, {
         title: item.title, phase, workspaceId: workspace.id,

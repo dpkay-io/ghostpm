@@ -1,7 +1,7 @@
 import { Phase } from '../../src/ledger/types';
 import { githubPhaseOf, phaseLabel, PHASE_LABEL_PREFIX } from '../../src/sync/github';
 import { isLossyCopy } from '../../src/sync/azure';
-import { DesiredState, GoneError, LinkState, RemoteItem, VendorAdapter, stripMarkers } from '../../src/sync/vendor';
+import { DesiredState, GoneError, LinkState, RemoteItem, VendorAdapter, markerNonces, stripMarkers } from '../../src/sync/vendor';
 
 const TICK_MS = 1000;
 const CLOSED_STATE: Partial<Record<Phase, string>> = { done: 'closed:completed', dropped: 'closed:not_planned' };
@@ -19,8 +19,12 @@ export interface FakeCall {
 }
 
 /** What the adapter answers: its own copy, markers stripped from the body like the real adapters do. */
-const copy = (item: RemoteItem): RemoteItem =>
-    ({ ...item, body: item.body === null ? null : stripMarkers(item.body), labels: item.labels.slice() });
+const copy = (item: RemoteItem): RemoteItem => ({
+    ...item,
+    body: item.body === null ? null : stripMarkers(item.body),
+    markers: item.body === null ? [] : markerNonces(item.body),
+    labels: item.labels.slice(),
+});
 
 /** An in-memory, GitHub-like vendor: phases are `ghostpm:` labels, done/dropped are closed states. */
 export class FakeVendor implements VendorAdapter {
@@ -82,7 +86,7 @@ export class FakeVendor implements VendorAdapter {
     seed(fields: Partial<RemoteItem> & { title: string }): RemoteItem {
         const remoteId = String(this.next++);
         const item: RemoteItem = {
-            remoteId, url: `${REPO_URL}${remoteId}`, body: null, state: OPEN, labels: [], assignee: null, milestone: null,
+            remoteId, url: `${REPO_URL}${remoteId}`, body: null, markers: [], state: OPEN, labels: [], assignee: null, milestone: null,
             ...fields, updatedAt: this.tick(),
         };
         this.items.set(remoteId, item);

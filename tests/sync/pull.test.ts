@@ -17,7 +17,7 @@ import { pullWorkspace, PULL_OVERLAP_MS, PULL_WINDOW_DAYS, LINK_CHECK_LIMIT, PR_
 import { unregisterWorkspace } from '../../src/workspace-commands';
 import { pushDue, PushDeps } from '../../src/sync/push';
 import { pullIsDue } from '../../src/sync/schedule';
-import { GoneError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
+import { GoneError, VENDOR_CALL_TIMEOUT_MS, idempotencyMarker } from '../../src/sync/vendor';
 import { SYNC_LOG_FILE } from '../../src/hook/log';
 import { FakeVendor } from './fake-vendor';
 
@@ -482,6 +482,52 @@ describe('pulling a vendor workspace', () => {
         expect((await pull(now, 2)).more).toBe(true);    // the watermark moves up to the tied time
         expect((await pull(now, 2)).more).toBe(false);   // the same page again: it cannot move past it
         expect(getWorkspaceSetting(ledger.db, workspace.id, SETTING_PULL_WATERMARK)).toBe(tied);
+    });
+
+    describe('an item whose create landed although its push failed', () => {
+        const OTHER_MACHINES_NONCE = 'ffffffffffffffff';
+        const taskCount = (): unknown => ledger.db.prepare('SELECT COUNT(*) AS n FROM tasks').get();
+
+        it('is left for the push retry to adopt, so the task is linked once and no duplicate is imported', async () => {
+            const task = track('Lost answer');
+            vendor.failAfterApply = new Error(LOST_ANSWER);   // the item was created; its answer was lost
+            expect((await push()).retried).toBe(1);
+            expect(vendor.items.size).toBe(1);
+
+            expect((await pull()).created).toBe(0);
+            expect(taskCount()).toEqual({ n: 1 });
+
+            await push(RETRY_DUE_MS);
+            expect(vendor.items.size).toBe(1);
+            expect(getVendorLink(ledger.db, task.id)).toMatchObject({ remote_id: '1' });
+            expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM vendor_links WHERE remote_id = ?').get('1')).toEqual({ n: 1 });
+            // Once linked, later pulls treat it as any linked item.
+            expect((await pull()).created).toBe(0);
+            expect(taskCount()).toEqual({ n: 1 });
+        });
+
+        it('still imports an unmarked item, and one carrying a nonce no pending create owns', async () => {
+            track('Mine');
+            vendor.failAfterApply = new Error(LOST_ANSWER);
+            await push();
+            vendor.seed({ title: 'Typed by a person' });
+            vendor.seed({ title: "Another machine's", body: `Body
+
+${idempotencyMarker(OTHER_MACHINES_NONCE)}` });
+
+            expect((await pull()).created).toBe(2);
+        });
+
+        it('imports an item carrying the nonce of a create that has completed', async () => {
+            const task = track('Done create');
+            await push();
+            const nonce = (JSON.parse(outboxRows(ledger.db, task.id).find(row => row.op === 'create')!.payload!) as { nonce: string }).nonce;
+            vendor.seed({ title: 'Copied body', body: `Copy
+
+${idempotencyMarker(nonce)}` });
+
+            expect((await pull()).created).toBe(1);
+        });
     });
 
     describe('racing `ghostpm unregister` of the workspace it pulls', () => {

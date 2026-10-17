@@ -40,7 +40,7 @@ export interface AttemptPayload {
     title?: string;
 }
 /** json_extract path of AttemptPayload.nonce. */
-const ATTEMPT_NONCE_PATH = '$.nonce';
+export const ATTEMPT_NONCE_PATH = '$.nonce';
 
 /**
  * What asked for the projection (spec §8.2):

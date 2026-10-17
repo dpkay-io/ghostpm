@@ -54,7 +54,7 @@ describe('AzureAdapter', () => {
         expect(az.calls).toHaveLength(1);
         expect(item).toEqual({
             remoteId: '42', url: `${ORG}/Widgets%20'Next'/_workitems/edit/42`, title: 'Login fix',
-            body: 'Tracked by GhostPM as T1.', state: 'New', labels: ['backend', 'urgent'], assignee: 'octo@acme.test',
+            body: 'Tracked by GhostPM as T1.', markers: [], state: 'New', labels: ['backend', 'urgent'], assignee: 'octo@acme.test',
             milestone: 'Widgets\\Sprint 3', updatedAt: '2026-09-20T10:00:00.123Z',
         });
     });
@@ -316,6 +316,18 @@ describe('AzureAdapter retry lookups', () => {
         expect(await adapter(az.run).findCreated('<!-- ghostpm:ffffffffffffffff -->', 'Login fix')).toBeNull();
         expect(await adapter(az.run).hasComment('42', marker)).toBe(true);
         expect(await adapter(az.run).hasComment('42', '<!-- ghostpm:ffffffffffffffff -->')).toBe(false);
+    });
+
+    it('reports the nonce it stripped from a description, in the comment form and in the sanitised span form', async () => {
+        const wrapped = `<div>Tracked by GhostPM as T1.</div><div>${sanitised}</div>`;
+        for (const description of [`Tracked by GhostPM as T1.
+
+${marker}`, wrapped]) {
+            const az = fakeAz({ 'boards work-item show': workItem({ 'System.Description': description }) });
+            expect((await adapter(az.run).fetch('42'))?.markers).toEqual(['0123456789abcdef']);
+        }
+        const plain = fakeAz({ 'boards work-item show': workItem() });
+        expect((await adapter(plain.run).fetch('42'))?.markers).toEqual([]);
     });
 
     it('never hands a span marker back, nor the whitespace before it', async () => {

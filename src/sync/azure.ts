@@ -5,7 +5,7 @@ import { PHASES, Phase } from '../ledger/types';
 import { SYNC_COMMAND } from './schedule';
 import {
     DesiredState, GoneError, LinkState, PermanentError, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf,
-    hasMarker, stripMarkers, toHtmlMarkers,
+    hasMarker, markerNonces, stripMarkers, toHtmlMarkers,
 } from './vendor';
 
 const nullableStrip = (text: string | null): string | null => (text === null ? null : stripMarkers(text));
@@ -223,6 +223,7 @@ export class AzureAdapter implements VendorAdapter {
             url: `${this.orgPrefix()}${encodeURIComponent(this.project)}/${EDIT_PATH}/${raw.id}`,
             title: text(FIELD.title) ?? '',
             body: nullableStrip(text(FIELD.description)),
+            markers: markerNonces(text(FIELD.description) ?? ''),
             state: text(FIELD.state) ?? '',
             labels: (text(FIELD.tags) ?? '').split(TAG_SEPARATOR).filter(tag => tag.length > 0),
             assignee: typeof assigned === 'string'

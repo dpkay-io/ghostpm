@@ -62,6 +62,11 @@ export function stripMarkers(text: string): string {
     return kept + text.slice(from);
 }
 
+/** The nonce of each of our markers in `text`, in either form, as stripMarkers would remove them. */
+export function markerNonces(text: string): string[] {
+    return Array.from(text.matchAll(MARKER), nonceOf);
+}
+
 /** One shape for a GitHub issue and an Azure Boards work item. */
 export interface RemoteItem {
     remoteId: string;
@@ -69,6 +74,8 @@ export interface RemoteItem {
     title: string;
     /** Without GhostPM's retry markers: adapters strip them as they read, so no ledger transaction ever has to. */
     body: string | null;
+    /** The nonces of the markers stripped from `body`: pull leaves an unlinked item to the create that sent one. */
+    markers: readonly string[];
     /** Exactly what vendor_links.remote_state stores: GitHub `open`, `closed` or `closed:<reason>`; ADO System.State. */
     state: string;
     labels: string[];

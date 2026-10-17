@@ -1,6 +1,6 @@
 import { Ledger, MS_PER_DAY, SqlParam, Where, iso, write } from '../ledger/db';
 import {
-    OP_CREATE, OP_SYNC_STATE, OutboxRow, OutboxStatus, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
+    ATTEMPT_NONCE_PATH, OP_CREATE, OP_SYNC_STATE, OutboxRow, OutboxStatus, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, STATUS_PENDING,
 } from '../ledger/projection';
 import { SETTING_SYNC_PAUSED } from '../ledger/settings';
 import { SYNC_LEASE } from './lease';
@@ -13,6 +13,18 @@ export const DEFER_MS = 2 * 1000;
 /** Ruling F15: a done row is history nothing reads; it is pruned this long after it was taken. */
 export const DONE_ROW_RETENTION_DAYS = 30;
 const PAUSED_PATH = `$.${SETTING_SYNC_PAUSED}`;
+
+/**
+ * The retry nonces of this workspace's creates that are not done: the item such an attempt made may already be on the
+ * vendor, and the retry adopts it. Call inside write().
+ */
+export function unfinishedCreateNonces(db: Ledger, workspaceId: number): Set<string> {
+    const rows = db.prepare(`
+        SELECT json_extract(o.payload, ?) AS nonce FROM outbox o JOIN tasks t ON t.id = o.task_id
+        WHERE t.workspace_id = ? AND o.op = ? AND o.status <> ? AND nonce IS NOT NULL`)
+        .all(ATTEMPT_NONCE_PATH, workspaceId, OP_CREATE, STATUS_DONE) as { nonce: string }[];
+    return new Set(rows.map(row => row.nonce));
+}
 
 export function backoffMs(attempt: number): number {
     return Math.min(PUSH_BACKOFF_BASE_MS * Math.pow(2, attempt - 1), PUSH_BACKOFF_CAP_MS);
