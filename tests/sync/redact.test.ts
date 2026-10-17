@@ -15,7 +15,9 @@ const HOSTILE_BYTES = 1 << 18;
 const HOSTILE_GROWTH = 8;
 /** Best of this many runs per size, the sizes taking turns, so a load spike on one run does not decide the result. */
 const HOSTILE_RUNS = 3;
-/** Near the geometric middle of linear (8x) and quadratic (64x): a busy machine measured 11x at a 4x growth. */
+/** Runs for a second look at an input that measured over the limit (a load spike on a shared machine reached 24.6x). */
+const HOSTILE_CONFIRM_RUNS = 7;
+/** Between linear (8x; a quiet machine measured at most 10.7x) and quadratic (64x). */
 const HOSTILE_MAX_RATIO = 24;
 /** Below this the large run is too quick for a ratio to mean anything. */
 const HOSTILE_NOISE_FLOOR_MS = 50;
@@ -306,15 +308,24 @@ describe('redactSecrets (spec §8.9)', () => {
             return performance.now() - started;
         };
         const large = hostileInputs(HOSTILE_BYTES * HOSTILE_GROWTH);
-        hostileInputs(HOSTILE_BYTES).forEach((text, index) => {
+        /** Best of `runs` per size, the sizes taking turns. */
+        const measure = (small: string, big: string, runs: number): { smallMs: number; largeMs: number } => {
             let smallMs = Infinity;
             let largeMs = Infinity;
-            for (let run = 0; run < HOSTILE_RUNS; run++) {
-                smallMs = Math.min(smallMs, timed(text));
-                largeMs = Math.min(largeMs, timed(large[index]!));
+            for (let run = 0; run < runs; run++) {
+                smallMs = Math.min(smallMs, timed(small));
+                largeMs = Math.min(largeMs, timed(big));
             }
-            expect(largeMs).toBeLessThan(HOSTILE_BACKSTOP_MS);
-            if (largeMs > HOSTILE_NOISE_FLOOR_MS) expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(HOSTILE_MAX_RATIO);
+            return { smallMs, largeMs };
+        };
+        const ratio = ({ smallMs, largeMs }: { smallMs: number; largeMs: number }): number =>
+            (largeMs > HOSTILE_NOISE_FLOOR_MS ? largeMs / Math.max(smallMs, 1) : 0);
+        hostileInputs(HOSTILE_BYTES).forEach((text, index) => {
+            let timing = measure(text, large[index]!, HOSTILE_RUNS);
+            // A quadratic scan is over the limit on every measurement; a load spike is not: look again before failing.
+            if (ratio(timing) >= HOSTILE_MAX_RATIO) timing = measure(text, large[index]!, HOSTILE_CONFIRM_RUNS);
+            expect(timing.largeMs).toBeLessThan(HOSTILE_BACKSTOP_MS);
+            expect(ratio(timing)).toBeLessThan(HOSTILE_MAX_RATIO);
         });
     });
 
