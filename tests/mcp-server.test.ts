@@ -5,7 +5,8 @@ import * as child_process from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ALL_SPRINTS, PmServer, openerFor } from '../src/mcp-server';
-import { Ledger, openLedger, LEDGER_FILE, MISSING_BINDING_HELP } from '../src/ledger/db';
+import { BOOTSTRAP_FIX, Ledger, openLedger, LEDGER_FILE, MISSING_BINDING_HELP } from '../src/ledger/db';
+import * as sessions from '../src/ledger/sessions';
 import { BOOTSTRAP_NOTICE } from '../src/hook/recover';
 import { CLAUDE_SESSION_ENV, MCP_CLIENT, getSession } from '../src/ledger/sessions';
 import { ensureWorkspace } from '../src/ledger/workspaces';
@@ -594,6 +595,8 @@ describe('a server started before the SessionStart bootstrap has built the SQLit
         const waiting = await call('track_work', TRACK);
         expect(waiting.isError).toBe(true);
         expect(waiting.content[0].text).toContain(BOOTSTRAP_NOTICE);
+        // A build that failed never finishes: the way out has to be in the same message.
+        expect(waiting.content[0].text).toContain(`\`${BOOTSTRAP_FIX}\``);
 
         opening = 'ready';
         const tracked = await call('track_work', TRACK);
@@ -630,6 +633,23 @@ describe('a server started before the SessionStart bootstrap has built the SQLit
         expect((await call('track_work', TRACK)).isError).toBeFalsy();
         expect(getSession(ledger.db, SESSION_ID)?.client).toBe(MCP_CLIENT);
         expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
+    });
+
+    it('closes a ledger whose setup failed, so retrying calls do not leak one handle each', async () => {
+        const opened: Ledger[] = [];
+        const freshLedger = (): Ledger => {
+            const db = openLedger(path.join(ledger.dir, LEDGER_FILE));
+            opened.push(db);
+            return db;
+        };
+        const failOnce = jest.spyOn(sessions, 'startSession').mockImplementationOnce(() => { throw new Error(OTHER_OPEN_ERROR); });
+        delete process.env[CLAUDE_SESSION_ENV];
+        const server = new PmServer({ openDb: freshLedger, cwd: ledger.dir, sessionId: SESSION_ID, legacyImport: false });
+        await expect(server.run(InMemoryTransport.createLinkedPair()[1])).rejects.toThrow(OTHER_OPEN_ERROR);
+        failOnce.mockRestore();
+
+        expect(opened).toHaveLength(1);
+        expect(opened[0].open).toBe(false);
     });
 });
 

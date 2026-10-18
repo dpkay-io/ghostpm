@@ -5,7 +5,7 @@ import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { Ledger, MS_PER_HOUR, isMissingAddon, openLedger } from "./ledger/db";
+import { BOOTSTRAP_FIX, Ledger, MS_PER_HOUR, isMissingAddon, openLedger } from "./ledger/db";
 import { BOOTSTRAP_NOTICE } from "./hook/recover";
 import { ensureWorkspace, getWorkspace } from "./ledger/workspaces";
 import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
@@ -43,7 +43,7 @@ export const CURRENT_USER_REF = "@me";
 /** Said on stderr once the stdio transport is up: stdout belongs to the protocol. */
 export const STDIO_BANNER = "GhostPM MCP server running on stdio";
 /** A tool call under Claude Code before its SessionStart hook's bootstrap has built the addon: a later call opens the ledger. */
-export const ADDON_COMPILING = `${BOOTSTRAP_NOTICE} Retry this call shortly.`;
+export const ADDON_COMPILING = `${BOOTSTRAP_NOTICE} Retry this call shortly; if it keeps failing, run \`${BOOTSTRAP_FIX}\`.`;
 
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
@@ -196,10 +196,16 @@ export class PmServer {
     /** Everything that waits on the ledger: this client's session, the legacy import, sync and the exit handlers. */
     private open(): Ledger {
         const db = this.openDb();
-        if (!this.inClaudeCode) {
-            startSession(db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: ensureWorkspace(db, this.cwd).id });
+        try {
+            if (!this.inClaudeCode) {
+                startSession(db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: ensureWorkspace(db, this.cwd).id });
+            }
+            if (this.legacyImport) runLegacyImport(db);
+        } catch (error) {
+            // Not kept, so the next call opens again: close this handle rather than leak one per call.
+            db.close();
+            throw error;
         }
-        if (this.legacyImport) runLegacyImport(db);
         if (this.stdio) {
             // Under Claude Code its SessionEnd hook ends the session: the hooks own that row.
             if (!this.inClaudeCode) process.once('exit', () => endSession(db, this.sessionId));
