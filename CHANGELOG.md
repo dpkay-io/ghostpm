@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.1 (unreleased)
+## 2.0.1 (2026-10-18)
 
 - **Switching Node.js no longer breaks GhostPM.** The SQLite addon is now built once per Node.js version, under `~/.ghostpm/native/<platform>-<arch>-<ABI>/`. Before, an addon built for one Node.js made the MCP server fail to start under another, and `ghostpm bootstrap` reported success while leaving the old addon in place. After upgrading, the first session rebuilds the addon in the background once; the 2.0.0 file `native/better_sqlite3.node` is no longer read and is safe to delete.
 
