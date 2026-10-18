@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-10-18)
 
 GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whole machine, filled automatically from your Claude Code sessions. This is a breaking release. Commands, settings and the files GhostPM keeps are described in the [README](README.md); this page lists what changed.
 
