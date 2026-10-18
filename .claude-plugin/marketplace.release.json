@@ -9,7 +9,7 @@
     {
       "name": "ghostpm",
       "description": "Invisible project management: captures work from your sessions into a local task ledger shared by every tool on the machine.",
-      "source": { "source": "npm", "package": "ghostpm", "version": "2.0.0" },
+      "source": { "source": "npm", "package": "ghostpm", "version": "2.0.1" },
       "category": "productivity"
     }
   ]

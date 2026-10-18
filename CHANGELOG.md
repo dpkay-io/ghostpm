@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1 (unreleased)
+
+- **Switching Node.js no longer breaks GhostPM.** The SQLite addon is now built once per Node.js version, under `~/.ghostpm/native/<platform>-<arch>-<ABI>/`. Before, an addon built for one Node.js made the MCP server fail to start under another, and `ghostpm bootstrap` reported success while leaving the old addon in place. After upgrading, the first session rebuilds the addon in the background once; the 2.0.0 file `native/better_sqlite3.node` is no longer read and is safe to delete.
+
 ## 2.0.0 (2026-10-18)
 
 GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whole machine, filled automatically from your Claude Code sessions. This is a breaking release. Commands, settings and the files GhostPM keeps are described in the [README](README.md); this page lists what changed.

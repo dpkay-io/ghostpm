@@ -1,6 +1,6 @@
 {
   "name": "ghostpm",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Local-first task ledger for AI coding sessions: captures work from Claude Code, shows it machine-wide, and syncs it to GitHub Issues or Azure DevOps.",
   "main": "dist/mcp-server.js",
