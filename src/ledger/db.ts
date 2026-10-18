@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { bootstrappedBindingPath, isMissingBinding } from './binding';
+import { bootstrappedBindingPath, isMissingBinding, isWrongNodeBinding } from './binding';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGhostpmHome } from '../registry';
@@ -198,23 +198,28 @@ export const BOOTSTRAP_FIX = 'ghostpm bootstrap';
  * never blocked, which means this text is often the only trace a user will ever see.
  */
 export const MISSING_BINDING_HELP =
-    'GhostPM cannot load SQLite: its native addon was never compiled. A Claude Code plugin '
+    'GhostPM cannot load SQLite: its native addon was never compiled for this Node.js. A Claude Code plugin '
     + 'install runs `npm ci --ignore-scripts`, and npm 12 blocks dependency install scripts by default; '
     + 'either way the step that builds it was skipped. '
     + `Run \`${BOOTSTRAP_FIX}\` to build it into the ghostpm home.`;
 
 /**
  * Every SQLite file GhostPM opens goes through here: falls back to a bootstrapped addon before giving up, so one build
- * survives every update (a plugin install has no addon of its own).
+ * survives every update (a plugin install has no addon of its own). An addon built for another Node.js is as good as
+ * none, wherever it sits, so a Node.js switch takes the same recovery as a fresh install.
  */
 export function openDatabase(filePath: string, options: Database.Options = {}): Ledger {
     try {
         return new Database(filePath, options);
     } catch (error) {
-        if (!isMissingBinding(error)) throw error;
-        const bootstrapped = bootstrappedBindingPath();
-        if (!fs.existsSync(bootstrapped)) throw new Error(MISSING_BINDING_HELP);
+        if (!isMissingBinding(error) && !isWrongNodeBinding(error)) throw error;
+    }
+    const bootstrapped = bootstrappedBindingPath();
+    if (!fs.existsSync(bootstrapped)) throw new Error(MISSING_BINDING_HELP);
+    try {
         return new Database(filePath, { ...options, nativeBinding: bootstrapped });
+    } catch (error) {
+        throw isWrongNodeBinding(error) ? new Error(MISSING_BINDING_HELP) : error;
     }
 }
 

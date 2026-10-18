@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGhostpmHome } from './registry';
-import { BINDING_FILE, bootstrappedBindingPath } from './ledger/binding';
+import { BINDING_FILE, abiFolder, bootstrappedBindingPath } from './ledger/binding';
 import { IS_WINDOWS, UNSAFE_IN_QUOTES, resolveCommand } from './cli';
 import { minimumNodeMajor } from './package-info';
 
@@ -85,7 +85,9 @@ export function prebuiltNote(): string {
  * `npm ci --ignore-scripts` skips.
  */
 export function bootstrapBinding(run: NpmRunner = runNpm, home: string = getGhostpmHome()): string {
-    const buildDir = path.join(home, BUILD_DIR);
+    // Per ABI like the addon: in a folder another Node.js built, npm finds better-sqlite3 "up to date" and skips the
+    // install script, leaving that Node.js's addon to be copied.
+    const buildDir = path.join(home, BUILD_DIR, abiFolder());
     if (IS_WINDOWS && buildDir.startsWith(UNC_PREFIX)) {
         throw new Error(`The GhostPM home ${home} is on a network share, where cmd.exe cannot run npm. Set GHOSTPM_HOME to a local folder and run \`ghostpm bootstrap\` again.`);
     }

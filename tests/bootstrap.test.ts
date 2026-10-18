@@ -7,7 +7,7 @@ import {
     BUILD_DIR, NpmRunner, SAFE_NPM_ARG, assertSafeNpmArgs, bootstrapBinding, installedAddonVersion, npmInstallArgs, runNpm,
 } from '../src/bootstrap';
 import { IS_WINDOWS, resolveCommand } from '../src/cli';
-import { BINDING_FILE, bootstrappedBindingPath } from '../src/ledger/binding';
+import { BINDING_FILE, abiFolder, bootstrappedBindingPath } from '../src/ledger/binding';
 import { minimumNodeMajor } from '../src/package-info';
 import { removeTempDir } from './temp-dir';
 
@@ -28,11 +28,13 @@ interface NpmCall {
     cwd: string;
 }
 
+const builtAddon = (buildDir: string): string => path.join(buildDir, 'node_modules', 'better-sqlite3', 'build', 'Release', BINDING_FILE);
+
 /** Stands in for npm: records the call and leaves an addon where a real install would. */
 function fakeNpm(calls: NpmCall[]): NpmRunner {
     return (args, cwd) => {
         calls.push({ args, cwd });
-        const built = path.join(cwd, 'node_modules', 'better-sqlite3', 'build', 'Release', BINDING_FILE);
+        const built = builtAddon(cwd);
         fs.mkdirSync(path.dirname(built), { recursive: true });
         fs.writeFileSync(built, 'addon');
     };
@@ -70,9 +72,23 @@ describe('bootstrap', () => {
 
         bootstrapBinding(fakeNpm(calls), home);
 
-        expect(calls[0].cwd).toBe(path.join(home, BUILD_DIR));
+        expect(calls[0].cwd).toBe(path.join(home, BUILD_DIR, abiFolder()));
         expect(calls[0].args.join(' ')).not.toContain(HOSTILE_FOLDER);
         calls[0].args.forEach(arg => expect(arg).toMatch(SAFE_NPM_ARG));
+    });
+
+    it('never copies a build another Node.js left: npm calls that build "up to date" and skips the install script', () => {
+        // 2.0.0 built every Node.js in one folder, and another ABI's build may sit beside this one's.
+        const anotherAbi = `${process.platform}-${process.arch}-${Number(process.versions.modules) + 1}`;
+        const otherNodes = [path.join(home, BUILD_DIR), path.join(home, BUILD_DIR, anotherAbi)];
+        otherNodes.forEach(dir => {
+            fs.mkdirSync(path.dirname(builtAddon(dir)), { recursive: true });
+            fs.writeFileSync(builtAddon(dir), 'built for another Node.js');
+        });
+        const upToDate: NpmRunner = () => undefined;
+
+        expect(() => bootstrapBinding(upToDate, home)).toThrow('produced no addon');
+        expect(fs.existsSync(bootstrappedBindingPath(home))).toBe(false);
     });
 
     it('lets npm 12 run better-sqlite3\'s install script, and only that exact version\'s: a pinned allowScripts entry in the build folder\'s own package.json', () => {
@@ -88,7 +104,7 @@ describe('bootstrap', () => {
     });
 
     it('replaces a package.json an earlier build left, so its approval always names the version being built', () => {
-        const manifest = path.join(home, BUILD_DIR, 'package.json');
+        const manifest = path.join(home, BUILD_DIR, abiFolder(), 'package.json');
         fs.mkdirSync(path.dirname(manifest), { recursive: true });
         fs.writeFileSync(manifest, JSON.stringify({ dependencies: { 'better-sqlite3': '^12.0.0' }, allowScripts: { 'better-sqlite3@12.0.0': true } }));
         const seen: string[] = [];
@@ -159,7 +175,7 @@ describe('bootstrap', () => {
         // One string and no args array: no DEP0190 on Node 24, and cmd.exe never looks for npm in the working folder.
         expect(jest.mocked(execSync).mock.calls).toEqual([[
             `"${NPM_PATH}" install better-sqlite3@${INSTALLED} --prefix . --no-audit --no-fund`,
-            { cwd: path.join(home, BUILD_DIR), stdio: 'inherit' },
+            { cwd: path.join(home, BUILD_DIR, abiFolder()), stdio: 'inherit' },
         ]]);
         expect(execFileSync).not.toHaveBeenCalled();
         expect(spawnSync).not.toHaveBeenCalled();

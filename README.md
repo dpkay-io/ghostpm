@@ -125,7 +125,8 @@ Repos imported from 1.4.0 keep 1.4.0's behaviour: they are stamped `sync_policy`
 | `hook.log` | Errors from hooks. A hook never interrupts a session. |
 | `sync.log` | Sync runs: pushes and pulls that failed, and secrets redacted before a push |
 | `hook.log.1`, `sync.log.1` | The previous log. A log over 1 MiB is moved here, replacing the one before, so each log takes about 2 MiB at most. |
-| `native/better_sqlite3.node` | The SQLite addon built by `bootstrap` |
+| `native/<platform>-<arch>-<ABI>/better_sqlite3.node` | The SQLite addon `bootstrap` built for one Node.js, such as `native/win32-x64-137/` for Node.js 24 on 64-bit Windows. Each Node.js major you use gets its own, built the first time it runs GhostPM. |
+| `native/better_sqlite3.node` | Where 2.0.0 put the addon. No longer read. Safe to delete. |
 | `native-build/` | Where `bootstrap` ran npm. Safe to delete. |
 | `ghostpm.js` | Statusline launcher, only after `setup --statusline` |
 | `workspaces.json` | The 1.4.0 workspace list. Read once during the upgrade and never written. |
