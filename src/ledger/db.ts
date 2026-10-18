@@ -218,13 +218,18 @@ export function openDatabase(filePath: string, options: Database.Options = {}): 
     }
 }
 
+/** True for openDatabase's failure when neither this copy's addon nor a bootstrapped one loads. */
+export function isMissingAddon(error: unknown): boolean {
+    return error instanceof Error && error.message === MISSING_BINDING_HELP;
+}
+
 /** True only when neither this copy's addon nor a bootstrapped one loads. In memory: touches no file. */
 export function sqliteAddonMissing(): boolean {
     try {
         openDatabase(':memory:').close();
         return false;
     } catch (error) {
-        return error instanceof Error && error.message === MISSING_BINDING_HELP;
+        return isMissingAddon(error);
     }
 }
 

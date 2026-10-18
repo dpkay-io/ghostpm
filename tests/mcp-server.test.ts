@@ -5,7 +5,9 @@ import * as child_process from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ALL_SPRINTS, PmServer, openerFor } from '../src/mcp-server';
-import { Ledger, openLedger, LEDGER_FILE } from '../src/ledger/db';
+import { Ledger, openLedger, LEDGER_FILE, MISSING_BINDING_HELP } from '../src/ledger/db';
+import { BOOTSTRAP_NOTICE } from '../src/hook/recover';
+import { CLAUDE_SESSION_ENV, MCP_CLIENT, getSession } from '../src/ledger/sessions';
 import { ensureWorkspace } from '../src/ledger/workspaces';
 import { recordEvent } from '../src/ledger/events';
 import { SINCE_HELP } from '../src/surfaces/since';
@@ -532,6 +534,102 @@ describe('mcp server in a GitHub workspace', () => {
         expect(await call('get_project_state')).toContain(
             `**Sync:** off (sync_policy off; \`ghostpm config set sync_policy auto --workspace ${quoteForShell(workspacePath)}\` turns it on)`,
         );
+    });
+});
+
+describe('a server started before the SessionStart bootstrap has built the SQLite addon', () => {
+    const TRACK = { title: 'Login fix', intent: 'implement' };
+    const OTHER_OPEN_ERROR = 'SQLITE_CORRUPT: database disk image is malformed';
+    let ledger: TempLedger;
+    let client: Client | undefined;
+    let restoreHomes: () => void;
+    let originalClaudeSession: string | undefined;
+    /** What the next open does: fail as a plugin install with no addon does, fail otherwise, or open the ledger. */
+    let opening: 'missing' | 'other' | 'ready';
+
+    const openDb = (): Ledger => {
+        if (opening === 'missing') throw new Error(MISSING_BINDING_HELP);
+        if (opening === 'other') throw new Error(OTHER_OPEN_ERROR);
+        return ledger.db;
+    };
+
+    const call = async (name: string, args: Record<string, unknown>) =>
+        await client!.callTool({ name, arguments: args }) as { content: { text: string }[]; isError?: boolean };
+
+    /** Started as Claude Code starts it: no session id passed in, CLAUDE_CODE_SESSION_ID (or none) in the environment. */
+    const startServer = async (claudeSession: string | undefined, sessionId?: string): Promise<void> => {
+        if (claudeSession === undefined) delete process.env[CLAUDE_SESSION_ENV];
+        else process.env[CLAUDE_SESSION_ENV] = claudeSession;
+        const server = new PmServer({ openDb, cwd: ledger.dir, sessionId, legacyImport: false });
+        client = new Client({ name: 'claude-code', version: '1.0.0' });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await Promise.all([client.connect(clientTransport), server.run(serverTransport)]);
+    };
+
+    beforeEach(() => {
+        (child_process.execFile as unknown as jest.Mock).mockImplementation((...args: unknown[]) => {
+            const cb = args[args.length - 1];
+            if (typeof cb === 'function') (cb as (e: Error | null, out: string, err: string) => void)(new Error(GIT_FAILURE), '', '');
+        });
+        ledger = tempLedger();
+        restoreHomes = isolateHomes(ledger.dir);
+        originalClaudeSession = process.env[CLAUDE_SESSION_ENV];
+        opening = 'missing';
+        client = undefined;
+    });
+
+    afterEach(async () => {
+        await client?.close();
+        if (originalClaudeSession !== undefined) process.env[CLAUDE_SESSION_ENV] = originalClaudeSession;
+        else delete process.env[CLAUDE_SESSION_ENV];
+        restoreHomes();
+        ledger.cleanup();
+        jest.clearAllMocks();
+    });
+
+    it('still connects with every tool, says the addon is compiling, and works once it is built, without a restart', async () => {
+        await startServer('claude-1');
+        expect((await client!.listTools()).tools.map(t => t.name).sort()).toEqual(TOOL_NAMES);
+
+        const waiting = await call('track_work', TRACK);
+        expect(waiting.isError).toBe(true);
+        expect(waiting.content[0].text).toContain(BOOTSTRAP_NOTICE);
+
+        opening = 'ready';
+        const tracked = await call('track_work', TRACK);
+        expect(tracked.isError).toBeFalsy();
+        const id = Number(tracked.content[0].text.match(/^Created T(\d+)/)![1]);
+        expect(getTask(ledger.db, id)?.title).toBe(TRACK.title);
+    });
+
+    it('surfaces any other open failure as it is, not as the compiling notice', async () => {
+        await startServer('claude-1');
+        opening = 'other';
+        const failed = await call('track_work', TRACK);
+        expect(failed.isError).toBe(true);
+        expect(failed.content[0].text).toContain(OTHER_OPEN_ERROR);
+        expect(failed.content[0].text).not.toContain(BOOTSTRAP_NOTICE);
+    });
+
+    it('still refuses to start on any other open failure', async () => {
+        opening = 'other';
+        delete process.env[CLAUDE_SESSION_ENV];
+        const server = new PmServer({ openDb, cwd: ledger.dir, sessionId: SESSION_ID, legacyImport: false });
+        await expect(server.run(InMemoryTransport.createLinkedPair()[1])).rejects.toThrow(OTHER_OPEN_ERROR);
+    });
+
+    it('outside Claude Code, where no hook builds it, gives the bootstrap advice and creates its session once the ledger opens', async () => {
+        await startServer(undefined, SESSION_ID);
+        const missing = await call('track_work', TRACK);
+        expect(missing.isError).toBe(true);
+        expect(missing.content[0].text).toContain(MISSING_BINDING_HELP);
+        expect(getSession(ledger.db, SESSION_ID)).toBeUndefined();
+
+        opening = 'ready';
+        expect((await call('track_work', TRACK)).isError).toBeFalsy();
+        expect((await call('track_work', TRACK)).isError).toBeFalsy();
+        expect(getSession(ledger.db, SESSION_ID)?.client).toBe(MCP_CLIENT);
+        expect(ledger.db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
     });
 });
 

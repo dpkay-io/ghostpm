@@ -5,7 +5,8 @@ import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { Ledger, MS_PER_HOUR, openLedger } from "./ledger/db";
+import { Ledger, MS_PER_HOUR, isMissingAddon, openLedger } from "./ledger/db";
+import { BOOTSTRAP_NOTICE } from "./hook/recover";
 import { ensureWorkspace, getWorkspace } from "./ledger/workspaces";
 import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from "./ledger/tasks";
 import { listEvents } from "./ledger/events";
@@ -41,6 +42,8 @@ export const CLEAR_SPRINT = "__clear__";
 export const CURRENT_USER_REF = "@me";
 /** Said on stderr once the stdio transport is up: stdout belongs to the protocol. */
 export const STDIO_BANNER = "GhostPM MCP server running on stdio";
+/** A tool call under Claude Code before its SessionStart hook's bootstrap has built the addon: a later call opens the ledger. */
+export const ADDON_COMPILING = `${BOOTSTRAP_NOTICE} Retry this call shortly.`;
 
 const UNKNOWN = "_unknown_";
 const NONE_SET = "_none set_";
@@ -100,6 +103,8 @@ const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task l
 
 export interface PmServerOptions {
     db?: Ledger;
+    /** Opens the ledger when `db` is not given. Defaults to openLedger. */
+    openDb?: () => Ledger;
     cwd?: string;
     sessionId?: string;
     /** Import legacy per-repo databases on start. Tests disable this. */
@@ -151,31 +156,59 @@ export function openerFor(link: string, platform: NodeJS.Platform = process.plat
 
 export class PmServer {
     private readonly server: McpServer;
-    private readonly db: Ledger;
+    private readonly openDb: () => Ledger;
+    /** Opened on first need, not at start: a plugin install has no addon until its SessionStart bootstrap builds one. */
+    private ledger?: Ledger;
     private readonly cwd: string;
     private readonly sessionId: string;
     /** Started by Claude Code: its hooks own the session row, and tool calls follow its current conversation. */
     private readonly inClaudeCode: boolean;
     private readonly legacyImport: boolean;
+    /** A real client (set by run): the sync runner and the exit handlers start once the ledger opens. */
+    private stdio = false;
 
     constructor(options: PmServerOptions = {}) {
         this.server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
-        this.db = options.db ?? openLedger();
+        const injected = options.db;
+        this.openDb = injected ? () => injected : options.openDb ?? openLedger;
         this.cwd = options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
         // Claude Code's own id, so track_work attaches the session its hooks read. An empty value is no id.
         const claudeSession = options.sessionId === undefined ? process.env[CLAUDE_SESSION_ENV] || undefined : undefined;
         this.inClaudeCode = claudeSession !== undefined;
         this.sessionId = options.sessionId ?? claudeSession ?? mcpSessionId();
         this.legacyImport = options.legacyImport ?? true;
-        if (!this.inClaudeCode) {
-            startSession(this.db, {
-                id: this.sessionId,
-                client: MCP_CLIENT,
-                cwd: this.cwd,
-                workspaceId: ensureWorkspace(this.db, this.cwd).id,
-            });
-        }
         this.registerTools();
+    }
+
+    /**
+     * The ledger, opened again on every call until it opens, then kept. Under Claude Code a missing addon means its
+     * SessionStart hook is compiling one, so the call says to retry; elsewhere the error carries the bootstrap advice.
+     * This server never starts a bootstrap itself: two builds in one folder compete.
+     */
+    private get db(): Ledger {
+        try {
+            return this.ledger ??= this.open();
+        } catch (error) {
+            throw this.inClaudeCode && isMissingAddon(error) ? new Error(ADDON_COMPILING) : error;
+        }
+    }
+
+    /** Everything that waits on the ledger: this client's session, the legacy import, sync and the exit handlers. */
+    private open(): Ledger {
+        const db = this.openDb();
+        if (!this.inClaudeCode) {
+            startSession(db, { id: this.sessionId, client: MCP_CLIENT, cwd: this.cwd, workspaceId: ensureWorkspace(db, this.cwd).id });
+        }
+        if (this.legacyImport) runLegacyImport(db);
+        if (this.stdio) {
+            // Under Claude Code its SessionEnd hook ends the session: the hooks own that row.
+            if (!this.inClaudeCode) process.once('exit', () => endSession(db, this.sessionId));
+            // A real client: this process competes for the sync lease (spec §8.1). An injected
+            // transport (tests) never starts a background timer.
+            const runner = startSyncRunner(db, defaultSyncDeps(db));
+            process.once('exit', () => runner.stop());
+        }
+        return db;
     }
 
     /** The session tool calls belong to: under Claude Code its current conversation, which /clear replaces while this server runs on. */
@@ -512,19 +545,17 @@ export class PmServer {
     }
 
     public async run(transport?: Transport): Promise<void> {
-        if (this.legacyImport) runLegacyImport(this.db);
-        const stdio = transport === undefined;
-        if (stdio) {
-            // Under Claude Code its SessionEnd hook ends the session: the hooks own that row.
-            if (!this.inClaudeCode) process.once('exit', () => endSession(this.db, this.sessionId));
-            // A real client: this process competes for the sync lease (spec §8.1). An injected
-            // transport (tests) never starts a background timer, nor sweeps the temporary folder.
-            void sweepStaleArgDirs();
-            const runner = startSyncRunner(this.db, defaultSyncDeps(this.db));
-            process.once('exit', () => runner.stop());
+        this.stdio = transport === undefined;
+        // An injected transport (tests) never sweeps the temporary folder.
+        if (this.stdio) void sweepStaleArgDirs();
+        try {
+            this.ledger = this.open();
+        } catch (error) {
+            // Connect anyway, so the tools are there and say so; any other failure refuses to start, as it always has.
+            if (!isMissingAddon(error)) throw error;
         }
         await this.server.connect(transport ?? new StdioServerTransport());
-        if (stdio) console.error(`${STDIO_BANNER} (${this.sessionId})`);
+        if (this.stdio) console.error(`${STDIO_BANNER} (${this.sessionId})`);
     }
 }
 
