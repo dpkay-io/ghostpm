@@ -175,6 +175,7 @@ claude plugin uninstall ghostpm@ghostpm-local
 claude plugin marketplace remove ghostpm-local
 
 claude plugin marketplace add dpkay-io/ghostpm
+# On npm 12 first: $env:npm_config_allow_remote='all' (Claude Code's `npm pack <url>` is refused otherwise)
 claude plugin install ghostpm@ghostpm
 claude plugin list
 Test-Path (Join-Path $HOME '.claude\plugins\cache\ghostpm\ghostpm\2.0.0\node_modules\@modelcontextprotocol\sdk\package.json')

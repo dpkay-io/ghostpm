@@ -48,7 +48,7 @@ GhostPM 2.0 replaces the per-repo cache with one local-first ledger for the whol
 
 ### Upgrading from 1.4.0
 
-1. Install the plugin: `claude plugin marketplace add dpkay-io/ghostpm`, then `claude plugin install ghostpm@ghostpm`. For the terminal commands, also run `npm install -g ghostpm@2`. Keep both on the same version.
+1. Install the plugin: `claude plugin marketplace add dpkay-io/ghostpm`, then `claude plugin install ghostpm@ghostpm` (on npm 12, `npm_config_allow_remote=all claude plugin install ghostpm@ghostpm`; see the README). For the terminal commands, also run `npm install -g ghostpm@2`. Keep both on the same version.
 2. Start a Claude Code session. On its first start, the MCP server imports every 1.4.0 repo it can find: those in `~/.ghostpm/workspaces.json`, plus projects in `~/.claude.json` that have a `.mcp-pm.yml`. It brings over tasks, vendor links, comments, the detected user and the active sprint, and queues the changes 1.4.0 had not pushed yet. Those repos sync as 1.4.0 did (`linked-only`: existing linked items only, no phase comments) until you move them to `auto` (`ghostpm init` there, or `ghostpm config set sync_policy auto --workspace <repo folder>`). The old files stay where they were, untouched. For a repo it missed, run `ghostpm init` in that repo.
 3. Run `ghostpm doctor`. It prints the commands that remove your 1.4.0 MCP registrations (`claude mcp remove ghostpm -s user`, and `claude mcp remove ghostpm -s local` per project) and the old `~/.claude/skills/ghostpm` folder. Nothing is removed until you run them.
 

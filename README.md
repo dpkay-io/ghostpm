@@ -18,6 +18,14 @@ claude plugin marketplace add dpkay-io/ghostpm
 claude plugin install ghostpm@ghostpm
 ```
 
+If `npm -v` prints 12 or later, the install fails with `EALLOWREMOTE`: Claude Code downloads the plugin with `npm pack <tarball URL>`, which npm 12 refuses by default. Allow it for that one command:
+
+```
+npm_config_allow_remote=all claude plugin install ghostpm@ghostpm
+```
+
+In PowerShell: `$env:npm_config_allow_remote='all'; claude plugin install ghostpm@ghostpm; Remove-Item env:npm_config_allow_remote`. Your npm config is not changed.
+
 The plugin brings the MCP server, the hooks and the `ghostpm:ghostpm` skill. The first session after installing builds GhostPM's SQLite addon in the background and says so. This needs the network once, and tracking starts when it finishes.
 
 ### Terminal commands: dashboard, standup, status
