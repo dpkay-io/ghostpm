@@ -1,12 +1,15 @@
 import { CliArg, CliError, Runner, freeText, runCli } from '../cli';
-import { CLOSED_PHASES, Phase, isPhase } from '../ledger/types';
+import { DEFAULT_LABEL_PREFIX } from '../ledger/settings';
+import { CLOSED_PHASES, Phase } from '../ledger/types';
 import { REOPEN_PHASE } from '../ledger/work';
+import { DEFAULT_PHASE_LABELS, PhaseLabels, sameLabel } from './phase-labels';
 import {
     DesiredState, GoneError, LinkState, RemoteItem, SyncPausedError, VENDOR_CALL_TIMEOUT_MS, VendorAdapter, linkStateOf, markerNonces, stripMarkers,
 } from './vendor';
 
 const GH = 'gh';
-export const PHASE_LABEL_PREFIX = 'ghostpm:';
+/** The default prefix; `label_prefix` and `phase_label_map` choose others. */
+export const PHASE_LABEL_PREFIX = DEFAULT_LABEL_PREFIX;
 const ISSUE_FIELDS = 'number,title,body,state,stateReason,labels,assignees,milestone,updatedAt,url';
 const PR_FIELDS = 'state,mergedAt';
 const REPO_FIELDS = 'nameWithOwner';
@@ -67,30 +70,38 @@ const LABEL_EXISTS = /already exists/i;
 /** Canonical owner/name per repo (lower-cased), resolved once per process: a renamed repo's issues answer under the new name. */
 const canonicalNames = new Map<string, string>();
 
-export const phaseLabel = (phase: Phase): string => `${PHASE_LABEL_PREFIX}${phase}`;
+/** The default label of `phase`; an adapter uses its workspace's PhaseLabels. */
+export const phaseLabel = (phase: Phase, labels: PhaseLabels = DEFAULT_PHASE_LABELS): string => labels.label(phase);
 
-function labelledPhase(labels: string[]): Phase | null {
-    for (const label of labels) {
-        const name = label.startsWith(PHASE_LABEL_PREFIX) ? label.slice(PHASE_LABEL_PREFIX.length) : '';
-        if (isPhase(name) && !CLOSED_PHASES.has(name)) return name;
+/**
+ * The phase GhostPM's labels show, or null: a current label wins over a default or retired one left beside it (a
+ * person who added the new label meant it); within each, the first listed.
+ */
+function labelledPhase(labels: string[], names: PhaseLabels): Phase | null {
+    for (const lookup of [names.currentPhaseOf, names.phaseOf]) {
+        for (const label of labels) {
+            const phase = lookup(label);
+            if (phase !== null) return phase;
+        }
     }
     return null;
 }
 
 /** GitHub knows open/closed and our phase label; everything else is the local phase's to say. */
-export function githubPhaseOf(state: string, labels: string[], localPhase: Phase): Phase {
+export function githubPhaseOf(state: string, labels: string[], localPhase: Phase, names: PhaseLabels = DEFAULT_PHASE_LABELS): Phase {
     const [base, reason] = state.split(REASON_SEPARATOR);
     if (base === CLOSED) return reason === NOT_PLANNED || reason === DUPLICATE ? 'dropped' : 'done';
-    const labelled = labelledPhase(labels);
+    const labelled = labelledPhase(labels, names);
     if (labelled !== null) return labelled;
     return CLOSED_PHASES.has(localPhase) ? REOPEN_PHASE : localPhase;
 }
 
 /** Spec §8.3: a pushed issue carries exactly its own phase label while open, and none once closed. */
-export function githubShowsPhase(state: string, labels: string[], phase: Phase): boolean {
-    const own = labels.filter(label => label.startsWith(PHASE_LABEL_PREFIX));
-    const wanted = CLOSED_PHASES.has(phase) ? [] : [phaseLabel(phase)];
-    return githubPhaseOf(state, labels, phase) === phase && own.length === wanted.length && own.every(label => wanted.indexOf(label) >= 0);
+export function githubShowsPhase(state: string, labels: string[], phase: Phase, names: PhaseLabels = DEFAULT_PHASE_LABELS): boolean {
+    const own = labels.filter(label => names.isOurs(label));
+    const wanted = CLOSED_PHASES.has(phase) ? [] : [names.label(phase)];
+    return githubPhaseOf(state, labels, phase, names) === phase && own.length === wanted.length
+        && own.every(label => wanted.some(name => sameLabel(name, label)));
 }
 
 function toItem(issue: GhIssue): RemoteItem {
@@ -129,7 +140,11 @@ export class GitHubAdapter implements VendorAdapter {
     /** `gh issue list --limit`. */
     readonly pages = true;
 
-    constructor(private readonly repo: string, private readonly run: Runner = runCli) {}
+    constructor(
+        private readonly repo: string,
+        private readonly run: Runner = runCli,
+        private readonly labels: PhaseLabels = DEFAULT_PHASE_LABELS,
+    ) {}
 
     private async gh(args: CliArg[], input?: string, itemLevel = false): Promise<string> {
         try {
@@ -144,10 +159,10 @@ export class GitHubAdapter implements VendorAdapter {
     }
 
     private async ensureLabel(label: string): Promise<void> {
-        const key = `${this.repo.toLowerCase()} ${label}`;
+        const key = `${this.repo.toLowerCase()} ${label.toLowerCase()}`;
         if (ensuredLabels.has(key)) return;
         try {
-            await this.gh(['label', 'create', label, ...this.repoArgs()]);
+            await this.gh(['label', 'create', freeText(label), ...this.repoArgs()]);
         } catch (error) {
             // Already there, as someone left it: ensured. Anything else (auth, permissions) is a real failure.
             if (!(error instanceof CliError && LABEL_EXISTS.test(error.stderr))) throw error;
@@ -195,9 +210,9 @@ export class GitHubAdapter implements VendorAdapter {
     async create(desired: DesiredState, body: string): Promise<RemoteItem> {
         const args: CliArg[] = ['issue', 'create', ...this.repoArgs(), '--title', freeText(desired.title)];
         if (!CLOSED_PHASES.has(desired.phase)) {
-            const label = phaseLabel(desired.phase);
+            const label = this.labels.label(desired.phase);
             await this.ensureLabel(label);
-            args.push('--label', label);
+            args.push('--label', freeText(label));
         }
         args.push('--body-file', STDIN_FILE);
         const printed = await this.gh(args, body);
@@ -210,7 +225,7 @@ export class GitHubAdapter implements VendorAdapter {
         } catch {
             return {
                 remoteId: created[1], url: printed.trim(), title: desired.title, body: stripMarkers(body), markers: markerNonces(body), state: OPEN,
-                labels: CLOSED_PHASES.has(desired.phase) ? [] : [phaseLabel(desired.phase)],
+                labels: CLOSED_PHASES.has(desired.phase) ? [] : [this.labels.label(desired.phase)],
                 assignee: null, milestone: null, updatedAt: new Date().toISOString(),
             };
         }
@@ -221,15 +236,16 @@ export class GitHubAdapter implements VendorAdapter {
         const wasClosed = (link.state ?? '').split(REASON_SEPARATOR)[0] === CLOSED;
         const edit: CliArg[] = ['issue', 'edit', link.remoteId, ...this.repoArgs(), '--title', freeText(desired.title)];
         // A closed issue carries no phase label (spec §8.3: labels only for open phases); an open one carries exactly its own.
-        const label = reason === undefined ? phaseLabel(desired.phase) : null;
+        const label = reason === undefined ? this.labels.label(desired.phase) : null;
         if (label !== null) await this.ensureLabel(label);
         for (const old of link.labels) {
-            if (old.startsWith(PHASE_LABEL_PREFIX) && old !== label) edit.push('--remove-label', freeText(old));
+            if (this.labels.isOurs(old) && (label === null || !sameLabel(old, label))) edit.push('--remove-label', freeText(old));
         }
-        if (label !== null && link.labels.indexOf(label) < 0) edit.push('--add-label', label);
+        if (label !== null && !link.labels.some(old => sameLabel(old, label))) edit.push('--add-label', freeText(label));
         // `gh issue close` on a closed issue changes nothing, so a done <-> dropped move reopens first. A close that already
         // means the phase stays: a duplicate is dropped, and closing it again as not planned would lose that (ruling F12).
-        const needsClose = reason !== undefined && (!wasClosed || githubPhaseOf(link.state ?? '', link.labels, desired.phase) !== desired.phase);
+        const needsClose = reason !== undefined
+            && (!wasClosed || githubPhaseOf(link.state ?? '', link.labels, desired.phase, this.labels) !== desired.phase);
         if (wasClosed && (reason === undefined || needsClose)) await this.gh(['issue', 'reopen', link.remoteId, ...this.repoArgs()], undefined, true);
         await this.gh(edit, undefined, true);
         if (needsClose) {
@@ -281,11 +297,11 @@ export class GitHubAdapter implements VendorAdapter {
     }
 
     phaseOf(state: string, labels: string[], localPhase: Phase): Phase {
-        return githubPhaseOf(state, labels, localPhase);
+        return githubPhaseOf(state, labels, localPhase, this.labels);
     }
 
     showsPhase(state: string, labels: string[], phase: Phase): boolean {
-        return githubShowsPhase(state, labels, phase);
+        return githubShowsPhase(state, labels, phase, this.labels);
     }
 
     titlesMatch(received: string, known: string): boolean {

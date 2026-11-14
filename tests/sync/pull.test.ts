@@ -5,10 +5,10 @@ import { ensureWorkspace } from '../../src/ledger/workspaces';
 import { getTask, getVendorLink, updateTask, TaskUpdate } from '../../src/ledger/tasks';
 import { listEvents, recordEvent } from '../../src/ledger/events';
 import { startSession } from '../../src/ledger/sessions';
-import { recordEvidence, trackWork } from '../../src/ledger/work';
+import { markVerified, recordEvidence, trackWork } from '../../src/ledger/work';
 import {
     getWorkspaceSetting, setSetting, setWorkspaceSetting, DEFAULT_SYNC_PULL_MINUTES, SETTING_CURRENT_USER, SETTING_LAST_SYNC,
-    SETTING_PROGRESS_COMMENTS, SETTING_PULL_WATERMARK, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO,
+    SETTING_PROGRESS_COMMENTS, SETTING_PULL_WATERMARK, SETTING_SYNC_POLICY, SYNC_POLICY_AUTO, COMPLETION_REVIEW, SETTING_COMPLETION,
 } from '../../src/ledger/settings';
 import { TaskRow, WorkspaceRow } from '../../src/ledger/types';
 import { acquireLease, LeaseLostError, LEASE_TTL_MS } from '../../src/sync/lease';
@@ -388,6 +388,44 @@ describe('pulling a vendor workspace', () => {
         await push();
 
         expect(vendor.items.get('1')!.state).toBe('closed:completed');
+    });
+
+    describe('under completion review', () => {
+        /** A task this session tracked, committed, verified by Claude and pushed: in_review on the vendor. */
+        const verifiedAndPushed = async (): Promise<TaskRow> => {
+            setWorkspaceSetting(ledger.db, workspace.id, SETTING_COMPLETION, COMPLETION_REVIEW);
+            const task = track('Verified work');
+            recordEvidence(ledger.db, {
+                taskId: task.id, sessionId: SESSION_ID, source: SOURCE, workspaceId: workspace.id, cwd: workspace.path,
+                files: [], committed: true, prUrls: [],
+            });
+            markVerified(ledger.db, { taskId: task.id, sessionId: SESSION_ID, source: SOURCE, verified: 'npm test passed' });
+            await push();
+            return task;
+        };
+
+        it('pushes the verified move and its note, then reaches done when the issue is closed on the vendor', async () => {
+            const task = await verifiedAndPushed();
+            expect(vendor.items.get('1')).toMatchObject({ state: 'open', labels: ['ghostpm:in_review'] });
+            expect(vendor.calls.filter(call => call.op === 'comment').map(call => call.text)).toContainEqual(expect.stringContaining('Verified: npm test passed'));
+
+            vendor.humanEdit('1', { state: 'closed:completed' });   // "Fixes #1" reached the default branch
+            await pull();
+
+            expect(getTask(ledger.db, task.id)!.phase).toBe('done');
+        });
+
+        it('reaches done when a PR recorded on the verified task merges: the verified move does not block it', async () => {
+            const task = await verifiedAndPushed();
+            recordEvent(ledger.db, { taskId: task.id, kind: 'pr', source: 'hook:claude-code', sessionId: SESSION_ID, payload: { url: PR_URL } });
+            vendor.prs.set(PR_URL, new Date(Date.now() + MINUTE_MS).toISOString());
+
+            expect((await pull()).merged).toBe(1);
+            await push();
+
+            expect(getTask(ledger.db, task.id)!.phase).toBe('done');
+            expect(vendor.items.get('1')!.state).toBe('closed:completed');
+        });
     });
 
     it('marks the link of a deleted item broken and keeps the task', async () => {

@@ -1,10 +1,15 @@
 import * as fs from 'fs';
-import { Ledger } from './ledger/db';
+import { Ledger, write } from './ledger/db';
 import { ensureWorkspace, findWorkspace } from './ledger/workspaces';
 import {
-    SETTING_DEFS, SettingDef, SettingScope, deleteSetting, explainSetting, isSettingKey, setSetting, setWorkspaceSetting,
+    SETTING_DEFS, SETTING_LABEL_PREFIX, SETTING_PHASE_LABEL_MAP, SettingDef, SettingKey, SettingScope, deleteSetting, explainSetting, getSetting,
+    getWorkspaceSetting, isSettingKey, setSetting, setWorkspaceSetting,
 } from './ledger/settings';
-import { WorkspaceRow } from './ledger/types';
+import { WorkspaceRow, plural } from './ledger/types';
+import { describeLabelClash, relabelChanged, snapshotLabelNames } from './sync/phase-labels';
+
+/** Settings that decide which GitHub label each phase shows: changing one relabels the open issues it moves. */
+const LABEL_SETTINGS: ReadonlySet<SettingKey> = new Set<SettingKey>([SETTING_LABEL_PREFIX, SETTING_PHASE_LABEL_MAP]);
 
 const WORKSPACE_FLAG = '--workspace';
 const GET = 'get';
@@ -56,6 +61,37 @@ function targetOf(db: Ledger, key: string, scope: SettingScope, args: ConfigArgs
 
 const where = (workspace: WorkspaceRow | null): string => (workspace === null ? 'global' : `workspace ${workspace.path}`);
 
+/** Stores `value` (undefined removes it) at the command's scope. */
+function store(db: Ledger, key: string, workspace: WorkspaceRow | null, value: unknown): void {
+    if (workspace === null) {
+        if (value === undefined) deleteSetting(db, key);
+        else setSetting(db, key, value);
+    } else {
+        setWorkspaceSetting(db, workspace.id, key, value);
+    }
+}
+
+/**
+ * Works out and writes the change in one transaction: `next` gets the value stored at the command's scope (a setting
+ * set a part at a time merges into it) and answers what to store, undefined to remove it. A label setting is then
+ * checked (two phases sharing a label roll it back), and the open issues whose label it moved are queued to show the
+ * new one. Answers what was stored and a note about that relabelling, or ''.
+ */
+function applyChange(
+    db: Ledger, key: SettingKey, workspace: WorkspaceRow | null, next: (stored: unknown) => unknown,
+): { value: unknown; note: string } {
+    return write(db, () => {
+        const before = LABEL_SETTINGS.has(key) ? snapshotLabelNames(db) : null;
+        const value = next(workspace === null ? getSetting<unknown>(db, key) : getWorkspaceSetting<unknown>(db, workspace.id, key));
+        store(db, key, workspace, value);
+        if (before === null) return { value, note: '' };
+        const clash = describeLabelClash(db);
+        if (clash !== null) throw new Error(`Not changed: ${clash}. Give each phase its own label.`);
+        const queued = relabelChanged(db, before);
+        return { value, note: queued === 0 ? '' : `\n${plural(queued, 'open issue')} will be relabelled on the next sync.` };
+    });
+}
+
 export function runConfigCommand(db: Ledger, argv: readonly string[], cwd: string): string {
     const args = parseArgs(argv);
     if (args.action !== GET && args.action !== SET && args.action !== UNSET) throw new Error(CONFIG_USAGE);
@@ -71,17 +107,16 @@ export function runConfigCommand(db: Ledger, argv: readonly string[], cwd: strin
         return `${key} = ${JSON.stringify(value)} (${source === 'workspace' ? where(workspace) : source})`;
     }
     if (args.action === UNSET) {
-        if (workspace === null) deleteSetting(db, key);
-        else setWorkspaceSetting(db, workspace.id, key, undefined);
-        return `${key} unset (${where(workspace)})`;
+        const { note } = applyChange(db, key, workspace, () => undefined);
+        return `${key} unset (${where(workspace)})${note}`;
     }
-    let value: unknown;
+    let parsed: unknown;
     try {
-        value = def.parse(args.values);
+        parsed = def.parse(args.values);
     } catch (error) {
         throw new Error(`Invalid value for ${key}: ${(error as Error).message}`);
     }
-    if (workspace === null) setSetting(db, key, value);
-    else setWorkspaceSetting(db, workspace.id, key, value);
-    return `${key} = ${JSON.stringify(value)} (${where(workspace)})`;
+    const combine = def.combine;
+    const { value, note } = applyChange(db, key, workspace, stored => (combine === undefined ? parsed : combine(stored, parsed)));
+    return `${key} ${value === undefined ? 'unset' : `= ${JSON.stringify(value)}`} (${where(workspace)})${note}`;
 }

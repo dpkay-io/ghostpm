@@ -8,6 +8,7 @@ import { taskBranchName } from '../../src/ledger/branch';
 import { Phase, TaskRow } from '../../src/ledger/types';
 import { readPayload } from '../../src/hook/payload';
 import { handleWith, HOOK_CLIENT } from '../../src/hook/handlers';
+import { setWorkspaceSetting, COMPLETION_REVIEW, SETTING_COMPLETION } from '../../src/ledger/settings';
 
 const SESSION_ID = 'claude-prompt';
 
@@ -53,6 +54,17 @@ describe('UserPromptSubmit handler', () => {
         expect(text).toContain('in_progress');
         expect(text).not.toContain('Something else');
         expect(text).not.toContain('track_work');
+    });
+
+    it('adds the completion guidance to the attached task only under completion review', () => {
+        const active = task('Login fix');
+        startSession(ledger.db, { id: SESSION_ID, client: HOOK_CLIENT, cwd: repo, workspaceId });
+        setSessionTask(ledger.db, SESSION_ID, active.id);
+        expect(promptSubmit()).toBe(`Active: T${active.id} Login fix · in_progress`);
+        setWorkspaceSetting(ledger.db, workspaceId, SETTING_COMPLETION, COMPLETION_REVIEW);
+        const text = promptSubmit()!;
+        expect(text.split('\n')[0]).toBe(`Active: T${active.id} Login fix · in_progress`);
+        expect(text).toContain(`update_task task_id=T${active.id} verified=`);
     });
 
     it('injects the instruction and candidates when no task is attached', () => {

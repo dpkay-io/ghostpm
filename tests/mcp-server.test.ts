@@ -13,8 +13,9 @@ import { ensureWorkspace } from '../src/ledger/workspaces';
 import { recordEvent } from '../src/ledger/events';
 import { SINCE_HELP } from '../src/surfaces/since';
 import { createTask, updateTask, insertVendorLink, getTask, NewTask } from '../src/ledger/tasks';
+import { recordEvidence } from '../src/ledger/work';
 import {
-    setSetting, setSyncPause, setWorkspaceSetting, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
+    setSetting, setSyncPause, setWorkspaceSetting, COMPLETION_REVIEW, SETTING_COMPLETION, SETTING_CREATE_BRANCH, SETTING_CURRENT_USER, SETTING_SYNC_POLICY,
     SYNC_POLICY_AUTO, SYNC_POLICY_LINKED_ONLY, SYNC_POLICY_OFF, SYNC_POLICY_PROMOTE,
 } from '../src/ledger/settings';
 import * as ledgerTypes from '../src/ledger/types';
@@ -327,6 +328,43 @@ describe('mcp server on the ledger', () => {
         expect(await call('update_task', { task_id: `T${existing.id}`, phase: 'in_review', comment: 'PR up' })).toContain('in_review');
         expect(getTask(db, existing.id)!.human_phase_at).not.toBeNull();
         expect(await call('update_task', { task_id: 'T999', phase: 'done' })).toBe('Task T999 not found.');
+    });
+
+    describe('verified (completion review)', () => {
+        const callRaw = async (args: Record<string, unknown>) =>
+            await client.callTool({ name: 'update_task', arguments: args }) as { isError?: boolean; content: { text: string }[] };
+        const trackAndCommit = async (): Promise<string> => {
+            const id = (await call('track_work', { title: 'Login fix', intent: 'implement' })).match(/T\d+/)![0];
+            recordEvidence(db, { taskId: Number(id.slice(1)), sessionId: SESSION_ID, source: 'test', workspaceId, cwd: dir, files: [], committed: true, prUrls: [] });
+            return id;
+        };
+
+        it('is refused under ask, the default, and the phase stays', async () => {
+            const id = await trackAndCommit();
+            const refused = await callRaw({ task_id: id, verified: 'npm test passed' });
+            expect(refused.isError).toBe(true);
+            expect(refused.content[0].text).toContain('completion is ask');
+            expect(getTask(db, Number(id.slice(1)))!.phase).toBe('in_progress');
+            expect(await call('get_project_state')).toContain('**Completion:** ask (Claude changes a phase only when you ask)');
+        });
+
+        it('moves the session\'s committed task to in_review under review, as Claude\'s change, not the user\'s', async () => {
+            setWorkspaceSetting(db, workspaceId, SETTING_COMPLETION, COMPLETION_REVIEW);
+            const id = await trackAndCommit();
+            expect(await call('update_task', { task_id: id, verified: 'npm test: 12 passed' })).toBe(`${id} updated: verified, phase in_review.`);
+            expect(getTask(db, Number(id.slice(1)))).toMatchObject({ phase: 'in_review', human_phase_at: null });
+            expect(await call('get_task', { task_id: id })).toContain('Verified: npm test: 12 passed');
+            expect(await call('get_project_state')).toContain('**Completion:** review');
+        });
+
+        it('never sets done or dropped: verified with another phase is an error', async () => {
+            setWorkspaceSetting(db, workspaceId, SETTING_COMPLETION, COMPLETION_REVIEW);
+            const id = await trackAndCommit();
+            const refused = await callRaw({ task_id: id, verified: 'tests pass', phase: 'done' });
+            expect(refused.isError).toBe(true);
+            expect(refused.content[0].text).toContain('verified moves a task to in_review only');
+            expect(getTask(db, Number(id.slice(1)))!.phase).toBe('in_progress');
+        });
     });
 
     it('merges duplicates and reports refusals as errors', async () => {

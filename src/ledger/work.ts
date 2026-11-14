@@ -1,12 +1,13 @@
 import * as path from 'path';
 import { Ledger, write, nowIso } from './db';
 import { recordEvent } from './events';
-import { applyPhaseChange, bumpRevision, getTask, getVendorLink, insertTaskRow, resolveTaskRef, ChangeContext } from './tasks';
-import { setSessionTask } from './sessions';
-import { readSetting, SETTING_PLAN_GLOBS } from './settings';
+import { applyPhaseChange, bumpRevision, getTask, getVendorLink, insertTaskRow, recordComment, resolveTaskRef, ChangeContext } from './tasks';
+import { getSession, setSessionTask } from './sessions';
+import { COMPLETION_ASK, COMPLETION_REVIEW, readSetting, SETTING_PLAN_GLOBS } from './settings';
+import { VERIFIED_PHASE, VERIFIED_PREFIX, completionOf } from './completion';
 import { followLinks, getWorkspace } from './workspaces';
 import { matchesAnyGlob } from './glob';
-import { CLOSED_PHASES, INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
+import { CLOSED_PHASES, EventKind, INTENT_PHASE, Intent, Phase, TaskRow, formatTaskId } from './types';
 import { enqueueCloseDuplicate, handOverVendorItem, projectTask } from './projection';
 
 /** Forward order for automatic phase moves; done and dropped are terminal. */
@@ -196,5 +197,71 @@ export function recordEvidence(db: Ledger, input: EvidenceInput): TaskRow {
         // Spec §8.2 promote: the first commit or PR publishes a task that was not pushed yet.
         if (input.committed || input.prUrls.length > 0) projectTask(db, recorded, 'evidence', at);
         return recorded;
+    });
+}
+
+/** What counts as delivered work: a commit, or a pull request. */
+const DELIVERY_KINDS: readonly EventKind[] = ['commit', 'pr'];
+const PHASE_KIND: EventKind = 'phase';
+
+export interface VerifiedInput {
+    taskId: number;
+    sessionId: string;
+    source: string;
+    /** What Claude checked: the tests or build it ran and their result. Recorded and posted as the task's comment. */
+    verified: string;
+}
+
+export interface VerifiedResult {
+    task: TaskRow;
+    /** False when the task already was in_review: only the verification was recorded. */
+    moved: boolean;
+}
+
+/** Whether the task has a commit or PR recorded since it last left done or dropped (older work was already delivered). */
+function hasDeliverySinceReopen(db: Ledger, taskId: number): boolean {
+    const closed = Array.from(CLOSED_PHASES);
+    return db.prepare(`
+        SELECT 1 FROM events
+        WHERE task_id = ? AND kind IN (${DELIVERY_KINDS.map(() => '?').join(', ')})
+          AND seq > COALESCE((
+              SELECT MAX(seq) FROM events
+              WHERE task_id = ? AND kind = ? AND json_extract(payload, '$.from') IN (${closed.map(() => '?').join(', ')})), 0)
+        LIMIT 1`)
+        .get(taskId, ...DELIVERY_KINDS, taskId, PHASE_KIND, ...closed) !== undefined;
+}
+
+/**
+ * Claude's own move of verified work to in_review, allowed only when every guard holds, so nothing moves by accident:
+ * completion is review for the task's workspace, the task is the one this session works on, it is open, it has a
+ * commit or PR since it was last reopened, and the verification says what was checked. Not a human change: a later
+ * edit by a person, or a merged PR, still moves it on.
+ */
+export function markVerified(db: Ledger, input: VerifiedInput): VerifiedResult {
+    return write(db, () => {
+        const task = getTask(db, input.taskId);
+        if (!task) throw new Error(`Task ${formatTaskId(input.taskId)} not found`);
+        const id = formatTaskId(task.id);
+        const verified = input.verified.trim();
+        if (verified.length === 0) throw new Error('verified must say what you checked (the tests or build you ran, and their result).');
+        if (completionOf(db, task) !== COMPLETION_REVIEW) {
+            throw new Error(`completion is ${COMPLETION_ASK} for ${id}'s workspace: change its phase only when the user asks.`);
+        }
+        if (getSession(db, input.sessionId)?.task_id !== task.id) {
+            throw new Error(`${id} is not the task this session works on: only the session's own task can be marked verified. Ask the user.`);
+        }
+        if (CLOSED_PHASES.has(task.phase)) throw new Error(`${id} is ${task.phase}: verified work goes to ${VERIFIED_PHASE} only from an open phase.`);
+        if (!hasDeliverySinceReopen(db, task.id)) {
+            throw new Error(`${id} has no commit or PR recorded yet: commit the verified work first, then mark it verified.`);
+        }
+        const at = nowIso();
+        const ctx: ChangeContext = { source: input.source, sessionId: input.sessionId, human: false };
+        const moved = advancePhase(db, task, VERIFIED_PHASE, ctx, at);
+        if (!moved && task.phase !== VERIFIED_PHASE) {
+            throw new Error(`${id} was not moved to ${VERIFIED_PHASE}: the user changed its phase after this evidence. Ask the user.`);
+        }
+        bumpRevision(db, task.id, at);
+        recordComment(db, getTask(db, task.id)!, `${VERIFIED_PREFIX}${verified}`, ctx, at);
+        return { task: getTask(db, task.id)!, moved };
     });
 }

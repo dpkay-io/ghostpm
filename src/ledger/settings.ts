@@ -1,6 +1,6 @@
 import { Ledger, write } from './db';
 import { DEFAULT_STALE_SESSION_MINUTES } from './sessions';
-import { PHASES, Phase, isPhase } from './types';
+import { CLOSED_PHASES, PHASES, Phase, isPhase } from './types';
 
 export const SETTING_CREATE_BRANCH = 'create_branch';
 export const SETTING_STALE_SESSION_MINUTES = 'stale_session_minutes';
@@ -13,6 +13,17 @@ export const SETTING_PROGRESS_COMMENTS = 'progress_comments';
 export const SETTING_PHASE_STATE_MAP = 'phase_state_map';
 export const SETTING_ADO_WORK_ITEM_TYPE = 'ado_work_item_type';
 export const SETTING_PLAN_GLOBS = 'plan_globs';
+/** GitHub: what every phase label starts with (`ghostpm:in_progress`). May be empty (`in_progress`). */
+export const SETTING_LABEL_PREFIX = 'label_prefix';
+/** GitHub: a label of your own for a phase, in place of the prefixed one (`in_progress=In progress`). */
+export const SETTING_PHASE_LABEL_MAP = 'phase_label_map';
+/** How far Claude may move a task on its own once it has verified the work (`ask`, `review`). */
+export const SETTING_COMPLETION = 'completion';
+/**
+ * Workspace, internal: phase labels an earlier label_prefix or phase_label_map gave, label to phase. They still read
+ * as that phase, and the next push of the item replaces them with the current label.
+ */
+export const SETTING_RETIRED_PHASE_LABELS = 'retired_phase_labels';
 export const SETTING_SYNC_PULL_MINUTES = 'sync_pull_minutes';
 export const SETTING_MAX_PUSH_ATTEMPTS = 'max_push_attempts';
 /** Workspace, internal: why sync is paused there (spec §8.8). Absent means not paused. */
@@ -42,6 +53,28 @@ export const PROGRESS_COMMENTS_NONE = 'none';
 /** `session` and `turn` (spec §8.2) are not built yet. */
 export const PROGRESS_COMMENT_MODES = [PROGRESS_COMMENTS_PHASE, PROGRESS_COMMENTS_NONE] as const;
 export type PhaseStateMap = Partial<Record<Phase, string>>;
+export type PhaseLabelMap = Partial<Record<Phase, string>>;
+/** Claude changes a phase only when the user asks (the default, and how 2.0 behaves). */
+export const COMPLETION_ASK = 'ask';
+/**
+ * Claude may move the task its session works on to in_review once it has verified the work and committed it, saying
+ * what it verified. Done still comes from a merged PR, the vendor (a close, or a closing keyword such as `Fixes #42`
+ * landing on the default branch) or the user.
+ */
+export const COMPLETION_REVIEW = 'review';
+export const COMPLETION_MODES = [COMPLETION_ASK, COMPLETION_REVIEW] as const;
+export type CompletionMode = typeof COMPLETION_MODES[number];
+/** The phases a GitHub label can show: a closed issue shows its phase by its close reason and carries no phase label. */
+export const LABELLED_PHASES: readonly Phase[] = PHASES.filter(phase => !CLOSED_PHASES.has(phase));
+export const DEFAULT_LABEL_PREFIX = 'ghostpm:';
+/** GitHub's limit on a label name. */
+export const LABEL_NAME_LIMIT = 50;
+/** `gh issue create --label` and `gh issue edit --add-label` split their value on commas. */
+const LABEL_LIST_SEPARATOR = ',';
+const LONGEST_PHASE = Math.max(...LABELLED_PHASES.map(phase => phase.length));
+export const LABEL_PREFIX_LIMIT = LABEL_NAME_LIMIT - LONGEST_PHASE;
+/** C0 and C1 controls: never part of a label name. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
 
 export const DEFAULT_PLAN_GLOBS: readonly string[] = ['docs/**/{specs,plans}/**/*.md'];
 export const DEFAULT_SYNC_PULL_MINUTES = 5;
@@ -59,6 +92,11 @@ export interface SettingDef<T> {
     parse(values: readonly string[]): T;
     /** Guards stored JSON: anything it rejects reads as the default. */
     accepts(value: unknown): boolean;
+    /**
+     * For settings set a part at a time: what `ghostpm config set` stores, given the value already stored at that
+     * scope and the parsed one. undefined removes the value. Without it the parsed value replaces the stored one.
+     */
+    combine?(stored: unknown, parsed: T): T | undefined;
 }
 
 const MAP_SEPARATOR = '=';
@@ -132,24 +170,74 @@ function textList(fallback: readonly string[], scope: SettingScope): SettingDef<
     };
 }
 
-function phaseMap(scope: SettingScope): SettingDef<PhaseStateMap> {
-    const accepts = (value: unknown): boolean => value !== null && typeof value === 'object' && !Array.isArray(value)
-        && Object.keys(value as object).every(key => isPhase(key) && typeof (value as { [key: string]: unknown })[key] === 'string');
+/** What a value is refused for, or null: checks a value set for one phase. */
+type ValueCheck = (value: string) => string | null;
+
+const isPlainObject = (value: unknown): value is { [key: string]: unknown } =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * `phase=Value` pairs for `phases`. `ghostpm config set` merges them into the map already stored at that scope, and
+ * `phase=` with no value removes that phase; the whole map goes with `config unset`.
+ */
+function phaseMap(scope: SettingScope, phases: readonly Phase[], what: string, check: ValueCheck = () => null): SettingDef<PhaseStateMap> {
+    const allowed = (key: string): boolean => isPhase(key) && phases.indexOf(key) >= 0;
+    const accepts = (value: unknown): boolean => isPlainObject(value)
+        && Object.keys(value).every(key => allowed(key) && typeof value[key] === 'string' && (value[key] as string).length > 0
+            && check(value[key] as string) === null);
+    const pairHint = `phase${MAP_SEPARATOR}${what}`;
     return {
         scope, fallback: {}, accepts,
         parse: values => {
-            if (values.length === 0) throw new Error(`expects phase${MAP_SEPARATOR}State pairs`);
-            const map: PhaseStateMap = {};
+            if (values.length === 0) throw new Error(`expects ${pairHint} pairs (${'phase' + MAP_SEPARATOR} with no value removes one)`);
+            // Empty values mark a removal for combine; never stored as they are.
+            const patch: PhaseStateMap = {};
             for (const pair of values) {
                 const at = pair.indexOf(MAP_SEPARATOR);
                 const phase = pair.slice(0, at).trim();
-                const state = pair.slice(at + 1).trim();
-                if (at < 0 || !isPhase(phase) || state.length === 0) {
-                    throw new Error(`"${pair}" is not phase${MAP_SEPARATOR}State; phases are ${PHASES.join(', ')}`);
+                const value = pair.slice(at + 1).trim();
+                if (at < 0 || !allowed(phase)) {
+                    throw new Error(`"${pair}" is not ${pairHint}; phases are ${phases.join(', ')}`);
                 }
-                map[phase] = state;
+                const refused = value.length === 0 ? null : check(value);
+                if (refused !== null) throw new Error(`"${pair}": ${refused}`);
+                patch[phase as Phase] = value;
             }
-            return map;
+            return patch;
+        },
+        combine: (stored, patch) => {
+            const merged: PhaseStateMap = accepts(stored) ? { ...(stored as PhaseStateMap) } : {};
+            for (const phase of Object.keys(patch) as Phase[]) {
+                if (patch[phase] === '') delete merged[phase];
+                else merged[phase] = patch[phase];
+            }
+            return Object.keys(merged).length === 0 ? undefined : merged;
+        },
+    };
+}
+
+/** Why `name` cannot start a GitHub label (`whole`: cannot be one), or null. */
+function labelProblem(name: string, limit: number, whole: boolean): string | null {
+    if (name.indexOf(LABEL_LIST_SEPARATOR) >= 0) return 'a label cannot contain a comma (gh reads it as a list)';
+    if (CONTROL.test(name)) return 'a label cannot contain control characters';
+    if (name !== name.trimStart() || (whole && name !== name.trimEnd())) return 'a label cannot start or end with a space';
+    if (name.length > limit) return `at most ${limit} characters`;
+    return null;
+}
+
+const labelNameProblem = (name: string): string | null => labelProblem(name, LABEL_NAME_LIMIT, true);
+
+/** The label prefix: any text a label can start with, the empty prefix included (`ghostpm config set label_prefix ""`). */
+function labelPrefix(scope: SettingScope): SettingDef<string> {
+    const problem = (value: string): string | null => labelProblem(value, LABEL_PREFIX_LIMIT, false);
+    return {
+        scope, fallback: DEFAULT_LABEL_PREFIX,
+        accepts: value => typeof value === 'string' && problem(value) === null,
+        parse: values => {
+            const value = single(values);
+            const refused = problem(value);
+            if (refused !== null) throw new Error(`${refused} (use "" for no prefix)`);
+            return value;
         },
     };
 }
@@ -159,7 +247,10 @@ export const SETTING_DEFS = {
     [SETTING_SYNC_POLICY]: choice(SYNC_POLICIES, SYNC_POLICY_OFF, 'both'),
     [SETTING_PROGRESS_COMMENTS]: choice(PROGRESS_COMMENT_MODES, PROGRESS_COMMENTS_PHASE, 'both'),
     [SETTING_CREATE_BRANCH]: flag(false, 'both'),
-    [SETTING_PHASE_STATE_MAP]: phaseMap('workspace'),
+    [SETTING_PHASE_STATE_MAP]: phaseMap('workspace', PHASES, 'State'),
+    [SETTING_LABEL_PREFIX]: labelPrefix('both'),
+    [SETTING_PHASE_LABEL_MAP]: phaseMap('both', LABELLED_PHASES, 'Label', labelNameProblem),
+    [SETTING_COMPLETION]: choice(COMPLETION_MODES, COMPLETION_ASK, 'both'),
     [SETTING_ADO_WORK_ITEM_TYPE]: text(DEFAULT_ADO_WORK_ITEM_TYPE, 'workspace'),
     [SETTING_PLAN_GLOBS]: textList(DEFAULT_PLAN_GLOBS, 'both'),
     [SETTING_SYNC_PULL_MINUTES]: positiveInt(DEFAULT_SYNC_PULL_MINUTES, 'global'),

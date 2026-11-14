@@ -8,6 +8,7 @@ import { appendLog, SYNC_LOG_FILE } from '../hook/log';
 import { Runner, runCli, sweepArgDirs } from '../cli';
 import { AzureAdapter } from './azure';
 import { GitHubAdapter } from './github';
+import { phaseLabelsFor } from './phase-labels';
 import { MISSING_REMOTE, SYNCED_REMOTES, identityOf } from './identity';
 import { acquireLease, leaseHolder, leaseHolderId, releaseLease } from './lease';
 import { hasDueWork, outboxHealth, rearmFailed, releaseStaleClaims } from './outbox';
@@ -30,7 +31,7 @@ export function unusableRemote(workspace: WorkspaceRow): string {
 export function adapterFor(db: Ledger, workspace: WorkspaceRow, run: Runner = runCli): VendorAdapter {
     const identity = identityOf(workspace);
     if (identity === null) throw new SyncPausedError(unusableRemote(workspace));
-    if (identity.vendor === 'github') return new GitHubAdapter(identity.repo, run);
+    if (identity.vendor === 'github') return new GitHubAdapter(identity.repo, run, phaseLabelsFor(db, workspace.id));
     return new AzureAdapter(
         identity.org, identity.project,
         readSetting(db, workspace.id, SETTING_ADO_WORK_ITEM_TYPE), readSetting(db, workspace.id, SETTING_PHASE_STATE_MAP), run,

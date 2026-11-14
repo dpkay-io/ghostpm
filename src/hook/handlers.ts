@@ -5,6 +5,7 @@ import { HOOK_CLIENT, SessionInput, getSession, startSession, touchSession, endS
 import { activeTaskFor, currentBranch } from '../ledger/branch';
 import type * as Work from '../ledger/work';
 import { rankCandidates, renderCandidatePrompt } from './candidates';
+import { activeLine } from '../ledger/completion';
 import { listEvents } from '../ledger/events';
 import { TaskRow, WorkspaceRow, formatTaskId } from '../ledger/types';
 import type * as Schedule from '../sync/schedule';
@@ -97,7 +98,7 @@ function onUserPromptSubmit(db: Ledger, payload: HookPayload): string | null {
     const attachedId = getSession(db, payload.sessionId)?.task_id ?? null;
     if (attachedId !== null) {
         const attached = getTask(db, attachedId);
-        if (attached) return `Active: ${formatTaskId(attached.id)} ${attached.title} · ${attached.phase}`;
+        if (attached) return activeLine(db, attached);
     }
 
     return renderCandidatePrompt(rankCandidates(db, {

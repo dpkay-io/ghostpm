@@ -73,7 +73,7 @@ Just talk: "what am I working on?", "this is part of T12", "mark it done", "what
 | `track_work` | Create a task, or attach this session to an existing one. |
 | `query_tasks` | Tasks as a table. Filters: sprint, assignee (`@me`), phase, all workspaces. |
 | `get_task` | One task, with its vendor link and comments. |
-| `update_task` | Change the phase or title, add a comment, or `publish: true` to push the task to the vendor now (needed under `promote`). A phase change made here counts as yours: human wins over automation. |
+| `update_task` | Change the phase or title, add a comment, or `publish: true` to push the task to the vendor now (needed under `promote`). A phase change made here counts as yours: human wins over automation. With `verified`, Claude's own move of verified work to in_review, allowed only under `completion` `review` (see When a task is done). |
 | `merge_task` | Fold a duplicate into the task you keep. |
 | `timeline` | Recent events. `since` takes the same forms as `standup --since`. |
 | `set_sprint` | Pick the milestone `query_tasks` defaults to. |
@@ -91,11 +91,37 @@ Sync is off by default. Nothing is pushed, pulled or queued until you turn it on
 Once on, a workspace whose git remote is on GitHub or Azure DevOps syncs with that tracker:
 
 - New tasks become issues or work items, as `sync_policy` says.
-- Phase changes move the label (GitHub `ghostpm:<phase>`) or the state (Azure DevOps `phase_state_map`). Done and dropped close the item.
+- Phase changes move the label on GitHub (`ghostpm:<phase>` by default, see `label_prefix` and `phase_label_map`) or the state on Azure DevOps (`phase_state_map`). Done closes the item as completed and dropped closes it as not planned; a closed GitHub issue carries no phase label, so there is no `done` label.
 - Edits made in the tracker come back when GhostPM pulls.
 - Anything that looks like a secret (tokens, keys, passwords, private keys) is replaced with `[redacted]` before it is sent to a vendor. A note goes to `sync.log`.
 
 One process syncs at a time. Pushes retry with backoff. A push that keeps failing shows as `⚠<n>` in the statusline and the dashboard. If `gh` or `az` is not logged in, that workspace pauses and shows the reason; `ghostpm sync` resumes it. Failures and redaction notes are written to `sync.log`.
+
+### When a task is done
+
+GhostPM moves a task to done in these cases, and no others:
+
+- A pull request recorded in a session (`gh pr create`, `az repos pr create`) merges. The next pull, every `sync_pull_minutes`, sees it.
+- The item is closed on the vendor, by a person or by the vendor itself: on GitHub, a commit or PR description with a closing keyword (`Fixes #42`) that reaches the default branch closes the issue, and the pull reads that as done (not planned or duplicate reads as dropped).
+- You say so ("mark T42 done").
+
+Commits alone never finish a task, and neither do passing tests. `completion` decides how far Claude may go by itself:
+
+- `ask` (the default): Claude changes a phase only when you ask, as before.
+- `review`: when Claude has verified the work of its session's own task (tests or build run and passing) and committed it, it calls `update_task` with `verified: "<what it ran and the result>"`. The task moves to in_review, and the verification is posted as a comment. On GitHub Claude also ends commit messages with `Refs #42`, and the final verified commit with `Fixes #42`, so GitHub links the commits and closes the issue itself once that commit reaches the default branch (a push or a merge you make). On Azure DevOps it mentions `#42` in commit messages to link them. Claude never marks a task done or dropped itself.
+
+GhostPM refuses a `verified` move unless all of these hold: `completion` is `review` for the task's workspace; the task is the one this session works on; it is open; it has a commit or PR recorded since it was last reopened; and the note is not empty. The move is not counted as yours, so a later change by you, or a merged PR, still moves the task on.
+
+Turn it on with `ghostpm config set completion review`, or for one repo with `--workspace <repo folder>`.
+
+### Phase labels on GitHub
+
+An open issue carries one phase label: `ghostpm:planned`, `ghostpm:in_progress` and so on. To change them:
+
+- `ghostpm config set label_prefix "status: "` gives `status: in_progress`; `ghostpm config set label_prefix ""` gives plain `in_progress`.
+- `ghostpm config set phase_label_map in_progress="In progress" in_review=Review` uses labels of your own (an existing repo label is reused as it is). Pairs are merged into the ones already set; `in_review=` removes one.
+
+Labels are matched without regard to case, as GitHub does. Two phases cannot share a label, and a label cannot contain a comma. After a change, every open linked issue whose label moved is relabelled on the next sync, keeping its other labels; the old labels still read as their phase until then. Closed issues are not touched.
 
 ## Settings
 
@@ -106,7 +132,10 @@ Change a setting with `ghostpm config set <key> <value>`. Add `--workspace <path
 | `sync_policy` | `off` (no sync), `auto` (push every task), `promote` (push on request, or on the first commit or PR), `linked-only` (never create vendor items; sync those already linked) | `off`; `ghostpm init` sets `auto` for its repo |
 | `progress_comments` | `phase` (comment on the vendor item when the phase changes), `none` | `phase` |
 | `create_branch` | `true` or `false`: check out `task/T42` when work starts | `false` |
-| `phase_state_map` | phase to Azure DevOps state pairs, workspace only | learned by `ghostpm init` |
+| `completion` | `ask` (Claude changes a phase only when you ask), `review` (Claude moves its own verified, committed work to in_review; see When a task is done) | `ask` |
+| `label_prefix` | what GitHub phase labels start with; `""` for none | `ghostpm:` |
+| `phase_label_map` | phase to GitHub label pairs for open phases, merged into the ones set; `phase=` removes one | none |
+| `phase_state_map` | phase to Azure DevOps state pairs, workspace only. Pairs are merged into the ones set; `phase=` removes one, `config unset` removes all | learned by `ghostpm init` |
 | `ado_work_item_type` | Azure DevOps work item type for new tasks, workspace only | `Task`, or learned by `ghostpm init` |
 | `plan_globs` | files that count as plans or specs | `docs/**/{specs,plans}/**/*.md` |
 | `sync_pull_minutes` | minutes between pulls, global only | `5` |

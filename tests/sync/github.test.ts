@@ -3,6 +3,7 @@ import { GitHubAdapter, githubPhaseOf, githubShowsPhase, GH_LOGGED_OUT, GH_MISSI
 import { GoneError, SyncPausedError, VENDOR_CALL_TIMEOUT_MS } from '../../src/sync/vendor';
 import { LEASE_TTL_MS } from '../../src/sync/lease';
 import { Phase } from '../../src/ledger/types';
+import { phaseLabelsFrom } from '../../src/sync/phase-labels';
 
 interface Call { command: string; args: CliArg[]; input?: string }
 type Reply = string | Error;
@@ -45,10 +46,10 @@ describe('GitHubAdapter', () => {
         const gh = fakeGh({ 'issue create': `https://github.com/${repo}/issues/12\n`, 'issue view': issueJson(repo) });
         const item = await new GitHubAdapter(repo, gh.run).create({ title: 'Fix a&b "q"', phase: 'planned' }, 'Tracked by GhostPM as T1.');
         expect(gh.calls).toEqual([
-            { command: 'gh', args: ['label', 'create', 'ghostpm:planned', '--repo', freeText(repo)], input: undefined },
+            { command: 'gh', args: ['label', 'create', freeText('ghostpm:planned'), '--repo', freeText(repo)], input: undefined },
             {
                 command: 'gh',
-                args: ['issue', 'create', '--repo', freeText(repo), '--title', freeText('Fix a&b "q"'), '--label', 'ghostpm:planned', '--body-file', '-'],
+                args: ['issue', 'create', '--repo', freeText(repo), '--title', freeText('Fix a&b "q"'), '--label', freeText('ghostpm:planned'), '--body-file', '-'],
                 input: 'Tracked by GhostPM as T1.',
             },
             { command: 'gh', args: ['issue', 'view', '12', '--repo', freeText(repo), '--json', ISSUE_FIELDS], input: undefined },
@@ -101,11 +102,59 @@ describe('GitHubAdapter', () => {
             { title: 'Renamed', phase: 'in_progress' },
         );
         expect(gh.calls.map(call => call.args)).toEqual([
-            ['label', 'create', 'ghostpm:in_progress', '--repo', freeText(repo)],
+            ['label', 'create', freeText('ghostpm:in_progress'), '--repo', freeText(repo)],
             ['issue', 'edit', '12', '--repo', freeText(repo), '--title', freeText('Renamed'),
-                '--remove-label', freeText('ghostpm:planned'), '--add-label', 'ghostpm:in_progress'],
+                '--remove-label', freeText('ghostpm:planned'), '--add-label', freeText('ghostpm:in_progress')],
             ['issue', 'view', '12', '--repo', freeText(repo), '--json', ISSUE_FIELDS],
         ]);
+    });
+
+    describe('with labels of its own (label_prefix, phase_label_map)', () => {
+        const custom = phaseLabelsFrom('', { in_review: 'Ready for review' }, { 'old-planned': 'planned' });
+
+        it('creates and applies the configured label', async () => {
+            const repo = freshRepo();
+            const gh = fakeGh({ 'issue create': `https://github.com/${repo}/issues/12\n`, 'issue view': issueJson(repo, { labels: ['planned'] }) });
+            await new GitHubAdapter(repo, gh.run, custom).create({ title: 'One', phase: 'planned' }, 'body');
+            expect(gh.calls[0].args).toEqual(['label', 'create', freeText('planned'), '--repo', freeText(repo)]);
+            expect(gh.calls[1].args).toContainEqual(freeText('planned'));
+        });
+
+        it('replaces the default, retired and current labels, and never touches labels that are not phase labels', async () => {
+            const repo = freshRepo();
+            const gh = fakeGh({ 'issue view': issueJson(repo, { labels: ['bug', 'Ready for review'] }) });
+            await new GitHubAdapter(repo, gh.run, custom).syncState(
+                { remoteId: '12', state: 'open', labels: ['bug', 'ghostpm:planned', 'old-planned', 'In_Progress', 'enhancement'] },
+                { title: 'T', phase: 'in_review' },
+            );
+            const edit = gh.calls.find(call => call.args[1] === 'edit')!.args;
+            const removed = edit.flatMap((arg, at) => (arg === '--remove-label' ? [edit[at + 1]] : []));
+            expect(removed).toEqual([freeText('ghostpm:planned'), freeText('old-planned'), freeText('In_Progress')]);
+            expect(edit).toContainEqual(freeText('Ready for review'));
+        });
+
+        it('matches labels without regard to case, as GitHub does: a label already there is not added again', async () => {
+            const repo = freshRepo();
+            const gh = fakeGh({ 'issue view': issueJson(repo, { labels: ['ready for review'] }) });
+            await new GitHubAdapter(repo, gh.run, custom).syncState(
+                { remoteId: '12', state: 'open', labels: ['ready for review'] }, { title: 'T', phase: 'in_review' },
+            );
+            const edit = gh.calls.find(call => call.args[1] === 'edit')!.args;
+            expect(edit).not.toContain('--add-label');
+            expect(edit).not.toContain('--remove-label');
+        });
+
+        it('reads the phase from current, default and retired labels, and says it shows a phase only with the current label', () => {
+            expect(githubPhaseOf('open', ['READY FOR REVIEW'], 'planned', custom)).toBe('in_review');
+            expect(githubPhaseOf('open', ['ghostpm:in_progress'], 'planned', custom)).toBe('in_progress');
+            expect(githubPhaseOf('open', ['old-planned'], 'in_progress', custom)).toBe('planned');
+            expect(githubPhaseOf('open', ['bug'], 'in_progress', custom)).toBe('in_progress');
+            expect(githubPhaseOf('open', ['ghostpm:planned', 'in_progress'], 'planned', custom)).toBe('in_progress');
+            expect(githubPhaseOf('open', ['ghostpm:planned', 'ghostpm:in_progress'], 'planned')).toBe('planned');
+            expect(githubShowsPhase('open', ['bug', 'in_progress'], 'in_progress', custom)).toBe(true);
+            expect(githubShowsPhase('open', ['ghostpm:in_progress'], 'in_progress', custom)).toBe(false);
+            expect(githubShowsPhase('closed:completed', ['bug'], 'done', custom)).toBe(true);
+        });
     });
 
     it.each([

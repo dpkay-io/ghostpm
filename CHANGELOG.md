@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0 (unreleased)
+
+- **Claude can move verified work on by itself, if you allow it.** New setting `completion`: `ask` (the default; no change in behaviour) or `review`. Under `review`, once Claude has verified and committed its session's own task, `update_task` with `verified: "<what it ran and the result>"` moves the task to in_review and posts the verification as a comment. GhostPM refuses the move unless the task is this session's, is open, and has a commit or PR recorded since it was last reopened. Claude never sets done or dropped itself. On GitHub it ends commit messages with `Refs #N`, and the final verified commit with `Fixes #N`, so GitHub links the commits and closes the issue once that commit reaches the default branch; the next pull reads the close as done. `get_project_state` shows the mode.
+- **Phase labels can be renamed.** `label_prefix` (default `ghostpm:`, `""` for none) and `phase_label_map` (`in_progress="In progress"`) set the GitHub labels, globally or per workspace. Open linked issues are relabelled on the next sync, and their other labels are kept. The old labels still read as their phase until then. Labels are matched without regard to case. Two phases sharing a label, or a comma in a label, are refused.
+- **`config set phase_state_map` merges.** Setting one pair used to replace the whole map, dropping every other phase's state, so pushes for those phases failed. Pairs are now merged into the map already set; `phase=` removes one, and `config unset` removes them all.
+
 ## 2.0.1 (2026-10-18)
 
 - **Switching Node.js no longer breaks GhostPM.** The SQLite addon is now built once per Node.js version, under `~/.ghostpm/native/<platform>-<arch>-<ABI>/`. Before, an addon built for one Node.js made the MCP server fail to start under another, and `ghostpm bootstrap` reported success while leaving the old addon in place. After upgrading, the first session rebuilds the addon in the background once; the 2.0.0 file `native/better_sqlite3.node` is no longer read and is safe to delete.

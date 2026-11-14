@@ -12,7 +12,7 @@ import { getTask, getVendorLink, listTasks, resolveTaskRef, updateTask } from ".
 import { listEvents } from "./ledger/events";
 import { renderEvent } from "./surfaces/render-event";
 import { parseSince } from "./surfaces/since";
-import { mergeTask, trackWork } from "./ledger/work";
+import { markVerified, mergeTask, trackWork } from "./ledger/work";
 import { activeTaskFor, taskBranchName } from "./ledger/branch";
 import {
     CLAUDE_SESSION_ENV, HOOK_CLIENT, MCP_CLIENT, currentSessionOf, endSession, getSession, listLiveSessions, mcpSessionId,
@@ -33,6 +33,7 @@ import { dashboardText } from "./surfaces/dashboard";
 import { SERVER_NAME, packageVersion } from "./package-info";
 import { systemTool } from "./cli";
 import { cleanText } from "./surfaces/text";
+import { VERIFIED_PHASE, describeCompletion } from "./ledger/completion";
 
 const execFileAsync = promisify(execFile);
 
@@ -89,7 +90,7 @@ const SERVER_INSTRUCTIONS = `You have access to GhostPM — a local-first task l
 ## Writing
 
 6. \`track_work\` — call it when a prompt starts real work (brainstorm, plan, detail out, implement, fix). Attach to an existing task when one matches (pass task_id); otherwise omit task_id to create one. Ask the user once, inline, when you are unsure which task. Never call it for questions or lookups.
-7. \`update_task\` — phase, title or comment. Only change the phase when the user asks; phases otherwise follow evidence.
+7. \`update_task\` — phase, title or comment. Only change the phase when the user asks; phases otherwise follow evidence. The one exception: when the prompt context says \`Completion: review\`, pass \`verified\` (what you ran and its result) once you have verified and committed the session's own task; it moves to ${VERIFIED_PHASE}. Never set done or dropped on your own.
 8. \`merge_task\` — when two tasks turn out to be the same piece of work.
 9. \`timeline\` — what happened recently, for standups and recaps. \`since\` takes 36h, 2d, yesterday or a date; add \`all_workspaces\` for the whole machine.
 
@@ -320,6 +321,7 @@ export class PmServer {
                     `**Tasks:** ${tasks.length} total${summary ? ` — ${summary}` : ''}`,
                     `**Live Sessions:** ${listLiveSessions(this.db, staleMinutes).length}`,
                     `**Sync:** ${describeSync(this.db, workspace)}`,
+                    `**Completion:** ${describeCompletion(this.db, workspace.id)}`,
                 ].join('\n'));
             },
         );
@@ -463,28 +465,37 @@ export class PmServer {
 
         this.server.tool(
             "update_task",
-            "Change a task's phase or title, add a comment, or publish it to GitHub / Azure DevOps. Only change the phase or publish when the user asks for it.",
+            `Change a task's phase or title, add a comment, or publish it to GitHub / Azure DevOps. Only change the phase or publish when the user asks for it, except \`verified\`, which needs no ask where completion is review.`,
             {
                 task_id: z.string().describe('T42, #42 or 42.'),
                 phase: z.enum(PHASES).optional().describe('New phase.'),
                 title: z.string().optional().describe('New title.'),
                 comment: z.string().optional().describe('Comment to record on the task.'),
                 publish: z.boolean().optional().describe('Push this task to the vendor now. Needed under sync_policy "promote"; does nothing while sync_policy is "off".'),
+                verified: z.string().optional().describe(`Only where completion is review, on your own initiative: what you verified (tests or build you ran and the result) for this session's own task, after committing it. Moves it to ${VERIFIED_PHASE} and posts this as its comment. Refused anywhere else.`),
             },
-            async ({ task_id, phase, title, comment, publish }) => {
+            async ({ task_id, phase, title, comment, publish, verified }) => {
                 const workspace = this.context();
-                if (!phase && !title && !comment && !publish) return text('Provide a phase, a title, a comment or publish.');
+                if (!phase && !title && !comment && !publish && verified === undefined) return text('Provide a phase, a title, a comment, publish or verified.');
                 const task = resolveTaskRef(this.db, task_id, workspace.id);
                 if (!task) return text(`Task ${task_id} not found.`);
+                if (verified !== undefined && phase !== undefined && phase !== VERIFIED_PHASE) {
+                    return failure(new Error(`verified moves a task to ${VERIFIED_PHASE} only; leave phase out (done comes from a merged PR, the vendor or the user).`));
+                }
                 try {
+                    // Claude's own move, guarded (ledger/completion): not a human change.
+                    const review = verified === undefined ? null : markVerified(this.db, {
+                        taskId: task.id, sessionId: this.session(), source: this.source(), verified,
+                    });
+                    const verifiedNote = review === null ? '' : review.moved ? `verified, phase ${VERIFIED_PHASE}` : 'verification recorded';
                     // A tool call carries the user's instruction, so it counts as a human change (spec §8.6).
                     const ctx = { source: this.source(), sessionId: this.session(), human: true };
                     // Ruling F13: the publish goes after the phase and title (a task closed here is not published) and
                     // before the comment, which is queued only for a task on its way to the vendor.
-                    updateTask(this.db, task.id, { phase, title }, ctx);
+                    updateTask(this.db, task.id, { phase: review === null ? phase : undefined, title }, ctx);
                     const published = publish ? PUBLISH_NOTES[publishTask(this.db, task.id)] : '';
                     const updated = updateTask(this.db, task.id, { comment }, ctx);
-                    const changes = [phase ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '', published]
+                    const changes = [verifiedNote, phase && review === null ? `phase ${updated.phase}` : '', title ? 'renamed' : '', comment ? 'comment added' : '', published]
                         .filter(part => part.length > 0)
                         .join(', ');
                     const crossNote = this.crossWorkspaceNote(workspace.id, updated);

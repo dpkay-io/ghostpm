@@ -29,6 +29,7 @@ GhostPM keeps one local task ledger shared by every session on this machine. Use
 - **Unsure which task**: ask once, inline, then call `track_work`.
 - **Duplicate spotted**: call `merge_task`.
 - **Phases follow evidence.** Change a phase only when the user asks.
+- **Completion: review.** When the prompt context says `Completion: review`, and you have verified the session's own task (tests or build run and passing) and committed it, call `update_task` with `verified: "<what you ran and the result>"`. It moves to in_review. Follow the commit-message advice that line gives (`Refs #N`, and `Fixes #N` on the final verified commit for GitHub). Never set done or dropped yourself: a merged PR, the vendor or the user does.
 
 ## Rules
 

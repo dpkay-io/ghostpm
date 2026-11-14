@@ -109,20 +109,23 @@ export function updateTask(db: Ledger, id: number, update: TaskUpdate, ctx: Chan
         }
         // Re-read: the projection a phase change queues must see the title just set.
         if (rephased) applyPhaseChange(db, getTask(db, id)!, update.phase!, ctx, at);
-        if (comment.length > 0) {
-            recordEvent(db, { taskId: id, kind: 'comment', source: ctx.source, sessionId: ctx.sessionId, payload: { text: comment } }, at);
-        }
         if (renamed || rephased || comment.length > 0) bumpRevision(db, id, at);
         const updated = getTask(db, id)!;
-        if (ctx.source !== VENDOR_SOURCE) {
-            if (renamed) projectTask(db, updated, 'change', at);
-            if (comment.length > 0) {
-                projectTask(db, updated, 'comment', at);
-                enqueueComment(db, updated, comment, at);
-            }
-        }
+        if (renamed && ctx.source !== VENDOR_SOURCE) projectTask(db, updated, 'change', at);
+        if (comment.length > 0) recordComment(db, updated, comment, ctx, at);
         return updated;
     });
+}
+
+/**
+ * A comment on `task` (as it is after its revision was bumped): recorded locally and, unless it came from the vendor,
+ * projected and queued for it. Call inside write().
+ */
+export function recordComment(db: Ledger, task: TaskRow, text: string, ctx: ChangeContext, at: string): void {
+    recordEvent(db, { taskId: task.id, kind: 'comment', source: ctx.source, sessionId: ctx.sessionId, payload: { text } }, at);
+    if (ctx.source === VENDOR_SOURCE) return;
+    projectTask(db, task, 'comment', at);
+    enqueueComment(db, task, text, at);
 }
 
 /** T42 → local id, machine-global. #42 or 42 → vendor remote_id in the workspace, else local id 42 in that same workspace (spec §9.1). */
