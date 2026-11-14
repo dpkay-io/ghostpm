@@ -121,7 +121,7 @@ An open issue carries one phase label: `ghostpm:planned`, `ghostpm:in_progress` 
 - `ghostpm config set label_prefix "status: "` gives `status: in_progress`; `ghostpm config set label_prefix ""` gives plain `in_progress`.
 - `ghostpm config set phase_label_map in_progress="In progress" in_review=Review` uses labels of your own (an existing repo label is reused as it is). Pairs are merged into the ones already set; `in_review=` removes one.
 
-Labels are matched without regard to case, as GitHub does. Two phases cannot share a label, and a label cannot contain a comma. After a change, every open linked issue whose label moved is relabelled on the next sync, keeping its other labels; the old labels still read as their phase until then. Closed issues are not touched.
+Labels are matched without regard to case, as GitHub does. Two phases cannot share a label, and a label cannot contain a comma. After a change, every open linked issue that carries one of GhostPM's phase labels, and whose label moved, is relabelled on the next sync, keeping its other labels; the old labels still read as their phase until then. Closed issues, and issues that never carried a GhostPM label (filed on GitHub and not changed here), are not touched.
 
 ## Settings
 
