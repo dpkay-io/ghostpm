@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.0 (unreleased)
+## 2.1.0 (2026-11-14)
 
 - **Claude can move verified work on by itself, if you allow it.** New setting `completion`: `ask` (the default; no change in behaviour) or `review`. Under `review`, once Claude has verified and committed its session's own task, `update_task` with `verified: "<what it ran and the result>"` moves the task to in_review and posts the verification as a comment. GhostPM refuses the move unless the task is this session's, is open, and has a commit or PR recorded since it was last reopened. Claude never sets done or dropped itself. On GitHub it ends commit messages with `Refs #N`, and the final verified commit with `Fixes #N`, so GitHub links the commits and closes the issue once that commit reaches the default branch; the next pull reads the close as done. `get_project_state` shows the mode.
 - **Phase labels can be renamed.** `label_prefix` (default `ghostpm:`, `""` for none) and `phase_label_map` (`in_progress="In progress"`) set the GitHub labels, globally or per workspace. Open linked issues are relabelled on the next sync, and their other labels are kept. The old labels still read as their phase until then. Labels are matched without regard to case. Two phases sharing a label, or a comma in a label, are refused.
