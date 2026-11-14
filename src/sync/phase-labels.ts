@@ -5,6 +5,7 @@ import {
     SETTING_LABEL_PREFIX, SETTING_PHASE_LABEL_MAP, SETTING_RETIRED_PHASE_LABELS,
 } from '../ledger/settings';
 import { CLOSED_PHASES, Phase, TaskRow, WorkspaceRow, isPhase } from '../ledger/types';
+import { parseLabels } from './vendor';
 
 /** GitHub matches label names without regard to case: so does every comparison here. */
 const keyOf = (label: string): string => label.toLowerCase();
@@ -122,6 +123,8 @@ export function relabelChanged(db: Ledger, before: Map<number, Record<Phase, str
         const moved = LABELLED_PHASES.filter(phase => !sameLabel(old[phase], now[phase]));
         if (moved.length === 0) continue;
         const retired = retiredOf(db, workspace.id);
+        // Read before the old labels are retired: what counted as GhostPM's labels until this change.
+        const wasOurs = phaseLabelsFrom('', old, retired);
         // The default labels are always read as their phase: only the others need remembering.
         for (const phase of moved) if (!sameLabel(old[phase], `${DEFAULT_LABEL_PREFIX}${phase}`)) retired[old[phase]] = phase;
         // A label in use again is current, not retired.
@@ -129,20 +132,25 @@ export function relabelChanged(db: Ledger, before: Map<number, Record<Phase, str
             for (const label of Object.keys(retired)) if (sameLabel(label, now[phase])) delete retired[label];
         }
         setWorkspaceSetting(db, workspace.id, SETTING_RETIRED_PHASE_LABELS, Object.keys(retired).length === 0 ? undefined : retired);
-        queued += requeueOpenLinked(db, workspace, moved, at);
+        queued += requeueOpenLinked(db, workspace, moved, wasOurs, at);
     }
     return queued;
 }
 
-/** Open tasks in `phases` with a working link: the vendor no longer shows what was last pushed, so each pushes again. */
-function requeueOpenLinked(db: Ledger, workspace: WorkspaceRow, phases: readonly Phase[], at: string): number {
-    const tasks = db.prepare(`
-        SELECT t.* FROM tasks t JOIN vendor_links l ON l.task_id = t.id
+/**
+ * Open tasks in `phases` with a working link whose item, as last seen, carries one of GhostPM's labels (`wasOurs`): it
+ * no longer shows what was last pushed, so it pushes again. An item that never carried one (imported from the vendor
+ * and never changed here) is left as it is: a rename is no reason to label it.
+ */
+function requeueOpenLinked(db: Ledger, workspace: WorkspaceRow, phases: readonly Phase[], wasOurs: PhaseLabels, at: string): number {
+    const rows = db.prepare(`
+        SELECT t.*, l.labels AS link_labels FROM tasks t JOIN vendor_links l ON l.task_id = t.id
         WHERE t.workspace_id = ? AND l.broken_at IS NULL AND t.phase IN (${phases.map(() => '?').join(', ')})
         ORDER BY t.id`)
-        .all(workspace.id, ...phases) as TaskRow[];
+        .all(workspace.id, ...phases) as (TaskRow & { link_labels: string | null })[];
+    const tasks = rows.filter(row => parseLabels(row.link_labels).some(label => wasOurs.isOurs(label)));
     let queued = 0;
-    for (const task of tasks) {
+    for (const { link_labels: _labels, ...task } of tasks) {
         db.prepare('UPDATE vendor_links SET last_pushed_rev = NULL WHERE task_id = ?').run(task.id);
         if (projectTask(db, task, 'change', at) === 'sync_queued') queued++;
     }

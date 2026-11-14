@@ -201,6 +201,19 @@ describe('phase labels', () => {
             expect(getVendorLink(ledger.db, open.id)!.last_pushed_rev).toBe(getTask(ledger.db, open.id)!.rev);
         });
 
+        it('never labels an issue that carries no GhostPM label (imported from GitHub and not changed here)', async () => {
+            const imported = linked('21', 'planned', ['enhancement']);
+            const labelled = linked('22', 'planned', ['ghostpm:planned']);
+
+            expect(config('set', 'label_prefix', '', '--workspace', repo)).toContain('1 open issue will be relabelled');
+            expect(outboxRows(ledger.db, imported.id)).toEqual([]);
+            await pushDue(ledger.db, deps);
+
+            expect(gh.labels.get('21')).toEqual(['enhancement']);
+            expect(gh.labels.get('22')).toEqual(['planned']);
+            expect(outboxRows(ledger.db, labelled.id).map(row => row.status)).toEqual(['done']);
+        });
+
         it('replaces the label of a custom prefix that is retired again, and keeps reading it until then', async () => {
             config('set', 'label_prefix', 'wip-', '--workspace', repo);
             linked('9', 'in_review', ['wip-in_review']);
